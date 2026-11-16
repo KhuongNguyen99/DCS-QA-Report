@@ -1267,7 +1267,7 @@ function RecordPanel({
             onClick={() => input.current.click()}
           >
             <Icon name="upload" size={16} />
-            Upload
+            Upload photos
           </button>
           <button
             className="small-button green"

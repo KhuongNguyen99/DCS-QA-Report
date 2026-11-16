@@ -1,6 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2.119.0";
-import { ElevenLabsClient } from "npm:@elevenlabs/elevenlabs-js@2.78.0";
 import { createVoiceHandler } from "./handler.js";
+import { createVoiceSdkClient } from "./sdk-client.js";
 
 Deno.serve(
   createVoiceHandler({
@@ -27,7 +27,6 @@ Deno.serve(
           fetch: (input, init) => fetch(input, { ...init, signal }),
         },
       }),
-    createElevenLabsClient: (apiKey: string) =>
-      new ElevenLabsClient({ apiKey, maxRetries: 0, timeoutInSeconds: 50 }),
+    createElevenLabsClient: createVoiceSdkClient,
   }),
 );
