@@ -121,6 +121,7 @@ function App() {
     }
   }, [config]);
   const connected = Boolean(state.inspector);
+  const reportRevision = state.project?.revision ?? schedule.project.revision;
   const totals = inspectionProgress(schedule.devices, schedule.groups, state);
 
   const refresh = useCallback(async () => {
@@ -264,7 +265,7 @@ function App() {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `DCS-QA-Report-${new Date().toISOString().slice(0, 10)}.pdf`;
+      anchor.download = `450k-Skid-x7-DCS-QA-Report-Rev${snapshot.project?.revision ?? reportRevision}-${new Date().toLocaleDateString("en-CA")}.pdf`;
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 60000);
       setNotice("PDF report exported with the current shared evidence.");
@@ -292,8 +293,8 @@ function App() {
         </a>
         <div className="project-tag">
           <span className="eyebrow">CURRENT PROJECT</span>
-          <strong>450k skid x7</strong>
-          <span>DCS · Revision 3</span>
+          <strong>450k Skid x7</strong>
+          <span>DCS · QA Revision {reportRevision}</span>
         </div>
         <nav aria-label="Main navigation">
           {[
@@ -745,7 +746,9 @@ function App() {
                   <Icon name="report" size={32} />
                 </div>
                 <div>
-                  <span className="eyebrow">450K SKID X7 · REVISION 3</span>
+                  <span className="eyebrow">
+                    450K SKID X7 · REVISION {reportRevision}
+                  </span>
                   <h2>Your inspection, in one report</h2>
                   <p>
                     Includes all 28 devices, 8 terminal groups, photos,
@@ -885,7 +888,7 @@ function App() {
             <span>Jeevy Fabrication · DCS Field QA</span>
             <span>
               {connected ? "Private shared workspace" : "Project preview"}
-              <i>·</i>Revision 3
+              <i>·</i>Revision {reportRevision}
             </span>
           </footer>
         </main>

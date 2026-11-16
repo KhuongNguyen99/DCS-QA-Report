@@ -1,6 +1,14 @@
 -- Add whole-walkdown comments to an existing deployment. Keeps all existing
 -- comments and the 28 device / 8 terminal catalog unchanged. Safe to rerun.
+-- For older deployments, install report-revisions.sql before this migration.
 begin;
+do $$
+begin
+  if to_regclass('public.qa_project') is null then
+    raise exception 'Run report-revisions.sql before this version of walkdown-comments.sql.';
+  end if;
+end;
+$$;
 alter table public.qa_comments alter column record_key drop not null;
 
 create or replace function public.qa_load_state()
@@ -9,7 +17,8 @@ declare result jsonb;
 begin
   perform qa_private.require_inspector();
   select jsonb_build_object(
-    'project', jsonb_build_object('title', '450k skid x7 - DCS', 'revision', 3),
+    'project', (select jsonb_build_object('title', '450k Skid x7 - DCS', 'revision', p.revision,
+      'scheduleRevision', 3, 'updatedAt', p.updated_at) from public.qa_project p where p.id = 1),
     'inspector', (select jsonb_build_object('id', u.id, 'email', u.email, 'name', i.display_name, 'isAdmin', i.is_admin)
       from auth.users u join public.qa_inspectors i on i.email = lower(u.email) where u.id = auth.uid()),
     'records', coalesce((select jsonb_agg(jsonb_build_object(

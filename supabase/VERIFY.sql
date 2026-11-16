@@ -9,13 +9,22 @@ select
   (select not public from storage.buckets where id = 'qa-evidence') as private_bucket_expected_true,
   (select active and is_admin from public.qa_inspectors where email = 'khuong@jeevyfabrication.com') as admin_enabled_expected_true;
 
+-- Expected: one protected metadata row, revision >= 3. This query never advances it.
+select id, revision as current_report_revision, 3 as source_schedule_revision, updated_at
+from public.qa_project;
+select count(*) = 1 and min(revision) >= 3 as revision_metadata_valid from public.qa_project;
+select tgname as installed_revision_trigger from pg_trigger
+where not tgisinternal and tgname in ('qa_records_report_revision','qa_comments_report_revision',
+  'qa_photos_insert_report_revision','qa_photos_update_report_revision','qa_photos_delete_report_revision')
+order by tgname;
+
 select c.relname, c.relrowsecurity as rls_expected_true,
   has_table_privilege('anon', c.oid, 'SELECT') as anonymous_read_expected_false,
   has_table_privilege('authenticated', c.oid, 'INSERT') as browser_insert_expected_false,
   has_table_privilege('authenticated', c.oid, 'UPDATE') as browser_update_expected_false,
   has_table_privilege('authenticated', c.oid, 'DELETE') as browser_delete_expected_false
 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-where n.nspname = 'public' and c.relname in ('qa_inspectors','qa_targets','qa_records','qa_photos','qa_comments')
+where n.nspname = 'public' and c.relname in ('qa_inspectors','qa_targets','qa_records','qa_photos','qa_comments','qa_project')
 order by c.relname;
 
 select p.proname, p.prosecdef as security_definer_expected_true, p.proconfig,
@@ -92,7 +101,7 @@ begin
   exception when insufficient_privilege then
     raise notice 'PASS: missing inspector identity denied by membership check';
   end;
-  if exists (select 1 from public.qa_records) or exists (select 1 from public.qa_photos) or exists (select 1 from public.qa_comments) then
+  if exists (select 1 from public.qa_records) or exists (select 1 from public.qa_photos) or exists (select 1 from public.qa_comments) or exists (select 1 from public.qa_project) then
     raise exception 'FAIL: missing inspector identity can read inspection data';
   end if;
   begin

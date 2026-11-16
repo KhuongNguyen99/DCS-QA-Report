@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { inflateSync } from "node:zlib";
 import {
   createInspectionPdf,
   fitImageInBox,
@@ -14,6 +15,9 @@ const schedule = JSON.parse(
 const layout = await readFile(
   new URL("../public/assets/conduit-layout.png", import.meta.url),
 );
+const logo = await readFile(
+  new URL("../public/assets/jeevy-logo-black.png", import.meta.url),
+);
 const regularFont = await readFile(
   new URL("../public/assets/NotoSans-Regular.ttf", import.meta.url),
 );
@@ -24,6 +28,22 @@ const tinyPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAE0lEQVR4nGP88OMPAwMDEwMYAAAizgLoOA4+wgAAAABJRU5ErkJggg==",
   "base64",
 );
+
+async function pdfContent(blob) {
+  const bytes = Buffer.from(await blob.arrayBuffer());
+  const raw = bytes.toString("latin1");
+  const contents = [];
+  for (const match of raw.matchAll(/stream\r?\n([\s\S]*?)\r?\nendstream/g)) {
+    try {
+      contents.push(
+        inflateSync(Buffer.from(match[1], "latin1")).toString("latin1"),
+      );
+    } catch {
+      /* Images and font streams are not page text. */
+    }
+  }
+  return { raw, text: contents.join("\n") };
+}
 
 test("image placement preserves aspect ratio without cropping", () => {
   assert.deepEqual(fitImageInBox(4000, 2000, 500, 400), {
@@ -71,7 +91,7 @@ test("full report paginates long comments and includes every private photo", asy
     createdBy: "inspector-1",
   }));
   const state = {
-    project: schedule.project,
+    project: { ...schedule.project, revision: 17 },
     inspector: {
       id: "inspector-1",
       name: "QA Inspector",
@@ -122,11 +142,13 @@ test("full report paginates long comments and includes every private photo", asy
     fetched.push(String(url));
     const payload = String(url).includes("conduit-layout")
       ? layout
-      : String(url).includes("NotoSans-Regular")
-        ? regularFont
-        : String(url).includes("NotoSans-Bold")
-          ? boldFont
-          : tinyPng;
+      : String(url).includes("jeevy-logo-black")
+        ? logo
+        : String(url).includes("NotoSans-Regular")
+          ? regularFont
+          : String(url).includes("NotoSans-Bold")
+            ? boldFont
+            : tinyPng;
     return new Response(
       new Blob([payload], {
         type: String(url).includes(".ttf") ? "font/ttf" : "image/png",
@@ -141,9 +163,25 @@ test("full report paginates long comments and includes every private photo", asy
       generatedAt: new Date("2026-11-16T16:00:00Z"),
       onProgress: (update) => progress.push(update),
     });
-    const pdf = Buffer.from(await blob.arrayBuffer()).toString("latin1");
-    assert.ok(pdf.startsWith("%PDF-"));
-    assert.ok((pdf.match(/\/Type\s*\/Page\b/g) || []).length >= 8);
+    const { raw, text } = await pdfContent(blob);
+    assert.ok(raw.startsWith("%PDF-"));
+    const pages = (raw.match(/\/Type\s*\/Page\b/g) || []).length;
+    assert.ok(pages >= 8);
+    assert.equal(
+      (
+        raw.match(
+          /\/MediaBox\s*\[\s*0\s+0\s+792(?:\.0*)?\s+612(?:\.0*)?\s*\]/g,
+        ) || []
+      ).length,
+      pages,
+    );
+    assert.equal((text.match(/Jeevy Fabrication/g) || []).length, pages);
+    assert.match(text, /450k Skid x7 - DCS/);
+    assert.match(text, /QA Report/);
+    assert.equal((text.match(/Revision 17/g) || []).length, pages + 1); // Cover and each footer.
+    for (let page = 1; page <= pages; page += 1) {
+      assert.match(text, new RegExp(`Page ${page} of ${pages}`));
+    }
     assert.equal(
       fetched.filter((url) => url.startsWith("/private/")).length,
       3,
@@ -161,9 +199,11 @@ test("general walkdown notes retain non-Latin text and paginate without changing
     fetched.push(String(url));
     const payload = String(url).includes("conduit-layout")
       ? layout
-      : String(url).includes("NotoSans-Regular")
-        ? regularFont
-        : boldFont;
+      : String(url).includes("jeevy-logo-black")
+        ? logo
+        : String(url).includes("NotoSans-Regular")
+          ? regularFont
+          : boldFont;
     return new Response(
       new Blob([payload], {
         type: String(url).includes(".ttf") ? "font/ttf" : "image/png",
@@ -200,7 +240,7 @@ test("general walkdown notes retain non-Latin text and paginate without changing
     });
     const pdf = Buffer.from(await blob.arrayBuffer()).toString("latin1");
     assert.ok((pdf.match(/\/Type\s*\/Page\b/g) || []).length >= 5);
-    assert.equal(fetched.length, 3); // Layout and two fonts; no private images.
+    assert.equal(fetched.length, 4); // Layout, logo, and two fonts; no private images.
   } finally {
     globalThis.fetch = originalFetch;
   }

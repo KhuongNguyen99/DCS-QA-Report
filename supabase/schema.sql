@@ -154,7 +154,8 @@ declare result jsonb;
 begin
   perform qa_private.require_inspector();
   select jsonb_build_object(
-    'project', jsonb_build_object('title', '450k skid x7 - DCS', 'revision', 3),
+    'project', (select jsonb_build_object('title', '450k Skid x7 - DCS', 'revision', p.revision,
+      'scheduleRevision', 3, 'updatedAt', p.updated_at) from public.qa_project p where p.id = 1),
     'inspector', (select jsonb_build_object('id', u.id, 'email', u.email, 'name', i.display_name, 'isAdmin', i.is_admin)
       from auth.users u join public.qa_inspectors i on i.email = lower(u.email) where u.id = auth.uid()),
     'records', coalesce((select jsonb_agg(jsonb_build_object(
@@ -357,5 +358,60 @@ begin
   end loop;
 end;
 $$;
+
+-- Shared report metadata and change triggers. Install after seeding the 36
+-- inspection records so the initial workspace remains at baseline revision 3.
+create table if not exists public.qa_project (
+  id integer primary key default 1 check (id = 1),
+  revision bigint not null default 3 check (revision >= 3),
+  updated_at timestamptz not null default now(),
+  last_change_txid bigint
+);
+insert into public.qa_project (id) values (1) on conflict (id) do nothing;
+alter table public.qa_project enable row level security;
+revoke all on public.qa_project from public, anon, authenticated;
+grant select on public.qa_project to authenticated;
+drop policy if exists qa_project_read on public.qa_project;
+create policy qa_project_read on public.qa_project for select to authenticated using ((select qa_private.is_inspector()));
+
+create or replace function qa_private.bump_report_revision()
+returns trigger language plpgsql security definer set search_path = '' as $$
+begin
+  -- The row lock serializes simultaneous saves. All affected rows in one RPC
+  -- share a transaction ID, so a photo + device + terminal change advances once.
+  update public.qa_project
+  set revision = revision + 1, updated_at = clock_timestamp(), last_change_txid = pg_catalog.txid_current()
+  where id = 1 and last_change_txid is distinct from pg_catalog.txid_current();
+  return null;
+end;
+$$;
+revoke all on function qa_private.bump_report_revision() from public, anon, authenticated;
+
+create or replace trigger qa_records_report_revision
+after update on public.qa_records for each row
+when (old.* is distinct from new.*)
+execute function qa_private.bump_report_revision();
+
+create or replace trigger qa_comments_report_revision
+after insert on public.qa_comments for each row
+execute function qa_private.bump_report_revision();
+
+create or replace trigger qa_photos_insert_report_revision
+after insert on public.qa_photos for each row
+when (new.upload_state = 'ready' and new.deleted_at is null)
+execute function qa_private.bump_report_revision();
+
+create or replace trigger qa_photos_update_report_revision
+after update on public.qa_photos for each row
+when (old.* is distinct from new.* and (
+  (old.upload_state = 'ready' and old.deleted_at is null)
+  or (new.upload_state = 'ready' and new.deleted_at is null)
+))
+execute function qa_private.bump_report_revision();
+
+create or replace trigger qa_photos_delete_report_revision
+after delete on public.qa_photos for each row
+when (old.upload_state = 'ready' and old.deleted_at is null)
+execute function qa_private.bump_report_revision();
 
 commit;

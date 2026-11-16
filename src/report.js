@@ -7,7 +7,8 @@ import {
   terminalProgress,
 } from "./inspection.js";
 
-const PAGE = { width: 595.28, height: 841.89, margin: 42, bottom: 790 };
+const REPORT_TITLE = "450k Skid x7 - DCS";
+const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 570 };
 const COLOR = {
   ink: [30, 43, 54],
   muted: [83, 101, 116],
@@ -116,38 +117,28 @@ function setText(doc, color = COLOR.ink, size = 10, style = "normal") {
 }
 
 function drawPageHeader(doc, project, section) {
-  setText(doc, COLOR.blue, 9, "bold");
-  doc.text("JEEVY FABRICATION", PAGE.margin, 31);
-  setText(doc, COLOR.muted, 8);
-  doc.text(printableText(section).toUpperCase(), PAGE.width - PAGE.margin, 31, {
-    align: "right",
-  });
-  doc.setDrawColor(...COLOR.line);
-  doc.setLineWidth(0.7);
-  doc.line(PAGE.margin, 43, PAGE.width - PAGE.margin, 43);
-  setText(doc, COLOR.muted, 8);
-  doc.text(
-    `${printableText(project.title)}  |  Rev ${printableText(project.revision)}`,
-    PAGE.margin,
-    55,
-  );
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7.9);
+  doc.setTextColor(80, 80, 80);
+  doc.text("Jeevy Fabrication", PAGE.margin, 16);
+  doc.text(REPORT_TITLE, PAGE.width - PAGE.margin, 16, { align: "right" });
 }
 
 function newPage(doc, project, section) {
   doc.addPage();
   drawPageHeader(doc, project, section);
-  return 79;
+  return 61;
 }
 
 function drawFooters(doc, project) {
   const count = doc.getNumberOfPages();
   for (let page = 1; page <= count; page += 1) {
     doc.setPage(page);
-    doc.setDrawColor(...COLOR.line);
-    doc.line(PAGE.margin, 805, PAGE.width - PAGE.margin, 805);
-    setText(doc, COLOR.muted, 8);
-    doc.text(printableText(project.title), PAGE.margin, 820);
-    doc.text(`Page ${page} of ${count}`, PAGE.width - PAGE.margin, 820, {
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.9);
+    doc.setTextColor(80, 80, 80);
+    doc.text(`Revision ${printableText(project.revision)}`, PAGE.margin, 599);
+    doc.text(`Page ${page} of ${count}`, PAGE.width - PAGE.margin, 599, {
       align: "right",
     });
   }
@@ -212,45 +203,66 @@ async function fetchFont(url, required) {
   return bytesToBase64(bytes);
 }
 
-function drawCover(doc, schedule, state, project, generatedAt, layoutImage) {
-  drawPageHeader(doc, project, "Inspection report");
-  setText(doc, COLOR.blue, 10, "bold");
-  doc.text("DCS QUALITY ASSURANCE", PAGE.margin, 102);
-  setText(doc, COLOR.ink, 25, "bold");
-  const titleLines = doc.splitTextToSize(
-    printableText(project.title),
+function drawCover(doc, project, generatedAt, logoImage) {
+  drawPageHeader(doc, project, "Cover");
+  doc.addImage(logoImage, "PNG", PAGE.margin, 39.6, 223.2, 74.88);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(0, 0, 0);
+  doc.setFontSize(15.1);
+  doc.text(
+    generatedAt.toLocaleDateString("en-US", {
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    }),
+    PAGE.margin,
+    239,
+  );
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(31.9);
+  doc.text(REPORT_TITLE, PAGE.margin, 290);
+  doc.setFontSize(36);
+  doc.text("QA Report", PAGE.margin, 345);
+  doc.setFontSize(18);
+  doc.text(`Revision ${printableText(project.revision)}`, PAGE.margin, 385);
+}
+
+function drawOverview(doc, schedule, state, project, generatedAt, layoutImage) {
+  let y = newPage(doc, project, "Conduit layout");
+  setText(doc, COLOR.ink, 28, "bold");
+  doc.text("Conduit Layout", PAGE.margin, y);
+  const dimensions = doc.getImageProperties(layoutImage);
+  const fitted = fitImageInBox(
+    dimensions.width,
+    dimensions.height,
     PAGE.width - PAGE.margin * 2,
+    290,
   );
-  doc.text(titleLines, PAGE.margin, 138);
-  const belowTitle = 138 + titleLines.length * 27;
-  setText(doc, COLOR.muted, 10);
-  doc.text(
-    `Revision ${printableText(project.revision)}  |  Generated ${formatDate(generatedAt)}`,
-    PAGE.margin,
-    belowTitle + 7,
-  );
-  doc.text(
-    `Exported by ${printableText(state.inspector?.name || state.inspector?.email || "Inspector not recorded")}`,
-    PAGE.margin,
-    belowTitle + 24,
+  doc.addImage(
+    layoutImage,
+    dimensions.fileType,
+    PAGE.margin + (PAGE.width - PAGE.margin * 2 - fitted.width) / 2,
+    88,
+    fitted.width,
+    fitted.height,
   );
 
   const progress = inspectionProgress(schedule.devices, schedule.groups, state);
-  const cardsY = belowTitle + 56;
-  const cardWidth = (PAGE.width - PAGE.margin * 2 - 20) / 3;
+  const cardsY = 389;
+  const cardWidth = (PAGE.width - PAGE.margin * 2 - 24) / 3;
   const metrics = [
     [`${progress.devices}/${schedule.devices.length}`, "Devices complete"],
     [`${progress.terminals}/${schedule.groups.length}`, "Terminals complete"],
     [String(state.photos.length), "Evidence photos"],
   ];
   metrics.forEach(([value, label], index) => {
-    const x = PAGE.margin + index * (cardWidth + 10);
+    const x = PAGE.margin + index * (cardWidth + 12);
     doc.setFillColor(...COLOR.pale);
-    doc.roundedRect(x, cardsY, cardWidth, 68, 7, 7, "F");
-    setText(doc, COLOR.blue, 20, "bold");
-    doc.text(value, x + 12, cardsY + 29);
+    doc.roundedRect(x, cardsY, cardWidth, 60, 5, 5, "F");
+    setText(doc, COLOR.blue, 17, "bold");
+    doc.text(value, x + 12, cardsY + 26);
     setText(doc, COLOR.muted, 9);
-    doc.text(label, x + 12, cardsY + 49);
+    doc.text(label, x + 12, cardsY + 45);
   });
 
   const statusCounts = { complete: 0, "in-progress": 0, "not-started": 0 };
@@ -263,7 +275,7 @@ function drawCover(doc, schedule, state, project, generatedAt, layoutImage) {
     qualityCounts[qualityFor(`terminal:${group.id}`, state)] += 1;
   for (const device of schedule.devices)
     qualityCounts[qualityFor(`device:${device.id}`, state)] += 1;
-  const countsY = cardsY + 92;
+  const countsY = cardsY + 78;
   setText(doc, COLOR.ink, 10, "bold");
   doc.text(
     "Evidence status across all scheduled targets",
@@ -283,31 +295,11 @@ function drawCover(doc, schedule, state, project, generatedAt, layoutImage) {
     countsY + 35,
   );
 
-  const imageY = countsY + 78;
-  setText(doc, COLOR.ink, 14, "bold");
-  doc.text("Conduit layout", PAGE.margin, imageY);
-  doc.setDrawColor(...COLOR.line);
-  doc.rect(PAGE.margin, imageY + 15, PAGE.width - PAGE.margin * 2, 215);
-  const dimensions = doc.getImageProperties(layoutImage);
-  const fitted = fitImageInBox(
-    dimensions.width,
-    dimensions.height,
-    PAGE.width - PAGE.margin * 2 - 16,
-    199,
-  );
-  doc.addImage(
-    layoutImage,
-    dimensions.fileType,
-    PAGE.margin + (PAGE.width - PAGE.margin * 2 - fitted.width) / 2,
-    imageY + 23 + (199 - fitted.height) / 2,
-    fitted.width,
-    fitted.height,
-  );
   setText(doc, COLOR.muted, 8);
   doc.text(
-    "Complete schedule and evidence details follow. Missing evidence is listed explicitly in the summary.",
+    `Generated ${formatDate(generatedAt)} by ${printableText(state.inspector?.name || state.inspector?.email || "Inspector not recorded")}. Full target coverage follows.`,
     PAGE.margin,
-    imageY + 250,
+    countsY + 56,
   );
 }
 
@@ -326,9 +318,9 @@ function drawSummary(doc, schedule, state, project) {
     y += 25;
     setText(doc, COLOR.muted, 9);
     doc.text("Target", PAGE.margin + 7, y);
-    doc.text("Evidence status", 170, y);
-    doc.text("Quality", 265, y);
-    doc.text("Cable pairs / coverage", 337, y);
+    doc.text("Evidence status", 220, y);
+    doc.text("Quality", 340, y);
+    doc.text("Cable pairs / coverage", 430, y);
     y += 10;
     doc.setDrawColor(...COLOR.line);
     doc.line(PAGE.margin, y, PAGE.width - PAGE.margin, y);
@@ -344,7 +336,7 @@ function drawSummary(doc, schedule, state, project) {
   function groupHeader(group, progress, continued = false) {
     const coverageLines = doc.splitTextToSize(
       `${progress.complete}/${progress.total} devices complete; ${progress.terminalPhotos} terminal photos`,
-      205,
+      300,
     );
     const height = Math.max(29, coverageLines.length * 11 + 13);
     doc.setFillColor(...COLOR.pale);
@@ -358,14 +350,14 @@ function drawSummary(doc, schedule, state, project) {
     setText(doc, COLOR.blue, 9, "bold");
     doc.text(
       statusLabel(recordStatus(`terminal:${group.id}`, state)),
-      170,
+      220,
       y + 17,
     );
     const quality = qualityFor(`terminal:${group.id}`, state);
     setText(doc, qualityColor(quality), 9, "bold");
-    doc.text(quality, 265, y + 17);
+    doc.text(quality, 340, y + 17);
     setText(doc, COLOR.ink, 9);
-    doc.text(coverageLines, 337, y + 17);
+    doc.text(coverageLines, 430, y + 17);
     y += height + 2;
   }
   start();
@@ -378,7 +370,7 @@ function drawSummary(doc, schedule, state, project) {
     )) {
       const cableLines = doc.splitTextToSize(
         printableText(cableLabel(device)),
-        200,
+        300,
       );
       const rowHeight = Math.max(22, cableLines.length * 11 + 9);
       if (ensure(rowHeight + 46)) groupHeader(group, progress, true);
@@ -394,12 +386,12 @@ function drawSummary(doc, schedule, state, project) {
             : COLOR.gray,
         9,
       );
-      doc.text(statusLabel(status), 170, y + 14);
+      doc.text(statusLabel(status), 220, y + 14);
       const quality = qualityFor(`device:${device.id}`, state);
       setText(doc, qualityColor(quality), 9, "bold");
-      doc.text(quality, 265, y + 14);
+      doc.text(quality, 340, y + 14);
       setText(doc, COLOR.ink, 9);
-      doc.text(cableLines, 337, y + 14);
+      doc.text(cableLines, 430, y + 14);
       y += rowHeight;
       doc.setDrawColor(...COLOR.line);
       doc.line(PAGE.margin, y, PAGE.width - PAGE.margin, y);
@@ -560,87 +552,104 @@ function drawRecordDetails(doc, entry, state, project) {
     if (y + 26 > PAGE.bottom) y = newPage(doc, project, label);
     setText(doc, COLOR.muted, 9);
     doc.text(
-      `All ${photos.length} photo${photos.length === 1 ? "" : "s"} follow on separate pages.`,
+      `All ${photos.length} photo${photos.length === 1 ? "" : "s"} follow on the next page${photos.length > 2 ? "s" : ""}.`,
       PAGE.margin,
       y,
     );
   }
 }
 
-async function drawPhotoPage(doc, photo, entry, backend, project, state) {
-  const name = printableText(photo.name || "Inspection photo");
-  const label = `${entry.label} - photo`;
-  let y = newPage(doc, project, label);
+async function drawPhotoPage(
+  doc,
+  photos,
+  entry,
+  backend,
+  project,
+  state,
+  onProgress,
+  completed,
+  totalPhotos,
+) {
+  const y = newPage(doc, project, `${entry.label} - photos`);
   setText(doc, COLOR.ink, 16, "bold");
   doc.text(printableText(entry.label), PAGE.margin, y);
-  y += 22;
   const quality = qualityFor(entry.key, state);
   setText(doc, qualityColor(quality), 9, "bold");
-  doc.text(`Quality: ${quality}`, PAGE.margin, y);
-  y += 16;
-  setText(doc, COLOR.blue, 10, "bold");
-  y =
-    drawWrappedText(
-      doc,
-      name,
-      PAGE.margin,
-      PAGE.width - PAGE.margin * 2,
-      y,
-      project,
-      label,
-      14,
-    ) + 3;
-  setText(doc, COLOR.muted, 9);
-  y =
-    drawWrappedText(
-      doc,
-      `Captured ${formatDate(photo.createdAt)} by ${personName(photo.createdBy, state)}`,
-      PAGE.margin,
-      PAGE.width - PAGE.margin * 2,
-      y,
-      project,
-      label,
-      12,
-    ) + 13;
+  doc.text(`Quality: ${quality}`, PAGE.margin, y + 20);
 
-  let url;
-  try {
-    url = await backend.getPhotoUrl(photo);
-  } catch (error) {
-    throw new Error(
-      `Could not access photo "${name}": ${error.message || String(error)}`,
-      { cause: error },
+  const gap = 18;
+  const slotWidth =
+    photos.length === 1
+      ? PAGE.width - PAGE.margin * 2
+      : (PAGE.width - PAGE.margin * 2 - gap) / 2;
+  const prepared = [];
+  for (let index = 0; index < photos.length; index += 1) {
+    const photo = photos[index];
+    const name = printableText(photo.name || "Inspection photo");
+    onProgress(`Adding photo ${completed + index + 1} of ${totalPhotos}…`);
+    let url;
+    try {
+      url = await backend.getPhotoUrl(photo);
+    } catch (error) {
+      throw new Error(
+        `Could not access photo "${name}": ${error.message || String(error)}`,
+        { cause: error },
+      );
+    }
+    const data = await fetchImage(url, `photo "${name}"`);
+    let properties;
+    try {
+      properties = doc.getImageProperties(data);
+    } catch (error) {
+      throw new Error(`Photo "${name}" could not be decoded for the PDF.`, {
+        cause: error,
+      });
+    }
+    setText(doc, COLOR.blue, 10, "bold");
+    const nameLines = doc.splitTextToSize(name, slotWidth);
+    setText(doc, COLOR.muted, 9);
+    const metaLines = doc.splitTextToSize(
+      printableText(
+        `Captured ${formatDate(photo.createdAt)} by ${personName(photo.createdBy, state)}`,
+      ),
+      slotWidth,
     );
+    prepared.push({ data, properties, nameLines, metaLines });
   }
-  const data = await fetchImage(url, `photo "${name}"`);
-  let properties;
-  try {
-    properties = doc.getImageProperties(data);
-  } catch (error) {
-    throw new Error(`Photo "${name}" could not be decoded for the PDF.`, {
-      cause: error,
-    });
-  }
-  const boxWidth = PAGE.width - PAGE.margin * 2;
-  const boxHeight = PAGE.bottom - y - 13;
-  if (boxHeight < 100)
-    throw new Error(`Photo "${name}" metadata is too long for a page.`);
-  const fitted = fitImageInBox(
-    properties.width,
-    properties.height,
-    boxWidth,
-    boxHeight,
+
+  const imageTop = Math.max(
+    161,
+    ...prepared.map(
+      ({ nameLines, metaLines }) =>
+        101 + nameLines.length * 13 + metaLines.length * 11 + 10,
+    ),
   );
-  doc.setDrawColor(...COLOR.line);
-  doc.rect(PAGE.margin, y, boxWidth, boxHeight);
-  doc.addImage(
-    data,
-    properties.fileType,
-    PAGE.margin + (boxWidth - fitted.width) / 2,
-    y + (boxHeight - fitted.height) / 2,
-    fitted.width,
-    fitted.height,
-  );
+  const boxHeight = PAGE.bottom - imageTop - 5;
+  if (boxHeight < 160)
+    throw new Error("Photo metadata is too long to fit on a landscape page.");
+  prepared.forEach(({ data, properties, nameLines, metaLines }, index) => {
+    const x = PAGE.margin + index * (slotWidth + gap);
+    setText(doc, COLOR.blue, 10, "bold");
+    doc.text(nameLines, x, 101);
+    setText(doc, COLOR.muted, 9);
+    doc.text(metaLines, x, 101 + nameLines.length * 13 + 5);
+    doc.setDrawColor(...COLOR.line);
+    doc.rect(x, imageTop, slotWidth, boxHeight);
+    const fitted = fitImageInBox(
+      properties.width,
+      properties.height,
+      slotWidth,
+      boxHeight,
+    );
+    doc.addImage(
+      data,
+      properties.fileType,
+      x + (slotWidth - fitted.width) / 2,
+      imageTop + (boxHeight - fitted.height) / 2,
+      fitted.width,
+      fitted.height,
+    );
+  });
 }
 
 /** Builds a full inspection snapshot. The caller handles download or sharing. */
@@ -691,21 +700,22 @@ export async function createInspectionPdf({
       "Evidence is not assigned to a scheduled target. Refresh the inspection and try again.",
     );
   const project = {
-    title: state.project?.title || schedule.project.title,
+    title: REPORT_TITLE,
     revision: state.project?.revision ?? schedule.project.revision,
   };
   const totalPhotos = state.photos.length;
   onProgress("Loading report assets…");
   const baseUrl = import.meta.env?.BASE_URL || "/";
-  const [layout, regularFont, boldFont] = await Promise.all([
+  const [layout, logo, regularFont, boldFont] = await Promise.all([
     fetchImage(`${baseUrl}assets/conduit-layout.png`, "the conduit layout"),
+    fetchImage(`${baseUrl}assets/jeevy-logo-black.png`, "the Jeevy logo"),
     fetchFont(`${baseUrl}assets/NotoSans-Regular.ttf`, true),
     fetchFont(`${baseUrl}assets/NotoSans-Bold.ttf`, false),
   ]);
   const doc = new jsPDF({
-    orientation: "portrait",
+    orientation: "landscape",
     unit: "pt",
-    format: "a4",
+    format: "letter",
     compress: true,
   });
   doc.addFileToVFS("NotoSans-Regular.ttf", regularFont);
@@ -716,23 +726,35 @@ export async function createInspectionPdf({
     doc._reportBoldFont = true;
   }
   doc.setProperties({
-    title: `${project.title} - DCS QA Inspection`,
+    title: `${REPORT_TITLE} - QA Report`,
     subject: `Revision ${project.revision} inspection evidence`,
     author:
       state.inspector?.name || state.inspector?.email || "Jeevy Fabrication",
     creator: "Jeevy DCS QA Report",
   });
-  drawCover(doc, schedule, state, project, generatedAt, layout);
+  drawCover(doc, project, generatedAt, logo);
+  drawOverview(doc, schedule, state, project, generatedAt, layout);
   drawGeneralComments(doc, state, project);
   drawSummary(doc, schedule, state, project);
   let completed = 0;
   for (const entry of entries) {
     if (recordStatus(entry.key, state) === "not-started") continue;
     drawRecordDetails(doc, entry, state, project);
-    for (const photo of photosFor(entry.key, state)) {
-      onProgress(`Adding photo ${completed + 1} of ${totalPhotos}…`);
-      await drawPhotoPage(doc, photo, entry, backend, project, state);
-      completed += 1;
+    const photos = photosFor(entry.key, state);
+    for (let index = 0; index < photos.length; index += 2) {
+      const pagePhotos = photos.slice(index, index + 2);
+      await drawPhotoPage(
+        doc,
+        pagePhotos,
+        entry,
+        backend,
+        project,
+        state,
+        onProgress,
+        completed,
+        totalPhotos,
+      );
+      completed += pagePhotos.length;
     }
   }
   if (completed !== totalPhotos) {

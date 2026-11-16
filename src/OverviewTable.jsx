@@ -116,7 +116,9 @@ export default function OverviewTable({
         <span>
           {shown.length} of {targets.length} items · 28 devices + 8 terminals
         </span>
-        <span>Revision 3</span>
+        <span>
+          QA Revision {state.project?.revision ?? schedule.project.revision}
+        </span>
       </div>
       {error && (
         <p className="field-error table-error" role="alert">

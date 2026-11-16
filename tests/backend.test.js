@@ -19,6 +19,12 @@ const sample = {
 function fixture(overrides = {}) {
   const calls = [];
   const state = {
+    project: {
+      title: "450k Skid x7 - DCS",
+      revision: 17,
+      scheduleRevision: 3,
+      updatedAt: "2026-11-16T00:00:00Z",
+    },
     records: [],
     photos: [],
     comments: [],

@@ -1,12 +1,14 @@
 # Shared inspection setup
 
-The static GitHub Pages app uses Supabase Auth, PostgreSQL, private Storage, and Realtime. Every signed-in, allowlisted inspector sees the same revision-3 workspace. Project data and inspection photos are protected by database policies; the browser receives only a public publishable/anon key.
+The static GitHub Pages app uses Supabase Auth, PostgreSQL, private Storage, and Realtime. Every signed-in, allowlisted inspector sees the same shared report, based on the revision-3 source schedule. Project data and inspection photos are protected by database policies; the browser receives only a public publishable/anon key.
 
 ## 1. Install the database
 
 Use a dedicated Supabase project. In its SQL Editor, run the entire [`schema.sql`](./schema.sql), then [`VERIFY.sql`](./VERIFY.sql). The schema seeds 28 devices and terminals A–H from the revision-3 schedule. Running it again preserves existing inspection records, photos, and comments.
 
-Check the verification output: 28 devices, 8 terminals, 36 records, private bucket, enabled admin, RLS enabled, and all browser write/anonymous access columns false. The `qa_*` public functions must have an empty `search_path`. Check for unexpected existing Storage policies; permissive policies are combined, so a broad older policy can bypass this project's restrictions.
+To upgrade an existing deployment, run [`report-revisions.sql`](./report-revisions.sql). It preserves current data as baseline report revision 3 and installs the revision counter and triggers. Subsequent saves advance the shared report revision. Run this migration before the current [`walkdown-comments.sql`](./walkdown-comments.sql) if upgrading an older installation; rerunning either migration preserves the current revision.
+
+Check the verification output: 28 devices, 8 terminals, 36 records, one project metadata row with revision at least 3, five revision triggers, private bucket, enabled admin, RLS enabled, and all browser write/anonymous access columns false. The `qa_*` public functions must have an empty `search_path`. Check for unexpected existing Storage policies; permissive policies are combined, so a broad older policy can bypass this project's restrictions.
 
 The initial administrator is `khuong@jeevyfabrication.com`. Add each inspector using the SQL Editor, replacing the example address and display name:
 
@@ -74,6 +76,7 @@ Local adapter tests run with `npm test`. The schema logic was also executed with
 
 ## Operating behavior
 
+- The shared report starts at revision 3. Saving a comment, finalized photo, photo removal, completion/reopen, or quality assessment advances it once per database transaction. A photo removal that also reopens its device and terminal advances once. Pending or canceled uploads, drafts, OCR, voice processing, refreshes, and exporting an unchanged report do not advance it. The source schedule/reference PDF remains revision 3.
 - Comments are append-only. Corrections are new comments, preserving author and server timestamp.
 - Each device and terminal has one shared Quality value: Good, Bad, or unrated. Selecting one excludes the other; clearing it returns to unrated. The latest change, including a clear, records the inspector and server timestamp. Quality changes preserve evidence completion.
 - Any active inspector can add evidence/comments and complete or reopen an item. Only the photographer or administrator can remove a photo.
