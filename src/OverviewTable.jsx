@@ -1,0 +1,312 @@
+import React, { useMemo, useState } from "react";
+import Icon from "./Icons.jsx";
+import {
+  photosFor,
+  commentsFor,
+  recordStatus,
+  terminalProgress,
+} from "./inspection.js";
+
+export default function OverviewTable({
+  schedule,
+  state,
+  connected,
+  onOpen,
+  onStart,
+  onQuality,
+}) {
+  const [search, setSearch] = useState("");
+  const [terminal, setTerminal] = useState("");
+  const [kind, setKind] = useState("");
+  const [documentation, setDocumentation] = useState("");
+  const [saving, setSaving] = useState("");
+  const [error, setError] = useState("");
+  const targets = useMemo(
+    () =>
+      schedule.groups.flatMap((group) => [
+        {
+          id: group.id,
+          key: `terminal:${group.id}`,
+          kind: "terminal",
+          name: `Terminal ${group.id}`,
+          terminal: group.id,
+          cables: [],
+          color: group.color,
+        },
+        ...schedule.devices
+          .filter((d) => d.terminal === group.id)
+          .map((d) => ({
+            ...d,
+            key: `device:${d.id}`,
+            kind: "device",
+            color: group.color,
+          })),
+      ]),
+    [schedule],
+  );
+  const shown = targets.filter(
+    (item) =>
+      (!terminal || item.terminal === terminal) &&
+      (!kind || item.kind === kind) &&
+      `${item.name} ${item.cables.map((c) => c.number).join(" ")}`
+        .toLowerCase()
+        .includes(search.toLowerCase()) &&
+      (!documentation ||
+        (documentation === "documented") ===
+          photosFor(item.key, state).length > 0),
+  );
+  async function quality(item, value) {
+    setSaving(item.key);
+    setError("");
+    try {
+      await onQuality(item.key, value);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving("");
+    }
+  }
+  return (
+    <>
+      <div className="filter-bar">
+        <label className="search-field">
+          <Icon name="search" />
+          <input
+            aria-label="Search overview"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search devices, terminals, or cable numbers…"
+          />
+        </label>
+        <label className="select-field">
+          <span className="sr-only">Terminal group</span>
+          <select
+            value={terminal}
+            onChange={(e) => setTerminal(e.target.value)}
+          >
+            <option value="">All terminals</option>
+            {schedule.groups.map((g) => (
+              <option value={g.id} key={g.id}>
+                Terminal {g.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="select-field">
+          <span className="sr-only">Item type</span>
+          <select value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="">Devices & terminals</option>
+            <option value="device">Devices only</option>
+            <option value="terminal">Terminals only</option>
+          </select>
+        </label>
+        <label className="select-field">
+          <span className="sr-only">Documentation filter</span>
+          <select
+            value={documentation}
+            onChange={(e) => setDocumentation(e.target.value)}
+          >
+            <option value="">All documentation</option>
+            <option value="documented">Documented</option>
+            <option value="missing">Not documented</option>
+          </select>
+        </label>
+      </div>
+      <div className="list-heading">
+        <span>
+          {shown.length} of {targets.length} items · 28 devices + 8 terminals
+        </span>
+        <span>Revision 3</span>
+      </div>
+      {error && (
+        <p className="field-error table-error" role="alert">
+          {error}
+        </p>
+      )}
+      <section className="card">
+        <div className="overview-scroll">
+          <table className="overview-table">
+            <caption className="sr-only">
+              All devices and terminal groups with shared documentation,
+              quality, and QA progress
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Device / terminal</th>
+                <th scope="col">Group</th>
+                <th scope="col">Cable</th>
+                <th scope="col">Documentation</th>
+                <th scope="col">Photos</th>
+                <th scope="col">Comments</th>
+                <th scope="col">Quality</th>
+                <th scope="col">QA review</th>
+                <th scope="col">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((item) => {
+                const photos = photosFor(item.key, state);
+                const comments = commentsFor(item.key, state);
+                const documented = connected && photos.length > 0;
+                const record = state.records.find((r) => r.key === item.key);
+                const status =
+                  item.kind === "terminal"
+                    ? terminalProgress(item.terminal, schedule.devices, state)
+                        .done
+                      ? "complete"
+                      : recordStatus(item.key, state)
+                    : recordStatus(item.key, state);
+                return (
+                  <tr
+                    key={item.key}
+                    className={
+                      item.kind === "terminal" ? "terminal-table-row" : ""
+                    }
+                  >
+                    <td>
+                      <div className="overview-target">
+                        <span
+                          className="terminal-letter"
+                          style={{ "--group-color": item.color }}
+                        >
+                          {item.kind === "terminal" ? (
+                            item.terminal
+                          ) : (
+                            <Icon name="device" size={16} />
+                          )}
+                        </span>
+                        <span>
+                          <strong>{item.name}</strong>
+                          <small>
+                            {item.kind === "terminal"
+                              ? "Terminal evidence"
+                              : "Field device"}
+                          </small>
+                        </span>
+                      </div>
+                    </td>
+                    <td>{item.terminal}</td>
+                    <td>
+                      <div className="overview-cables">
+                        {item.cables.length
+                          ? item.cables.map((c, i) => (
+                              <span key={i}>
+                                {c.number} · {c.type}
+                              </span>
+                            ))
+                          : "—"}
+                      </div>
+                    </td>
+                    <td>
+                      {documented ? (
+                        <span className="documented">
+                          <Icon name="check" size={15} />
+                          Documented
+                        </span>
+                      ) : (
+                        <span className="not-documented">
+                          {connected ? "Not documented" : "Sign in to view"}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      <span className="overview-number">
+                        <Icon name="camera" size={14} />
+                        {connected ? photos.length : "—"}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="overview-number">
+                        <Icon name="comment" size={14} />
+                        {connected ? comments.length : "—"}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="quality-options">
+                        {["good", "bad"].map((value) => (
+                          <label
+                            key={value}
+                            className={`quality-choice ${value}`}
+                          >
+                            <input
+                              type="checkbox"
+                              aria-label={`${value === "good" ? "Good" : "Bad"} quality for ${item.name}`}
+                              checked={connected && record?.quality === value}
+                              disabled={!connected || Boolean(saving)}
+                              onChange={() =>
+                                quality(
+                                  item,
+                                  record?.quality === value ? null : value,
+                                )
+                              }
+                            />
+                            {value === "good" ? "Good" : "Bad"}
+                          </label>
+                        ))}
+                      </div>
+                      {saving === item.key && (
+                        <small role="status">Saving…</small>
+                      )}
+                    </td>
+                    <td>
+                      <span
+                        className={`status ${connected ? status : "preview"}`}
+                      >
+                        {status === "complete" && connected ? (
+                          <Icon name="check" size={12} />
+                        ) : (
+                          <span className="status-dot" />
+                        )}
+                        {connected
+                          ? status === "complete"
+                            ? "Complete"
+                            : status === "in-progress"
+                              ? "In progress"
+                              : "Not started"
+                          : "Preview"}
+                      </span>
+                    </td>
+                    <td>
+                      <button
+                        className={`small-button start-button ${documented ? "" : "green"}`}
+                        onClick={() =>
+                          documented
+                            ? onOpen(item.kind, item.id)
+                            : onStart(item.kind, item.id)
+                        }
+                      >
+                        {documented ? (
+                          <>
+                            <Icon name="arrow" size={13} />
+                            Open record
+                          </>
+                        ) : (
+                          <>
+                            <Icon name="camera" size={13} />
+                            Start documenting
+                          </>
+                        )}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {!shown.length && (
+          <div className="empty-state">
+            <Icon name="search" size={28} />
+            <h3>No matching items</h3>
+            <p>Clear the filters to see every device and terminal.</p>
+          </div>
+        )}
+        <p className="overview-help">
+          <Icon name="info" size={14} />
+          Documented means at least one saved photo. Quality and completed QA
+          review are tracked separately.
+        </p>
+      </section>
+    </>
+  );
+}

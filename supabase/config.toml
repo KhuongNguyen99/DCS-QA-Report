@@ -1,0 +1,5 @@
+project_id = "dcs-qa-report"
+
+[functions.transcribe-comment]
+verify_jwt = true
+entrypoint = "./functions/transcribe-comment/index.ts"

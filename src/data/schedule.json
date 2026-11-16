@@ -1,0 +1,390 @@
+{
+  "project": {
+    "title": "450k skid x7 - DCS",
+    "revision": 3
+  },
+  "groups": [
+    {
+      "id": "A",
+      "color": "#397CAC",
+      "hotspot": {
+        "x": 91.1,
+        "y": 42.0
+      }
+    },
+    {
+      "id": "B",
+      "color": "#C96A37",
+      "hotspot": {
+        "x": 65.9,
+        "y": 87.3
+      }
+    },
+    {
+      "id": "C",
+      "color": "#6A9844",
+      "hotspot": {
+        "x": 65.9,
+        "y": 25.6
+      }
+    },
+    {
+      "id": "D",
+      "color": "#8A63A9",
+      "hotspot": {
+        "x": 27.8,
+        "y": 80.7
+      }
+    },
+    {
+      "id": "E",
+      "color": "#B18925",
+      "hotspot": {
+        "x": 27.8,
+        "y": 55.5
+      }
+    },
+    {
+      "id": "F",
+      "color": "#218C90",
+      "hotspot": {
+        "x": 9.6,
+        "y": 54.9
+      }
+    },
+    {
+      "id": "G",
+      "color": "#C15281",
+      "hotspot": {
+        "x": 1.7,
+        "y": 61.2
+      }
+    },
+    {
+      "id": "H",
+      "color": "#806E58",
+      "hotspot": {
+        "x": 1.7,
+        "y": 32.5
+      }
+    }
+  ],
+  "devices": [
+    {
+      "id": "V-3571#1",
+      "name": "V-3571#1",
+      "terminal": "A",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 26
+        }
+      ]
+    },
+    {
+      "id": "V-3571#2",
+      "name": "V-3571#2",
+      "terminal": "A",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 27
+        }
+      ]
+    },
+    {
+      "id": "V-3571-Y",
+      "name": "V-3571-Y",
+      "terminal": "A",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 28
+        }
+      ]
+    },
+    {
+      "id": "TH-3541",
+      "name": "TH-3541",
+      "terminal": "B",
+      "cables": [
+        {
+          "type": "2-pairs",
+          "number": 18
+        }
+      ]
+    },
+    {
+      "id": "V-3541-Y",
+      "name": "V-3541-Y",
+      "terminal": "B",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 19
+        }
+      ]
+    },
+    {
+      "id": "TH-3511",
+      "name": "TH-3511",
+      "terminal": "B",
+      "cables": [
+        {
+          "type": "2-pairs",
+          "number": 20
+        }
+      ]
+    },
+    {
+      "id": "V-3541",
+      "name": "V-3541",
+      "terminal": "B",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 21
+        },
+        {
+          "type": "2-pairs",
+          "number": 21
+        }
+      ]
+    },
+    {
+      "id": "PD-3511",
+      "name": "PD-3511",
+      "terminal": "B",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 25
+        }
+      ]
+    },
+    {
+      "id": "V-3511",
+      "name": "V-3511",
+      "terminal": "C",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 22
+        },
+        {
+          "type": "2-pairs",
+          "number": 22
+        }
+      ]
+    },
+    {
+      "id": "V-3511-Y",
+      "name": "V-3511-Y",
+      "terminal": "C",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 23
+        }
+      ]
+    },
+    {
+      "id": "TH-3510",
+      "name": "TH-3510",
+      "terminal": "C",
+      "cables": [
+        {
+          "type": "2-pairs",
+          "number": 24
+        }
+      ]
+    },
+    {
+      "id": "TH-3531",
+      "name": "TH-3531",
+      "terminal": "D",
+      "cables": [
+        {
+          "type": "2-pairs",
+          "number": 16
+        }
+      ]
+    },
+    {
+      "id": "V-3501-Y",
+      "name": "V-3501-Y",
+      "terminal": "D",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 17
+        }
+      ]
+    },
+    {
+      "id": "V-3531",
+      "name": "V-3531",
+      "terminal": "E",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 13
+        }
+      ]
+    },
+    {
+      "id": "TH-3530",
+      "name": "TH-3530",
+      "terminal": "E",
+      "cables": [
+        {
+          "type": "2-pairs",
+          "number": 14
+        }
+      ]
+    },
+    {
+      "id": "V-3501",
+      "name": "V-3501",
+      "terminal": "E",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 15
+        }
+      ]
+    },
+    {
+      "id": "V-3551",
+      "name": "V-3551",
+      "terminal": "F",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 9
+        }
+      ]
+    },
+    {
+      "id": "TH-3550",
+      "name": "TH-3550",
+      "terminal": "F",
+      "cables": [
+        {
+          "type": "2-pairs",
+          "number": 10
+        }
+      ]
+    },
+    {
+      "id": "V-3521",
+      "name": "V-3521",
+      "terminal": "F",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 11
+        }
+      ]
+    },
+    {
+      "id": "TH-3520",
+      "name": "TH-3520",
+      "terminal": "F",
+      "cables": [
+        {
+          "type": "2-pairs",
+          "number": 12
+        }
+      ]
+    },
+    {
+      "id": "DP-3500#1",
+      "name": "DP-3500#1",
+      "terminal": "G",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 1
+        }
+      ]
+    },
+    {
+      "id": "PD-3500#1",
+      "name": "PD-3500#1",
+      "terminal": "G",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 2
+        }
+      ]
+    },
+    {
+      "id": "DP-3500#2",
+      "name": "DP-3500#2",
+      "terminal": "G",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 3
+        }
+      ]
+    },
+    {
+      "id": "PD-3500#2",
+      "name": "PD-3500#2",
+      "terminal": "G",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 4
+        }
+      ]
+    },
+    {
+      "id": "DP-3500#3",
+      "name": "DP-3500#3",
+      "terminal": "G",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 5
+        }
+      ]
+    },
+    {
+      "id": "PD-3500#3",
+      "name": "PD-3500#3",
+      "terminal": "G",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 6
+        }
+      ]
+    },
+    {
+      "id": "V-3561",
+      "name": "V-3561",
+      "terminal": "H",
+      "cables": [
+        {
+          "type": "1-pair",
+          "number": 7
+        }
+      ]
+    },
+    {
+      "id": "TH-3560",
+      "name": "TH-3560",
+      "terminal": "H",
+      "cables": [
+        {
+          "type": "2-pairs",
+          "number": 8
+        }
+      ]
+    }
+  ]
+}
