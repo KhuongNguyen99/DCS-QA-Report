@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   microphoneError,
+  MIN_RECORDING_MS,
   startVoiceRecording,
   transcribeVoice,
 } from "./voice-client.js";
@@ -168,6 +169,7 @@ export default function VoiceComment({
             type="button"
             className="voice-comment__button voice-comment__stop"
             onClick={() => capture.current?.stop()}
+            disabled={elapsed < MIN_RECORDING_MS}
           >
             <span aria-hidden="true">■</span> Stop ·{" "}
             {Math.floor(elapsed / 1000)}s / 90s
@@ -204,7 +206,9 @@ export default function VoiceComment({
       <div aria-live="polite" className="voice-comment__status">
         {phase === "permission" && "Waiting for microphone permission…"}
         {phase === "recording" &&
-          "Recording your comment. Stops automatically at 90 seconds."}
+          (elapsed < MIN_RECORDING_MS
+            ? `Record at least 5 seconds for noise removal. ${Math.ceil((MIN_RECORDING_MS - elapsed) / 1000)}s remaining.`
+            : "Recording your comment. Stops automatically at 90 seconds.")}
         {phase === "transcribing" &&
           "Removing background noise, then transcribing…"}
         {notice}
@@ -221,8 +225,9 @@ export default function VoiceComment({
       )}
       {!busy && !notice && (
         <p className="voice-comment__help">
-          Review the recording before sending it to ElevenLabs for noise removal
-          and transcription. Edit the text before adding the comment.
+          Record 5–90 seconds. Review the recording before sending it to
+          ElevenLabs for noise removal and transcription. Edit the text before
+          adding the comment.
         </p>
       )}
     </div>

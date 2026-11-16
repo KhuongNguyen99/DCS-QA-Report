@@ -247,13 +247,13 @@ export function createVoiceHandler({
         );
       if (
         !Number.isFinite(durationMs) ||
-        durationMs < 300 ||
+        durationMs < 5_000 ||
         durationMs > 90_500
       ) {
         throw new VoiceError(
           422,
           "invalid_duration",
-          "Record a comment between one and 90 seconds long.",
+          "Record a comment between 5 and 90 seconds long.",
         );
       }
       if (
@@ -356,6 +356,16 @@ export function createVoiceHandler({
       if (error instanceof VoiceError)
         return json(error.status, { code: error.code, error: error.message });
       // Provider errors may contain request details. Never log or return them.
+      const detail = error?.body?.detail;
+      if (
+        detail?.code === "audio_too_short" ||
+        detail?.status === "invalid_audio_duration"
+      )
+        return json(422, {
+          code: "recording_too_short",
+          error:
+            "The audio is too short for noise removal. Record at least 5 seconds and try again.",
+        });
       if (error?.statusCode === 429)
         return json(429, {
           code: "busy",

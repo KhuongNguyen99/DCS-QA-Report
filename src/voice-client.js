@@ -1,4 +1,5 @@
 export const MAX_RECORDING_MS = 90_000;
+export const MIN_RECORDING_MS = 5_000;
 export const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const TYPES = [
   "audio/webm;codecs=opus",
@@ -91,10 +92,10 @@ export async function startVoiceRecording({
       const durationMs = Math.min(now() - startedAt, MAX_RECORDING_MS);
       const type = recorder.mimeType || chunks[0]?.type || "audio/webm";
       const blob = new Blob(chunks, { type });
-      if (blob.size < 100 || durationMs < 300)
+      if (blob.size < 100 || durationMs < MIN_RECORDING_MS)
         onError?.(
           new Error(
-            "The recording is too short. Speak your comment and try again.",
+            "Record at least 5 seconds so noise removal can process your comment.",
           ),
         );
       else onStop?.({ blob, durationMs });
@@ -140,6 +141,12 @@ export async function transcribeVoice({
 }) {
   if (!clip?.blob || clip.blob.size > MAX_AUDIO_BYTES || clip.blob.size < 100)
     throw new Error("Record a comment no larger than 10 MB.");
+  if (
+    !Number.isFinite(clip.durationMs) ||
+    clip.durationMs < MIN_RECORDING_MS ||
+    clip.durationMs > MAX_RECORDING_MS + 500
+  )
+    throw new Error("Record a comment between 5 and 90 seconds long.");
   const session = await backend?.getSession();
   if (!session?.access_token)
     throw new Error("Sign in before transcribing your comment.");

@@ -5,6 +5,7 @@ import {
   transcribeVoice,
   MAX_RECORDING_MS,
   MAX_AUDIO_BYTES,
+  MIN_RECORDING_MS,
 } from "../src/voice-client.js";
 
 function captureFixture(overrides = {}) {
@@ -75,11 +76,11 @@ test("microphone capture uses audio only, supports MP4 and releases tracks on no
   events.recorder.ondataavailable({
     data: new Blob([new Uint8Array(200)], { type: "audio/mp4" }),
   });
-  setTime(1200);
+  setTime(6000);
   recording.stop();
   assert.equal(events.stoppedTracks, 1);
   assert.equal(events.clips[0].blob.type, "audio/mp4");
-  assert.equal(events.clips[0].durationMs, 1200);
+  assert.equal(events.clips[0].durationMs, 6000);
 });
 
 test("cancel stops the microphone and prevents late callbacks from delivering a clip", async () => {
@@ -93,6 +94,36 @@ test("cancel stops the microphone and prevents late callbacks from delivering a 
   events.recorder.onstop();
   assert.ok(events.stoppedTracks >= 1);
   assert.equal(events.clips.length, 0);
+});
+
+test("short recordings stop the microphone and cannot reach paid transcription", async () => {
+  const { events, options, setTime } = captureFixture();
+  const recording = await startVoiceRecording(options);
+  events.recorder.ondataavailable({
+    data: new Blob([new Uint8Array(200)], { type: "audio/mp4" }),
+  });
+  setTime(MIN_RECORDING_MS - 1);
+  recording.stop();
+  assert.equal(events.clips.length, 0);
+  assert.equal(events.stoppedTracks, 1);
+  assert.match(events.errors[0].message, /at least 5 seconds/);
+  await assert.rejects(
+    transcribeVoice({
+      clip: {
+        blob: new Blob([new Uint8Array(200)], { type: "audio/webm" }),
+        durationMs: 4600,
+      },
+      backend: {
+        getSession() {
+          throw new Error("Must reject before reading a session");
+        },
+      },
+      fetchImpl() {
+        throw new Error("Must not send short audio");
+      },
+    }),
+    /between 5 and 90 seconds/,
+  );
 });
 
 test("construction failure, recording error and size limits release microphone tracks", async () => {
@@ -141,7 +172,7 @@ test("browser sends only user JWT, public key and recording and returns an edita
     recordKey: "device:V-3541",
     clip: {
       blob: new Blob([new Uint8Array(200)], { type: "audio/mp4" }),
-      durationMs: 2000,
+      durationMs: 6000,
     },
     async fetchImpl(url, options) {
       sent = { url, options };
@@ -160,7 +191,7 @@ test("browser sends only user JWT, public key and recording and returns an edita
     sent.options.body.get("walkdown_id"),
     "11111111-1111-4111-8111-111111111111",
   );
-  assert.equal(sent.options.body.get("duration_ms"), "2000");
+  assert.equal(sent.options.body.get("duration_ms"), "6000");
 });
 
 test("missing session cannot send audio and missing deployment has a readable setup message", async () => {
@@ -169,7 +200,7 @@ test("missing session cannot send audio and missing deployment has a readable se
     recordKey: "device:V-3541",
     clip: {
       blob: new Blob([new Uint8Array(200)], { type: "audio/webm" }),
-      durationMs: 2000,
+      durationMs: 6000,
     },
   };
   await assert.rejects(
@@ -203,7 +234,7 @@ test("a voice recording cannot be submitted without a selected skid report", asy
       recordKey: "device:V-3541",
       clip: {
         blob: new Blob([new Uint8Array(200)], { type: "audio/webm" }),
-        durationMs: 2000,
+        durationMs: 6000,
       },
       fetchImpl() {
         throw new Error("Must not send unscoped audio");

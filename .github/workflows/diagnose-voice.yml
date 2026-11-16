@@ -19,5 +19,4 @@ jobs:
       - name: Check provider with synthetic audio
         env:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVEN_LABS_API_KEY }}
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-        run: deno run --allow-env=ELEVENLABS_API_KEY,SUPABASE_ACCESS_TOKEN --allow-net=api.elevenlabs.io,api.supabase.com scripts/diagnose-voice.mjs
+        run: deno run --allow-env=ELEVENLABS_API_KEY --allow-net=api.elevenlabs.io --allow-read=tests/fixtures/voice-check.wav scripts/diagnose-voice.mjs

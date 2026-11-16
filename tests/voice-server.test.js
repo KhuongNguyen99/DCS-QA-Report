@@ -96,7 +96,7 @@ function request({
   type = "audio/webm;codecs=opus",
   size = 256,
   key = "device:V-3541",
-  duration = 2000,
+  duration = 6000,
   walkdown = walkdownId,
   duplicateWalkdown = false,
   headers = {},
@@ -252,12 +252,35 @@ test("unsupported, empty, oversized and excessive-duration audio is rejected bef
     [{ size: 20 }, 422],
     [{ size: MAX_AUDIO_BYTES + 1 }, 413],
     [{ duration: 95000 }, 422],
+    [{ duration: 4999 }, 422],
     [{ headers: { "Content-Length": String(MAX_AUDIO_BYTES + 70_000) } }, 413],
   ]) {
     const { handler, calls } = fixture();
     assert.equal((await handler(request(options))).status, status);
     assert.equal(
       calls.some((call) => call[0] === "sdk"),
+      false,
+    );
+  }
+});
+
+test("provider short-audio errors produce useful guidance without leaking provider details or starting Scribe", async () => {
+  for (const detail of [
+    { code: "audio_too_short", message: "private-provider-detail" },
+    { status: "invalid_audio_duration", message: "private-provider-detail" },
+  ]) {
+    const { handler, calls } = fixture({
+      isolationError: { statusCode: 400, body: { detail } },
+    });
+    // The server still handles encoded audio shorter than its submitted wall-clock duration.
+    const response = await handler(request({ duration: 5000 }));
+    assert.equal(response.status, 422);
+    const result = await response.json();
+    assert.equal(result.code, "recording_too_short");
+    assert.match(result.error, /at least 5 seconds/);
+    assert.doesNotMatch(JSON.stringify(result), /private-provider-detail/);
+    assert.equal(
+      calls.some((call) => call[0] === "transcribe"),
       false,
     );
   }

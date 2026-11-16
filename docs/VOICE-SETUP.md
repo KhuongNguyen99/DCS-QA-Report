@@ -1,6 +1,6 @@
 # Voice comments
 
-An inspector can record up to 90 seconds for a device, terminal, or the whole walkdown, listen to the recording, and choose **Transcribe recording**. The server first removes background noise with ElevenLabs Audio Isolation, then transcribes the isolated audio with Scribe v2. If noise removal fails, transcription stops. The result fills the editable comment draft; the inspector must review it and explicitly add the comment.
+An inspector can record between 5 and 90 seconds for a device, terminal, or the whole walkdown, listen to the recording, and choose **Transcribe recording**. The server first removes background noise with ElevenLabs Audio Isolation, then transcribes the isolated audio with Scribe v2. If noise removal fails, transcription stops. The result fills the editable comment draft; the inspector must review it and explicitly add the comment.
 
 ## Deploy
 
@@ -39,3 +39,5 @@ As an alternative to GitHub Actions, deploy all files from `supabase/functions/t
 Run `node --test tests/voice*.test.js` for mocked browser capture/request and server pipeline tests. These check cleanup, authentication/membership, limits, correct processing order, error handling, and refusal to skip isolation. They make no paid API calls. Deno type checking and the official SDK's mock-fetch pipeline can validate integration shape; successful live transcription still requires configured credentials and a real recording.
 
 If the gateway returns 401 before the handler, first check that the request carries a current user JWT and the correct project API key. Do not disable JWT checks as a generic fix. The handler's `getUser()` and allowlist checks must always remain in place. [Supabase Edge Function authentication headers](https://supabase.com/docs/guides/functions/auth-headers).
+
+The **Diagnose voice service** workflow sends only the included six-second synthetic speech fixture through the deployed SDK adapter and real Audio Isolation/Scribe APIs. It runs manually and uses ElevenLabs credits. It never uploads QA evidence or comments.

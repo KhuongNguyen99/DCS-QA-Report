@@ -23,7 +23,7 @@ Photos, comments, quality, and completion are shared across signed-in devices. O
 
 ## Voice comments
 
-The microphone tool records up to 90 seconds. After you review the recording, the private voice function sends it to ElevenLabs Audio Isolation, then Scribe v2. The transcript fills the editable comment draft; it is never posted automatically. Audio is not retained by this app.
+The microphone tool records between 5 and 90 seconds. After you review the recording, the private voice function sends it to ElevenLabs Audio Isolation, then Scribe v2. The transcript fills the editable comment draft; it is never posted automatically. Audio is not retained by this app.
 
 The [voice setup guide](docs/VOICE-SETUP.md) describes the GitHub environment secrets and deployment. The ElevenLabs key belongs only in server secrets and never in a `VITE_` variable or browser code.
 
