@@ -36,6 +36,27 @@ const STATUS = {
   "not-started": "Not started",
 };
 const asset = (name) => `${import.meta.env.BASE_URL}assets/${name}`;
+const selectionKey = (config) => `jeevy-qa-skid:${config.url}`;
+function rememberedSkid(config) {
+  try {
+    const id = localStorage.getItem(selectionKey(config));
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      id || "",
+    )
+      ? id
+      : null;
+  } catch {
+    return null;
+  }
+}
+function rememberSkid(config, id) {
+  try {
+    if (id) localStorage.setItem(selectionKey(config), id);
+    else localStorage.removeItem(selectionKey(config));
+  } catch {
+    /* A blocked browser store does not prevent shared inspection. */
+  }
+}
 const date = (value) =>
   value
     ? new Date(value).toLocaleString(undefined, {
@@ -98,6 +119,17 @@ function App() {
   const [view, setView] = useState("layout");
   const [group, setGroup] = useState(null);
   const [state, setState] = useState(EMPTY);
+  const [workspace, setWorkspace] = useState({
+    inspector: null,
+    walkdowns: [],
+  });
+  const [selectedId, setSelectedId] = useState(() =>
+    rememberedSkid(readConfig()),
+  );
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const [skidDialog, setSkidDialog] = useState(null);
+  const [pending, setPending] = useState(0);
   const [session, setSession] = useState(null);
   const [checking, setChecking] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -113,25 +145,83 @@ function App() {
   const [reporting, setReporting] = useState("");
   const [lastSync, setLastSync] = useState(null);
   const request = useRef(0);
-  const backend = useMemo(() => {
+  const workspaceRequest = useRef(0);
+  const workspaceBackend = useMemo(() => {
     try {
       return createBackend(config);
     } catch {
       return null;
     }
   }, [config]);
-  const connected = Boolean(state.inspector);
+  const backend = useMemo(
+    () => selectedId && workspaceBackend?.forWalkdown(selectedId),
+    [workspaceBackend, selectedId],
+  );
+  const signedIn = Boolean(workspace.inspector);
+  const activeBackend = useRef(null);
+  activeBackend.current = signedIn ? backend : null;
+  const inspector = workspace.inspector || state.inspector;
+  const selectedSkid = workspace.walkdowns.find(
+    (item) => item.id === selectedId,
+  );
+  const connected = Boolean(
+    state.inspector &&
+    state.project?.walkdownId === selectedId &&
+    !state.project?.nameRequired,
+  );
+  const switchBlocked = Boolean(pending || reporting || camera || record);
   const reportRevision = state.project?.revision ?? schedule.project.revision;
   const totals = inspectionProgress(schedule.devices, schedule.groups, state);
 
+  const loadWorkspace = useCallback(async () => {
+    if (!workspaceBackend) return;
+    const version = ++workspaceRequest.current;
+    const loaded = await workspaceBackend.listWalkdowns();
+    if (workspaceRequest.current !== version) return;
+    setWorkspace(loaded);
+    const current = selectedIdRef.current;
+    const next =
+      loaded.walkdowns.find((item) => item.id === current)?.id ||
+      loaded.walkdowns[0]?.id ||
+      null;
+    if (next !== current) {
+      ++request.current;
+      selectedIdRef.current = next;
+      setSelectedId(next);
+      setState(EMPTY);
+      setRecord(null);
+      setCamera(null);
+    }
+    rememberSkid(config, next);
+    return loaded;
+  }, [workspaceBackend, config]);
+
   const refresh = useCallback(async () => {
-    if (!backend) return;
+    if (!backend || activeBackend.current !== backend) return;
     const version = ++request.current;
     setLoading(true);
     try {
       const loaded = await backend.loadState();
-      if (request.current === version) {
+      if (
+        activeBackend.current === backend &&
+        request.current === version &&
+        selectedIdRef.current === backend.walkdownId
+      ) {
         setState(loaded);
+        setWorkspace((previous) => ({
+          ...previous,
+          walkdowns: previous.walkdowns.map((item) =>
+            item.id === backend.walkdownId
+              ? {
+                  ...item,
+                  skidName: loaded.project.skidName,
+                  revision: loaded.project.revision,
+                  nameRequired: loaded.project.nameRequired,
+                  updatedAt: loaded.project.updatedAt,
+                }
+              : item,
+          ),
+        }));
         setLastSync(new Date());
         setError("");
       }
@@ -147,18 +237,27 @@ function App() {
   useEffect(() => {
     let disposed = false;
     setChecking(true);
+    ++workspaceRequest.current;
+    ++request.current;
+    const remembered = rememberedSkid(config);
+    selectedIdRef.current = remembered;
+    setSelectedId(remembered);
+    setWorkspace({ inspector: null, walkdowns: [] });
     setState(EMPTY);
     setSession(null);
-    if (!backend) {
+    setRecord(null);
+    setCamera(null);
+    setDrafts({});
+    if (!workspaceBackend) {
       setChecking(false);
       return;
     }
-    backend
+    workspaceBackend
       .getSession()
       .then(async (value) => {
         if (disposed) return;
         setSession(value);
-        if (value?.user) await refresh();
+        if (value?.user) await loadWorkspace();
       })
       .catch((e) => {
         if (!disposed) setError(e.message);
@@ -169,11 +268,47 @@ function App() {
     return () => {
       disposed = true;
       ++request.current;
+      ++workspaceRequest.current;
     };
-  }, [backend, refresh]);
+  }, [workspaceBackend, loadWorkspace, config]);
 
   useEffect(() => {
-    if (!connected || !backend) return;
+    ++request.current;
+    setState(EMPTY);
+    if (signedIn && backend) refresh().catch(() => {});
+  }, [backend, signedIn, refresh]);
+
+  useEffect(() => {
+    if (!workspaceBackend || !signedIn) return;
+    let active = true;
+    const unsubscribe = workspaceBackend.subscribeWalkdowns(async () => {
+      try {
+        const currentSession = await workspaceBackend.getSession();
+        if (!active) return;
+        setSession(currentSession);
+        if (!currentSession?.user) {
+          ++request.current;
+          ++workspaceRequest.current;
+          setWorkspace({ inspector: null, walkdowns: [] });
+          setState(EMPTY);
+          setRecord(null);
+          setCamera(null);
+          setDrafts({});
+          return;
+        }
+        await loadWorkspace();
+      } catch (e) {
+        if (active) setError(e.message);
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [workspaceBackend, signedIn, loadWorkspace]);
+
+  useEffect(() => {
+    if (!signedIn || !backend) return;
     const reload = () => {
       if (document.visibilityState === "visible") refresh().catch(() => {});
     };
@@ -187,7 +322,7 @@ function App() {
       window.removeEventListener("focus", reload);
       window.removeEventListener("online", reload);
     };
-  }, [backend, connected, refresh]);
+  }, [backend, signedIn, refresh]);
 
   useEffect(() => {
     if (!notice) return;
@@ -201,11 +336,47 @@ function App() {
     setSearch("");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
+  function chooseSkid(id) {
+    if (switchBlocked) return;
+    ++request.current;
+    selectedIdRef.current = id;
+    setSelectedId(id);
+    rememberSkid(config, id);
+    setState(EMPTY);
+    setRecord(null);
+    setCamera(null);
+    setError("");
+    setGroup(null);
+  }
+  function draftFor(key) {
+    return drafts[`${selectedId}:${key}`] || "";
+  }
+  function updateDraft(key, value) {
+    const scopedKey = `${selectedId}:${key}`;
+    setDrafts((previous) => ({
+      ...previous,
+      [scopedKey]:
+        typeof value === "function" ? value(previous[scopedKey] || "") : value,
+    }));
+  }
+  async function saveSkid(name) {
+    const saved =
+      skidDialog === "new"
+        ? await workspaceBackend.createWalkdown(name)
+        : await workspaceBackend.renameWalkdown(selectedId, name);
+    await loadWorkspace();
+    if (saved.id !== selectedId) chooseSkid(saved.id);
+    setSkidDialog(null);
+    if (saved.id === selectedId) await refresh();
+    setNotice(skidDialog === "new" ? "Skid report created" : "Skid name saved");
+  }
   async function signOut() {
     try {
-      await backend.signOut();
+      await workspaceBackend.signOut();
       ++request.current;
+      ++workspaceRequest.current;
       setSession(null);
+      setWorkspace({ inspector: null, walkdowns: [] });
       setState(EMPTY);
       setRecord(null);
       setCamera(null);
@@ -216,7 +387,11 @@ function App() {
     }
   }
   async function mutate(operation, message = "Saved to the shared workspace") {
-    if (!connected) throw new Error("Sign in to your shared workspace first.");
+    if (!connected)
+      throw new Error(
+        "Choose a named skid report before adding inspection evidence.",
+      );
+    setPending((count) => count + 1);
     try {
       await operation();
       await refresh();
@@ -224,6 +399,8 @@ function App() {
     } catch (e) {
       setError(e.message);
       throw e;
+    } finally {
+      setPending((count) => count - 1);
     }
   }
   function openRecord(kind, id) {
@@ -241,12 +418,14 @@ function App() {
   }
   function scan(terminal = null) {
     if (!connected) {
-      setAuthOpen(true);
+      if (!signedIn) setAuthOpen(true);
+      else setError("Create or name a skid report before documenting devices.");
       return;
     }
     setCamera({ target: null, terminal });
   }
   async function exportReport() {
+    if (!connected) return;
     setReporting("Preparing your report…");
     setError("");
     try {
@@ -265,7 +444,10 @@ function App() {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `450k-Skid-x7-DCS-QA-Report-Rev${snapshot.project?.revision ?? reportRevision}-${new Date().toLocaleDateString("en-CA")}.pdf`;
+      const skidFilename = snapshot.project.skidName
+        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
+        .replace(/[. ]+$/g, "");
+      anchor.download = `450k-Skid-x7-${skidFilename}-DCS-QA-Report-Rev${snapshot.project.revision}-${new Date().toLocaleDateString("en-CA")}.pdf`;
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 60000);
       setNotice("PDF report exported with the current shared evidence.");
@@ -292,9 +474,11 @@ function App() {
           <span>FIELD QA</span>
         </a>
         <div className="project-tag">
-          <span className="eyebrow">CURRENT PROJECT</span>
-          <strong>450k Skid x7</strong>
-          <span>DCS · QA Revision {reportRevision}</span>
+          <span className="eyebrow">CURRENT SKID REPORT</span>
+          <strong>{selectedSkid?.skidName || "450k Skid x7"}</strong>
+          <span>
+            {connected ? `QA Revision ${reportRevision}` : "DCS · Field QA"}
+          </span>
         </div>
         <nav aria-label="Main navigation">
           {[
@@ -321,22 +505,22 @@ function App() {
         <div className="sidebar-bottom">
           <div className="shared-indicator">
             <Icon name="cloud" />
-            <span>{connected ? "Shared workspace" : "Workspace preview"}</span>
+            <span>{signedIn ? "Shared workspace" : "Workspace preview"}</span>
           </div>
           <p>
-            {connected
-              ? "Evidence is saved to your team’s private workspace."
+            {signedIn
+              ? "Each skid keeps its own inspection evidence."
               : "Sign in to capture and share inspection evidence."}
           </p>
           <button
             className="inspector-chip"
             onClick={() =>
-              connected ? navigate("workspace") : setAuthOpen(true)
+              signedIn ? navigate("workspace") : setAuthOpen(true)
             }
           >
             <span className="avatar">
-              {connected ? (
-                (state.inspector.name || state.inspector.email || "Q")
+              {signedIn ? (
+                (inspector.name || inspector.email || "Q")
                   .slice(0, 1)
                   .toUpperCase()
               ) : (
@@ -345,13 +529,11 @@ function App() {
             </span>
             <span>
               <strong>
-                {connected
-                  ? state.inspector.name || state.inspector.email.split("@")[0]
+                {signedIn
+                  ? inspector.name || inspector.email.split("@")[0]
                   : "Inspector sign-in"}
               </strong>
-              <small>
-                {connected ? state.inspector.email : "Connect to begin"}
-              </small>
+              <small>{signedIn ? inspector.email : "Connect to begin"}</small>
             </span>
             <Icon name="arrow" size={15} />
           </button>
@@ -366,21 +548,26 @@ function App() {
             <span>450K SKID X7</span>
           </div>
           <div className="topbar-actions">
-            <span className={`sync-label ${connected ? "online" : ""}`}>
+            <span className={`sync-label ${signedIn ? "online" : ""}`}>
               <span />
               {checking
                 ? "Connecting…"
                 : loading
                   ? "Syncing…"
-                  : connected
+                  : signedIn
                     ? "All changes shared"
                     : "Not signed in"}
             </span>
-            {connected ? (
+            {signedIn ? (
               <button
                 className="icon-button"
                 aria-label="Refresh shared inspection"
-                onClick={() => refresh().catch(() => {})}
+                onClick={() =>
+                  Promise.all([
+                    loadWorkspace(),
+                    backend ? refresh() : Promise.resolve(),
+                  ]).catch((e) => setError(e.message))
+                }
                 disabled={loading}
               >
                 <Icon name="refresh" size={17} />
@@ -452,7 +639,7 @@ function App() {
               </button>
             </div>
           )}
-          {!connected && !checking && view !== "workspace" && (
+          {!signedIn && !checking && view !== "workspace" && (
             <div className="message preview-message">
               <Icon name="cloud" />
               <div>
@@ -470,7 +657,9 @@ function App() {
               <button
                 className="small-button"
                 onClick={() =>
-                  session?.user ? refresh().catch(() => {}) : setAuthOpen(true)
+                  session?.user
+                    ? loadWorkspace().catch((e) => setError(e.message))
+                    : setAuthOpen(true)
                 }
               >
                 {session?.user ? "Retry" : "Sign in"}
@@ -478,7 +667,94 @@ function App() {
             </div>
           )}
 
-          {view === "layout" && !group && (
+          {signedIn && (
+            <section
+              className="skid-picker card"
+              aria-label="Skid report selection"
+            >
+              <label htmlFor="skid-report">
+                <span className="eyebrow">SKID REPORT</span>
+                <select
+                  id="skid-report"
+                  value={selectedId || ""}
+                  disabled={switchBlocked || loading}
+                  onChange={(event) => chooseSkid(event.target.value)}
+                >
+                  {!workspace.walkdowns.length && (
+                    <option value="">Choose a skid report</option>
+                  )}
+                  {workspace.walkdowns.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.skidName}
+                      {item.nameRequired ? " — name required" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="skid-picker-actions">
+                <button
+                  className="small-button"
+                  disabled={!selectedSkid || switchBlocked || loading}
+                  onClick={() => setSkidDialog("rename")}
+                >
+                  Rename skid
+                </button>
+                <button
+                  className="small-button green"
+                  disabled={switchBlocked || loading}
+                  onClick={() => setSkidDialog("new")}
+                >
+                  New skid report
+                </button>
+              </div>
+              <p>
+                Photos, comments, QA status, and revisions belong to the
+                selected skid.
+              </p>
+            </section>
+          )}
+
+          {signedIn && !connected && view !== "workspace" && (
+            <section className="card skid-empty">
+              <Icon name="report" size={32} />
+              <h2>
+                {loading
+                  ? "Loading skid report…"
+                  : selectedSkid?.nameRequired
+                    ? "Name this skid before starting QA"
+                    : selectedSkid
+                      ? "Load this skid report to continue"
+                      : "Create a report for your skid"}
+              </h2>
+              <p>
+                {selectedSkid?.nameRequired
+                  ? "The existing inspection is preserved. Enter its skid name to continue documenting and export the report."
+                  : selectedSkid
+                    ? "The shared report could not be loaded. Retry to reopen this skid’s inspection evidence."
+                    : "Enter the skid name manually, or select an existing report above."}
+              </p>
+              {!loading && (
+                <button
+                  className="button primary"
+                  onClick={() =>
+                    selectedSkid && !selectedSkid.nameRequired
+                      ? refresh().catch(() => {})
+                      : setSkidDialog(
+                          selectedSkid?.nameRequired ? "rename" : "new",
+                        )
+                  }
+                >
+                  {selectedSkid?.nameRequired
+                    ? "Name this skid"
+                    : selectedSkid
+                      ? "Retry loading report"
+                      : "New skid report"}
+                </button>
+              )}
+            </section>
+          )}
+
+          {(connected || !signedIn) && view === "layout" && !group && (
             <>
               <section className="stats-strip" aria-label="Inspection progress">
                 <Stat
@@ -607,19 +883,12 @@ function App() {
                 </div>
                 <div className="general-comments-content">
                   <CommentPanel
+                    key={`${selectedId}:walkdown:general`}
                     recordKey="walkdown:general"
                     title="Team observations"
                     comments={commentsFor("walkdown:general", state)}
-                    draft={drafts["walkdown:general"] || ""}
-                    onDraft={(value) =>
-                      setDrafts((previous) => ({
-                        ...previous,
-                        ["walkdown:general"]:
-                          typeof value === "function"
-                            ? value(previous["walkdown:general"] || "")
-                            : value,
-                      }))
-                    }
+                    draft={draftFor("walkdown:general")}
+                    onDraft={(value) => updateDraft("walkdown:general", value)}
                     onPost={(text) =>
                       mutate(
                         () => backend.addComment("walkdown:general", text),
@@ -635,7 +904,7 @@ function App() {
             </>
           )}
 
-          {view === "layout" && group && (
+          {(connected || !signedIn) && view === "layout" && group && (
             <>
               <button
                 className="text-button back-link"
@@ -722,7 +991,7 @@ function App() {
             </>
           )}
 
-          {view === "devices" && (
+          {(connected || !signedIn) && view === "devices" && (
             <OverviewTable
               schedule={schedule}
               state={state}
@@ -739,7 +1008,7 @@ function App() {
             />
           )}
 
-          {view === "report" && (
+          {(connected || !signedIn) && view === "report" && (
             <>
               <section className="report-hero card">
                 <div className="report-emblem">
@@ -749,7 +1018,11 @@ function App() {
                   <span className="eyebrow">
                     450K SKID X7 · REVISION {reportRevision}
                   </span>
-                  <h2>Your inspection, in one report</h2>
+                  <h2>
+                    {selectedSkid?.skidName
+                      ? `${selectedSkid.skidName} — QA Report`
+                      : "Your inspection, in one report"}
+                  </h2>
                   <p>
                     Includes all 28 devices, 8 terminal groups, photos,
                     comments, and completion status. Unfinished items are
@@ -832,19 +1105,12 @@ function App() {
                 </div>
                 <div className="general-comments-content">
                   <CommentPanel
+                    key={`${selectedId}:walkdown:general`}
                     recordKey="walkdown:general"
                     title="Team observations"
                     comments={commentsFor("walkdown:general", state)}
-                    draft={drafts["walkdown:general"] || ""}
-                    onDraft={(value) =>
-                      setDrafts((previous) => ({
-                        ...previous,
-                        ["walkdown:general"]:
-                          typeof value === "function"
-                            ? value(previous["walkdown:general"] || "")
-                            : value,
-                      }))
-                    }
+                    draft={draftFor("walkdown:general")}
+                    onDraft={(value) => updateDraft("walkdown:general", value)}
                     onPost={(text) =>
                       mutate(
                         () => backend.addComment("walkdown:general", text),
@@ -873,9 +1139,9 @@ function App() {
 
           {view === "workspace" && (
             <Workspace
-              backend={backend}
-              connected={connected}
-              state={state}
+              backend={workspaceBackend}
+              connected={signedIn}
+              state={{ ...state, inspector }}
               session={session}
               config={config}
               setConfig={setConfig}
@@ -889,6 +1155,7 @@ function App() {
             <span>
               {connected ? "Private shared workspace" : "Project preview"}
               <i>·</i>Revision {reportRevision}
+              {connected && <> · {state.project.skidName}</>}
             </span>
           </footer>
         </main>
@@ -901,16 +1168,24 @@ function App() {
       )}
       {authOpen && (
         <AuthDialog
-          backend={backend}
+          backend={workspaceBackend}
           config={config}
           setConfig={setConfig}
           onClose={() => setAuthOpen(false)}
           onVerified={async (value) => {
             setSession(value);
-            await refresh();
+            await loadWorkspace();
             setAuthOpen(false);
-            setNotice("Connected to your shared inspection.");
+            setNotice("Connected. Select a skid report or create one.");
           }}
+        />
+      )}
+      {skidDialog && (
+        <SkidDialog
+          mode={skidDialog}
+          current={selectedSkid}
+          onSave={saveSkid}
+          onClose={() => setSkidDialog(null)}
         />
       )}
       {record && !camera && (
@@ -920,18 +1195,11 @@ function App() {
           className="record-dialog"
         >
           <RecordPanel
+            key={`${selectedId}:${record.key}`}
             target={record}
             config={config}
-            draft={drafts[record.key] || ""}
-            onDraft={(value) =>
-              setDrafts((previous) => ({
-                ...previous,
-                [record.key]:
-                  typeof value === "function"
-                    ? value(previous[record.key] || "")
-                    : value,
-              }))
-            }
+            draft={draftFor(record.key)}
+            onDraft={(value) => updateDraft(record.key, value)}
             state={state}
             connected={connected}
             backend={backend}
@@ -966,6 +1234,7 @@ function App() {
       )}
       {camera && (
         <CameraDialog
+          skidName={state.project?.skidName}
           target={camera.target}
           devices={schedule.devices}
           terminal={camera.terminal}
@@ -992,6 +1261,74 @@ function App() {
         />
       )}
     </div>
+  );
+}
+
+function SkidDialog({ mode, current, onSave, onClose }) {
+  const [name, setName] = useState(
+    mode === "rename" && !current?.nameRequired ? current?.skidName || "" : "",
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <Modal
+      title={mode === "new" ? "New skid report" : "Name skid report"}
+      onClose={() => {
+        if (!saving) onClose();
+      }}
+      className="auth-dialog"
+    >
+      <form
+        className="auth-form"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          setSaving(true);
+          setError("");
+          try {
+            await onSave(name.trim());
+          } catch (e) {
+            setError(e.message);
+          } finally {
+            setSaving(false);
+          }
+        }}
+      >
+        <label>
+          Skid name
+          <input
+            autoFocus
+            required
+            maxLength={120}
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="e.g. Skid 07"
+            disabled={saving}
+            autoComplete="off"
+          />
+        </label>
+        <p className="help-text">
+          {mode === "new"
+            ? "This creates a separate inspection for this skid. Its photos, comments, QA status, and revisions stay together."
+            : "Renaming keeps this report’s existing evidence and advances its revision."}
+        </p>
+        {error && (
+          <p role="alert" className="field-error">
+            {error}
+          </p>
+        )}
+        <button
+          className="button primary full-width"
+          type="submit"
+          disabled={saving || !name.trim()}
+        >
+          {saving
+            ? "Saving…"
+            : mode === "new"
+              ? "Create skid report"
+              : "Save skid name"}
+        </button>
+      </form>
+    </Modal>
   );
 }
 
@@ -1236,6 +1573,7 @@ function RecordPanel({
   return (
     <div className="record-content">
       <div className="record-summary">
+        <span className="terminal-badge">Skid: {state.project?.skidName}</span>
         <span className="terminal-badge">Terminal {target.terminal}</span>
         <Status value={status} connected={connected} />
         {target.device && (

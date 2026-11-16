@@ -133,6 +133,7 @@ test("browser sends only user JWT, public key and recording and returns an edita
       key: "sb_publishable_public",
     },
     backend: {
+      walkdownId: "11111111-1111-4111-8111-111111111111",
       async getSession() {
         return { access_token: "user-jwt" };
       },
@@ -155,6 +156,10 @@ test("browser sends only user JWT, public key and recording and returns an edita
   });
   assert.equal(sent.options.body.get("audio").name, "comment.m4a");
   assert.equal(sent.options.body.get("record_key"), "device:V-3541");
+  assert.equal(
+    sent.options.body.get("walkdown_id"),
+    "11111111-1111-4111-8111-111111111111",
+  );
   assert.equal(sent.options.body.get("duration_ms"), "2000");
 });
 
@@ -180,9 +185,30 @@ test("missing session cannot send audio and missing deployment has a readable se
   await assert.rejects(
     transcribeVoice({
       ...args,
-      backend: { getSession: async () => ({ access_token: "user-jwt" }) },
+      backend: {
+        walkdownId: "11111111-1111-4111-8111-111111111111",
+        getSession: async () => ({ access_token: "user-jwt" }),
+      },
       fetchImpl: async () => new Response("Not deployed", { status: 404 }),
     }),
     /not configured yet/,
+  );
+});
+
+test("a voice recording cannot be submitted without a selected skid report", async () => {
+  await assert.rejects(
+    transcribeVoice({
+      config: { url: "https://example.supabase.co", key: "public" },
+      backend: { getSession: async () => ({ access_token: "user-jwt" }) },
+      recordKey: "device:V-3541",
+      clip: {
+        blob: new Blob([new Uint8Array(200)], { type: "audio/webm" }),
+        durationMs: 2000,
+      },
+      fetchImpl() {
+        throw new Error("Must not send unscoped audio");
+      },
+    }),
+    /Choose a named skid report/,
   );
 });

@@ -1,6 +1,9 @@
 -- Add a shared QA report revision to an existing project. Existing report data
 -- is baseline revision 3. Re-running preserves the current revision and notes.
 begin;
+do $$ begin
+  if to_regclass('public.qa_walkdowns') is not null then raise exception 'This migration predates named skids. Use named-walkdowns.sql instead.'; end if;
+end; $$;
 
 create table if not exists public.qa_project (
   id integer primary key default 1 check (id = 1),

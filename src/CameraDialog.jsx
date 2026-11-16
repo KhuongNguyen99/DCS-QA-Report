@@ -47,6 +47,7 @@ function captureVideoFrame(video) {
 }
 
 export default function CameraDialog({
+  skidName,
   target,
   devices = [],
   terminal = null,
@@ -341,7 +342,9 @@ export default function CameraDialog({
       <section className="camera-dialog">
         <header className="camera-header">
           <div>
-            <p className="camera-eyebrow">Camera</p>
+            <p className="camera-eyebrow">
+              {skidName ? `Skid: ${skidName}` : "Camera"}
+            </p>
             <h2 id="camera-title">
               {mode === "scan"
                 ? "Scan a device label"

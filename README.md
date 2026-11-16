@@ -5,18 +5,19 @@ Shared field inspection for **450k Skid x7 - DCS**. The app is a mobile-friendly
 ## Inspection workflow
 
 1. Sign in with an approved inspector email. Open the email's sign-in link, or enter its code if one is included.
-2. Tap A–H on the conduit layout to open that terminal group, or use **QA overview** for all 28 devices and 8 terminals.
-3. Scan a device label or open its row. Label matching tolerates surrounding text such as `OV-3541F` and `*V-3541#`; ambiguous matches need your selection.
-4. Capture or upload evidence photos and add comments. Each terminal also has its own evidence record.
-5. Choose **Good** or **Bad** in the Quality column. The checkboxes are mutually exclusive; clicking the selected choice clears it.
-6. Review evidence and mark QA complete. A terminal turns green after its own evidence and all its devices are complete.
-7. Export the whole inspection from **Report**. The PDF includes unfinished items, quality, photos, comments, authors, and timestamps.
+2. Create a **New skid report** and enter its skid name, or select an existing report. Each skid has separate photos, comments, quality, completion, and revision. Existing pre-skid data is preserved as **Unassigned skid** and must be named before continuing.
+3. Tap A–H on the conduit layout to open that terminal group, or use **QA overview** for all 28 devices and 8 terminals.
+4. Scan a device label or open its row. Label matching tolerates surrounding text such as `OV-3541F` and `*V-3541#`; ambiguous matches need your selection.
+5. Capture or upload evidence photos and add comments. Each terminal also has its own evidence record.
+6. Choose **Good** or **Bad** in the Quality column. The checkboxes are mutually exclusive; clicking the selected choice clears it.
+7. Review evidence and mark QA complete. A terminal turns green after its own evidence and all its devices are complete.
+8. Export the whole inspection from **Report**. The PDF includes unfinished items, quality, photos, comments, authors, and timestamps.
 
-**Documented** in the overview means at least one saved photo. It is separate from quality and completed QA review. Comments are optional. Draft comments survive camera navigation until posted or signed out.
+**Documented** in the overview means at least one saved photo. It is separate from quality and completed QA review. Comments are optional. Draft comments stay with their skid when switching reports and survive camera navigation until posted, the page is reloaded, or the inspector signs out.
 
 Use **General walkdown comments** on the layout or report screen for notes about the whole inspection. Typed and voice notes are shared with the team and included in their own PDF section.
 
-The QA PDF matches the landscape wiring document's cover, header, and footer, with the subtitle **QA Report**. Its shared revision starts at 3 and advances once for each saved change to evidence, comments, quality, or completion. Reading, scanning, recording a draft, and exporting unchanged data do not advance it. All pages and the downloaded filename use the same snapshot revision.
+The QA PDF matches the landscape wiring document's cover, header, and footer, with the cover title **450k skid x7 - DCS** and subtitle **QA Report - <Skid name>**. Every page footer places the skid name beside its revision number. Each skid’s shared revision starts at 3 and advances once for each saved change to its name, evidence, comments, quality, or completion. Reading, scanning, recording a draft, and exporting unchanged data do not advance it. All pages and the downloaded filename use the same snapshot revision.
 
 Photos, comments, quality, and completion are shared across signed-in devices. OCR runs locally using the bundled Tesseract English model. Failed saves show an error and retain the capture for retry; a network connection is required to save shared evidence.
 

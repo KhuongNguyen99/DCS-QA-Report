@@ -24,7 +24,7 @@ export default function VoiceComment({
   const generation = useRef(0);
   const supported = Boolean(
     globalThis.navigator?.mediaDevices?.getUserMedia &&
-      globalThis.MediaRecorder,
+    globalThis.MediaRecorder,
   );
 
   function release() {
@@ -49,7 +49,7 @@ export default function VoiceComment({
     return release;
     // Record changes/unmount must never deliver speech into another item's draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recordKey]);
+  }, [recordKey, backend?.walkdownId]);
 
   useEffect(() => {
     if (disabled) cancel();

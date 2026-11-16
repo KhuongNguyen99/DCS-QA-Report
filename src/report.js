@@ -8,6 +8,7 @@ import {
 } from "./inspection.js";
 
 const REPORT_TITLE = "450k Skid x7 - DCS";
+const COVER_TITLE = "450k skid x7 - DCS";
 const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 570 };
 const COLOR = {
   ink: [30, 43, 54],
@@ -134,11 +135,22 @@ function drawFooters(doc, project) {
   const count = doc.getNumberOfPages();
   for (let page = 1; page <= count; page += 1) {
     doc.setPage(page);
+    const pageLabel = `Page ${page} of ${count}`;
+    const footer = `Revision ${printableText(project.revision)} | Skid: ${printableText(project.skidName)}`;
     doc.setFont("helvetica", "normal");
     doc.setFontSize(7.9);
+    const availableWidth =
+      PAGE.width - PAGE.margin * 2 - doc.getTextWidth(pageLabel) - 18;
+    setText(doc, [80, 80, 80], 7.9);
+    const lines = doc.splitTextToSize(footer, availableWidth);
+    if (lines.length > 2)
+      throw new Error("Skid name is too long to fit in the report footer.");
+    lines.forEach((line, index) =>
+      doc.text(line, PAGE.margin, 599 - (lines.length - index - 1) * 11),
+    );
+    doc.setFont("helvetica", "normal");
     doc.setTextColor(80, 80, 80);
-    doc.text(`Revision ${printableText(project.revision)}`, PAGE.margin, 599);
-    doc.text(`Page ${page} of ${count}`, PAGE.width - PAGE.margin, 599, {
+    doc.text(pageLabel, PAGE.width - PAGE.margin, 599, {
       align: "right",
     });
   }
@@ -218,13 +230,29 @@ function drawCover(doc, project, generatedAt, logoImage) {
     PAGE.margin,
     239,
   );
+  const subtitle = `QA Report - ${printableText(project.skidName)}`;
+  let size = 36;
+  let lines;
+  let subtitleEnd;
+  do {
+    setText(doc, [0, 0, 0], size, "bold");
+    lines = doc.splitTextToSize(subtitle, PAGE.width - PAGE.margin * 2);
+    subtitleEnd = 345 + (lines.length - 1) * size * 1.2;
+    if (subtitleEnd + 40 <= 550) break;
+    size -= 1;
+  } while (size >= 12);
+  if (subtitleEnd + 40 > 550)
+    throw new Error("Skid name is too long to fit on the report cover.");
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(31.9);
-  doc.text(REPORT_TITLE, PAGE.margin, 290);
-  doc.setFontSize(36);
-  doc.text("QA Report", PAGE.margin, 345);
+  doc.setFontSize(Math.min(31.9, size - 1));
+  doc.text(COVER_TITLE, PAGE.margin, 290);
+  setText(doc, [0, 0, 0], size, "bold");
+  lines.forEach((line, index) =>
+    doc.text(line, PAGE.margin, 345 + index * size * 1.2),
+  );
+  doc.setFont("helvetica", "bold");
   doc.setFontSize(18);
-  doc.text(`Revision ${printableText(project.revision)}`, PAGE.margin, 385);
+  doc.text(`Revision ${printableText(project.revision)}`, PAGE.margin, subtitleEnd + 40);
 }
 
 function drawOverview(doc, schedule, state, project, generatedAt, layoutImage) {
@@ -675,8 +703,24 @@ export async function createInspectionPdf({
   ) {
     throw new Error("Shared inspection data is incomplete.");
   }
+  const walkdownId = state.project?.walkdownId;
+  if (walkdownId && backend?.walkdownId && backend.walkdownId !== walkdownId)
+    throw new Error("The selected skid does not match the loaded report data.");
+  if (
+    [...state.photos, ...state.comments].some(
+      (item) => item.walkdownId && item.walkdownId !== walkdownId,
+    )
+  ) {
+    throw new Error("The report contains evidence from another skid.");
+  }
   if (state.photos.length && typeof backend?.getPhotoUrl !== "function") {
     throw new Error("Photo access is unavailable for this report.");
+  }
+  if (
+    typeof state.project?.skidName !== "string" ||
+    !state.project.skidName.trim()
+  ) {
+    throw new Error("Name this skid before exporting its QA report.");
   }
   const entries = schedule.groups.flatMap((group) => [
     { key: `terminal:${group.id}`, label: `Terminal ${group.id}` },
@@ -702,6 +746,7 @@ export async function createInspectionPdf({
   const project = {
     title: REPORT_TITLE,
     revision: state.project?.revision ?? schedule.project.revision,
+    skidName: state.project.skidName.trim().replace(/\s+/g, " "),
   };
   const totalPhotos = state.photos.length;
   onProgress("Loading report assets…");
@@ -710,7 +755,7 @@ export async function createInspectionPdf({
     fetchImage(`${baseUrl}assets/conduit-layout.png`, "the conduit layout"),
     fetchImage(`${baseUrl}assets/jeevy-logo-black.png`, "the Jeevy logo"),
     fetchFont(`${baseUrl}assets/NotoSans-Regular.ttf`, true),
-    fetchFont(`${baseUrl}assets/NotoSans-Bold.ttf`, false),
+    fetchFont(`${baseUrl}assets/NotoSans-Bold.ttf`, true),
   ]);
   const doc = new jsPDF({
     orientation: "landscape",
@@ -720,14 +765,12 @@ export async function createInspectionPdf({
   });
   doc.addFileToVFS("NotoSans-Regular.ttf", regularFont);
   doc.addFont("NotoSans-Regular.ttf", "NotoSans", "normal");
-  if (boldFont) {
-    doc.addFileToVFS("NotoSans-Bold.ttf", boldFont);
-    doc.addFont("NotoSans-Bold.ttf", "NotoSans", "bold");
-    doc._reportBoldFont = true;
-  }
+  doc.addFileToVFS("NotoSans-Bold.ttf", boldFont);
+  doc.addFont("NotoSans-Bold.ttf", "NotoSans", "bold");
+  doc._reportBoldFont = true;
   doc.setProperties({
-    title: `${REPORT_TITLE} - QA Report`,
-    subject: `Revision ${project.revision} inspection evidence`,
+    title: `${COVER_TITLE} - QA Report - ${project.skidName}`,
+    subject: `Revision ${project.revision} inspection evidence for ${project.skidName}`,
     author:
       state.inspector?.name || state.inspector?.email || "Jeevy Fabrication",
     creator: "Jeevy DCS QA Report",

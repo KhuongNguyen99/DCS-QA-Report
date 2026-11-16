@@ -1,5 +1,8 @@
 -- Add after schema.sql. Counts voice attempts, never audio or transcripts.
 begin;
+do $$ begin
+  if to_regclass('public.qa_walkdowns') is not null then raise exception 'This migration predates named skids. Use named-walkdowns.sql instead.'; end if;
+end; $$;
 create table if not exists qa_private.voice_attempts (
   inspector_id uuid not null references auth.users(id),
   attempted_at timestamptz not null default now()

@@ -8,6 +8,8 @@ const config = {
   key: "sb_publishable_example123",
 };
 const userId = "11111111-1111-4111-8111-111111111111";
+const walkdownId = "44444444-4444-4444-8444-444444444444";
+const otherWalkdownId = "55555555-5555-4555-8555-555555555555";
 const photoId = "22222222-2222-4222-8222-222222222222";
 const sample = {
   blob: new Blob(["image"], { type: "image/jpeg" }),
@@ -23,6 +25,9 @@ function fixture(overrides = {}) {
       title: "450k Skid x7 - DCS",
       revision: 17,
       scheduleRevision: 3,
+      walkdownId,
+      skidName: "Skid A",
+      nameRequired: false,
       updatedAt: "2026-11-16T00:00:00Z",
     },
     records: [],
@@ -32,6 +37,7 @@ function fixture(overrides = {}) {
   };
   const photo = {
     id: photoId,
+    walkdown_id: walkdownId,
     record_key: "device:V-3541",
     path: `${userId}/${photoId}.jpg`,
     name: "Panel",
@@ -57,6 +63,13 @@ function fixture(overrides = {}) {
       };
     },
   };
+  const walkdown = {
+    id: walkdownId,
+    skidName: "Skid A",
+    nameRequired: false,
+    revision: 17,
+  };
+  const listing = { inspector: state.inspector, walkdowns: [walkdown] };
   const client = {
     auth: {
       async getSession() {
@@ -93,13 +106,17 @@ function fixture(overrides = {}) {
         return { data: null, error: overrides.rpcErrors[name] };
       return {
         data:
-          name === "qa_load_state"
-            ? state
-            : name === "qa_add_photo"
-              ? photo
-              : name === "qa_delete_photo"
-                ? photo.path
-                : null,
+          name === "qa_list_walkdowns"
+            ? listing
+            : ["qa_create_walkdown", "qa_rename_walkdown"].includes(name)
+              ? walkdown
+              : name === "qa_load_state"
+                ? state
+                : name === "qa_add_photo"
+                  ? photo
+                  : name === "qa_delete_photo"
+                    ? photo.path
+                    : null,
         error: null,
       };
     },
@@ -122,8 +139,9 @@ function fixture(overrides = {}) {
       return query;
     },
   };
-  const backend = createBackend(config, { clientFactory: () => client });
-  return { backend, calls, photo, state };
+  const workspace = createBackend(config, { clientFactory: () => client });
+  const backend = workspace.forWalkdown(walkdownId);
+  return { workspace, backend, calls, photo, state, listing, walkdown };
 }
 
 test("configuration accepts only HTTPS/local URLs and public keys", () => {
@@ -162,7 +180,7 @@ test("configuration accepts only HTTPS/local URLs and public keys", () => {
 });
 
 test("email code flow normalizes email and verifies membership before returning a session", async () => {
-  const { backend, calls } = fixture();
+  const { workspace: backend, calls } = fixture();
   await backend.requestCode(" Inspector@Example.com ");
   const session = await backend.verifyCode(
     " Inspector@Example.com ",
@@ -173,7 +191,7 @@ test("email code flow normalizes email and verifies membership before returning 
     "verifyCode",
     { email: "inspector@example.com", token: "123456", type: "email" },
   ]);
-  assert.equal(calls[2][0], "qa_load_state");
+  assert.equal(calls[2][0], "qa_list_walkdowns");
   assert.equal(session.user.id, userId);
   await assert.rejects(
     backend.verifyCode("inspector@example.com", "123"),
@@ -183,8 +201,8 @@ test("email code flow normalizes email and verifies membership before returning 
 });
 
 test("verified nonmembers are signed out with the access error preserved", async () => {
-  const { backend, calls } = fixture({
-    rpcErrors: { qa_load_state: { message: "Not an approved inspector" } },
+  const { workspace: backend, calls } = fixture({
+    rpcErrors: { qa_list_walkdowns: { message: "Not an approved inspector" } },
   });
   await assert.rejects(
     backend.verifyCode("outsider@example.com", "123456"),
@@ -193,9 +211,63 @@ test("verified nonmembers are signed out with the access error preserved", async
   assert.deepEqual(calls.at(-1), ["signOut", { scope: "local" }]);
 });
 
-test("loadState returns the single shared database snapshot", async () => {
-  const { backend, state } = fixture();
+test("loadState returns one scoped shared snapshot", async () => {
+  const { backend, state, calls } = fixture();
   assert.equal(await backend.loadState(), state);
+  assert.deepEqual(calls, [["qa_load_state", { p_walkdown_id: walkdownId }]]);
+});
+
+test("workspace lists, creates and renames named skids before selecting an immutable scope", async () => {
+  const { workspace, calls, listing, walkdown } = fixture();
+  assert.equal(await workspace.listWalkdowns(), listing);
+  assert.equal(await workspace.createWalkdown(" Skid A "), walkdown);
+  assert.equal(
+    await workspace.renameWalkdown(walkdownId, " Skid B "),
+    walkdown,
+  );
+  assert.deepEqual(calls, [
+    ["qa_list_walkdowns", {}],
+    ["qa_create_walkdown", { p_skid_name: "Skid A" }],
+    [
+      "qa_rename_walkdown",
+      { p_walkdown_id: walkdownId, p_skid_name: "Skid B" },
+    ],
+  ]);
+  assert.equal(workspace.loadState, undefined);
+  const a = workspace.forWalkdown(walkdownId);
+  const b = workspace.forWalkdown(otherWalkdownId);
+  assert.equal(Object.isFrozen(a), true);
+  assert.equal(a.walkdownId, walkdownId);
+  await b.setQuality("device:V-3541", "bad");
+  await a.addComment("walkdown:general", "Stays on Skid A");
+  assert.equal(calls.at(-2)[1].p_walkdown_id, otherWalkdownId);
+  assert.equal(calls.at(-1)[1].p_walkdown_id, walkdownId);
+});
+
+test("invalid or reserved skid names and missing IDs fail before requests", async () => {
+  const { workspace, backend, calls } = fixture();
+  for (const name of [
+    null,
+    "",
+    "  ",
+    "Unassigned skid",
+    "unassigned SKID",
+    "x".repeat(121),
+    "Panel\n2",
+  ]) {
+    await assert.rejects(workspace.createWalkdown(name), /skid name/);
+    await assert.rejects(
+      workspace.renameWalkdown(walkdownId, name),
+      /skid name/,
+    );
+  }
+  for (const id of [undefined, "", "walkdown:general", "../other"])
+    assert.throws(() => workspace.forWalkdown(id), /named skid/);
+  await assert.rejects(
+    backend.getPhotoUrl({ walkdownId: otherWalkdownId, path: "private.jpg" }),
+    /another skid/,
+  );
+  assert.deepEqual(calls, []);
 });
 
 test("photo upload reserves first, uploads without overwrite, then finalizes server metadata", async () => {
@@ -206,6 +278,9 @@ test("photo upload reserves first, uploads without overwrite, then finalizes ser
     ["session", "qa_prepare_photo", "upload", "qa_add_photo"],
   );
   assert.equal(calls[1][1].p_record_key, "device:V-3541");
+  assert.equal(calls[1][1].p_walkdown_id, walkdownId);
+  assert.equal(calls[3][1].p_walkdown_id, walkdownId);
+  assert.equal(result.walkdownId, walkdownId);
   assert.match(calls[1][1].p_path, new RegExp(`^${userId}/[0-9a-f-]+\\.jpg$`));
   assert.equal(calls[2][1], calls[1][1].p_path);
   assert.equal(calls[3][1].p_id, calls[1][1].p_id);
@@ -312,9 +387,20 @@ test("comment and completion input is validated before sending authoritative RPC
   assert.deepEqual(calls, [
     [
       "qa_add_comment",
-      { p_record_key: "device:V-3571#2", p_text: "Check tightness" },
+      {
+        p_walkdown_id: walkdownId,
+        p_record_key: "device:V-3571#2",
+        p_text: "Check tightness",
+      },
     ],
-    ["qa_set_complete", { p_record_key: "terminal:A", p_complete: false }],
+    [
+      "qa_set_complete",
+      {
+        p_walkdown_id: walkdownId,
+        p_record_key: "terminal:A",
+        p_complete: false,
+      },
+    ],
   ]);
 });
 
@@ -355,7 +441,11 @@ test("whole-walkdown scope accepts comments but cannot become a photo, quality, 
   assert.deepEqual(calls, [
     [
       "qa_add_comment",
-      { p_record_key: "walkdown:general", p_text: "Overall walkdown note" },
+      {
+        p_walkdown_id: walkdownId,
+        p_record_key: "walkdown:general",
+        p_text: "Overall walkdown note",
+      },
     ],
   ]);
 });
@@ -376,10 +466,38 @@ test("quality accepts a single good, bad, or null value and rejects invalid inpu
     await backend.setQuality("device:V-3541", value);
   await backend.setQuality("terminal:A", "bad");
   assert.deepEqual(calls, [
-    ["qa_set_quality", { p_record_key: "device:V-3541", p_quality: "good" }],
-    ["qa_set_quality", { p_record_key: "device:V-3541", p_quality: "bad" }],
-    ["qa_set_quality", { p_record_key: "device:V-3541", p_quality: null }],
-    ["qa_set_quality", { p_record_key: "terminal:A", p_quality: "bad" }],
+    [
+      "qa_set_quality",
+      {
+        p_walkdown_id: walkdownId,
+        p_record_key: "device:V-3541",
+        p_quality: "good",
+      },
+    ],
+    [
+      "qa_set_quality",
+      {
+        p_walkdown_id: walkdownId,
+        p_record_key: "device:V-3541",
+        p_quality: "bad",
+      },
+    ],
+    [
+      "qa_set_quality",
+      {
+        p_walkdown_id: walkdownId,
+        p_record_key: "device:V-3541",
+        p_quality: null,
+      },
+    ],
+    [
+      "qa_set_quality",
+      {
+        p_walkdown_id: walkdownId,
+        p_record_key: "terminal:A",
+        p_quality: "bad",
+      },
+    ],
   ]);
 });
 

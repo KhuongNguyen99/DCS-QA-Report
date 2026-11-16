@@ -32,17 +32,53 @@ const tinyPng = Buffer.from(
 async function pdfContent(blob) {
   const bytes = Buffer.from(await blob.arrayBuffer());
   const raw = bytes.toString("latin1");
-  const contents = [];
-  for (const match of raw.matchAll(/stream\r?\n([\s\S]*?)\r?\nendstream/g)) {
+  const objects = new Map(
+    [...raw.matchAll(/(?:^|\n)(\d+) 0 obj\r?\n([\s\S]*?)\r?\nendobj/g)].map(
+      ([, id, body]) => [id, body],
+    ),
+  );
+  const streamFor = (body) => {
+    const stream = body?.match(/stream\r?\n([\s\S]*?)\r?\nendstream/)?.[1];
+    if (!stream) return "";
     try {
-      contents.push(
-        inflateSync(Buffer.from(match[1], "latin1")).toString("latin1"),
-      );
+      return inflateSync(Buffer.from(stream, "latin1")).toString("latin1");
     } catch {
-      /* Images and font streams are not page text. */
+      return stream;
     }
+  };
+  // Decode jsPDF's embedded Noto subset to verify the actual page text.
+  const fonts = new Map();
+  const resources = [...objects.values()].find((body) => /\/Font\s*<</.test(body));
+  for (const [, font, id] of resources.matchAll(/\/F(\d+)\s+(\d+) 0 R/g)) {
+    const unicodeId = objects.get(id)?.match(/\/ToUnicode\s+(\d+) 0 R/)?.[1];
+    if (!unicodeId) continue;
+    const glyphs = new Map(
+      [...streamFor(objects.get(unicodeId)).matchAll(/<([0-9a-fA-F]{4})><([0-9a-fA-F]{4})>/g)].map(
+        ([, glyph, code]) => [glyph.toUpperCase(), String.fromCharCode(parseInt(code, 16))],
+      ),
+    );
+    fonts.set(font, glyphs);
   }
-  return { raw, text: contents.join("\n") };
+  const pages = [...objects.values()]
+    .filter((body) => /\/Type\s*\/Page\b/.test(body))
+    .map((body) => {
+      const contentId = body.match(/\/Contents\s+(\d+) 0 R/)?.[1];
+      const stream = streamFor(objects.get(contentId));
+      return [...stream.matchAll(/BT\r?\n([\s\S]*?)\r?\nET/g)]
+        .map(([, block]) => {
+          const hex = block.match(/<([0-9a-fA-F]+)>\s*Tj/)?.[1];
+          if (hex) {
+            const font = block.match(/\/F(\d+)\s+[\d.]+\s+Tf/)?.[1];
+            const glyphs = fonts.get(font);
+            return [...hex.matchAll(/.{4}/g)]
+              .map(([glyph]) => glyphs?.get(glyph.toUpperCase()) || "")
+              .join("");
+          }
+          return block.match(/\((.*?)\)\s*Tj/)?.[1] || "";
+        })
+        .join("\n");
+    });
+  return { raw, text: pages.join("\n"), pages };
 }
 
 test("image placement preserves aspect ratio without cropping", () => {
@@ -91,7 +127,7 @@ test("full report paginates long comments and includes every private photo", asy
     createdBy: "inspector-1",
   }));
   const state = {
-    project: { ...schedule.project, revision: 17 },
+    project: { ...schedule.project, revision: 17, skidName: "Pump House A" },
     inspector: {
       id: "inspector-1",
       name: "QA Inspector",
@@ -163,7 +199,7 @@ test("full report paginates long comments and includes every private photo", asy
       generatedAt: new Date("2026-11-16T16:00:00Z"),
       onProgress: (update) => progress.push(update),
     });
-    const { raw, text } = await pdfContent(blob);
+    const { raw, text, pages: pageTexts } = await pdfContent(blob);
     assert.ok(raw.startsWith("%PDF-"));
     const pages = (raw.match(/\/Type\s*\/Page\b/g) || []).length;
     assert.ok(pages >= 8);
@@ -176,9 +212,16 @@ test("full report paginates long comments and includes every private photo", asy
       pages,
     );
     assert.equal((text.match(/Jeevy Fabrication/g) || []).length, pages);
-    assert.match(text, /450k Skid x7 - DCS/);
-    assert.match(text, /QA Report/);
-    assert.equal((text.match(/Revision 17/g) || []).length, pages + 1); // Cover and each footer.
+    assert.match(text, /450k Skid x7 - DCS/); // Page header.
+    assert.match(text, /450k skid x7 - DCS/); // Cover title.
+    assert.match(raw, /450k skid x7 - DCS - QA Report - Pump House A/); // Full subtitle in PDF metadata.
+    assert.equal((text.match(/Revision 17/g) || []).length, pages + 1);
+    assert.match(pageTexts[0], /QA Report - Pump House A/);
+    assert.equal(pageTexts.length, pages);
+    pageTexts.forEach((pageText, index) => {
+      assert.match(pageText, /Revision 17 \| Skid: Pump House A/);
+      assert.match(pageText, new RegExp(`Page ${index + 1} of ${pages}`));
+    });
     for (let page = 1; page <= pages; page += 1) {
       assert.match(text, new RegExp(`Page ${page} of ${pages}`));
     }
@@ -214,7 +257,7 @@ test("general walkdown notes retain non-Latin text and paginate without changing
     const blob = await createInspectionPdf({
       schedule,
       state: {
-        project: schedule.project,
+        project: { ...schedule.project, skidName: "Проверка A" },
         inspector: { id: "inspector-1", name: "QA Inspector" },
         records: [],
         photos: [],
@@ -238,8 +281,11 @@ test("general walkdown notes retain non-Latin text and paginate without changing
       backend: null,
       generatedAt: new Date("2026-11-16T16:00:00Z"),
     });
-    const pdf = Buffer.from(await blob.arrayBuffer()).toString("latin1");
-    assert.ok((pdf.match(/\/Type\s*\/Page\b/g) || []).length >= 5);
+    const { raw, pages } = await pdfContent(blob);
+    assert.ok((raw.match(/\/Type\s*\/Page\b/g) || []).length >= 5);
+    pages.forEach((pageText) =>
+      assert.match(pageText, /Revision 3 \| Skid: Проверка A/),
+    );
     assert.equal(fetched.length, 4); // Layout, logo, and two fonts; no private images.
   } finally {
     globalThis.fetch = originalFetch;
@@ -256,6 +302,7 @@ test("report refuses to omit evidence assigned outside the schedule", async () =
         createInspectionPdf({
           schedule,
           state: {
+            project: { skidName: "Pump House A" },
             records: [],
             comments: [],
             photos: [{ id: "orphan", recordKey: "device:UNKNOWN" }],
@@ -269,6 +316,7 @@ test("report refuses to omit evidence assigned outside the schedule", async () =
         createInspectionPdf({
           schedule,
           state: {
+            project: { skidName: "Pump House A" },
             records: [],
             photos: [],
             comments: [
@@ -282,6 +330,126 @@ test("report refuses to omit evidence assigned outside the schedule", async () =
         }),
       /not assigned to a scheduled target/,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("report requires a named skid before loading assets", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    throw new Error("Assets should not be fetched");
+  };
+  try {
+    for (const skidName of [undefined, "  "]) {
+      await assert.rejects(
+        () =>
+          createInspectionPdf({
+            schedule,
+            state: {
+              project: { ...schedule.project, skidName },
+              records: [],
+              photos: [],
+              comments: [],
+            },
+          }),
+        /Name this skid/,
+      );
+    }
+    assert.equal(fetches, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("report rejects evidence or backend data from another skid before loading assets", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    throw new Error("Assets should not be fetched");
+  };
+  const state = {
+    project: { ...schedule.project, skidName: "Pump House A", walkdownId: "skid-a" },
+    records: [],
+    photos: [],
+    comments: [],
+  };
+  try {
+    await assert.rejects(
+      () => createInspectionPdf({ schedule, state, backend: { walkdownId: "skid-b" } }),
+      /selected skid does not match/,
+    );
+    await assert.rejects(
+      () =>
+        createInspectionPdf({
+          schedule,
+          state: {
+            ...state,
+            photos: [{ recordKey: `device:${schedule.devices[0].id}`, walkdownId: "skid-b" }],
+          },
+          backend: { walkdownId: "skid-a", getPhotoUrl: async () => "/photo" },
+        }),
+      /evidence from another skid/,
+    );
+    await assert.rejects(
+      () =>
+        createInspectionPdf({
+          schedule,
+          state: {
+            ...state,
+            comments: [{ recordKey: "walkdown:general", walkdownId: "skid-b" }],
+          },
+          backend: { walkdownId: "skid-a" },
+        }),
+      /evidence from another skid/,
+    );
+    assert.equal(fetches, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a 120-character skid name stays complete in a wrapped footer on every page", async () => {
+  const originalFetch = globalThis.fetch;
+  const skidName = "W".repeat(120);
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    const payload = value.includes("conduit-layout")
+      ? layout
+      : value.includes("jeevy-logo-black")
+        ? logo
+        : value.includes("NotoSans-Regular")
+          ? regularFont
+          : boldFont;
+    return new Response(
+      new Blob([payload], {
+        type: value.includes(".ttf") ? "font/ttf" : "image/png",
+      }),
+    );
+  };
+  try {
+    const blob = await createInspectionPdf({
+      schedule,
+      state: {
+        project: { ...schedule.project, skidName },
+        records: [],
+        photos: [],
+        comments: [],
+      },
+    });
+    const { pages } = await pdfContent(blob);
+    assert.ok(pages.length > 1);
+    assert.match(pages[0].replace(/\n/g, ""), new RegExp(`QA Report - ${skidName}`));
+    pages.forEach((pageText, index) => {
+      const footer = pageText
+        .split("Revision 3 | Skid: ")[1]
+        .split(`Page ${index + 1} of ${pages.length}`)[0]
+        .replace(/\n/g, "");
+      assert.equal(footer, skidName);
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }

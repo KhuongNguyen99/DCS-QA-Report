@@ -2,6 +2,9 @@
 -- comments and the 28 device / 8 terminal catalog unchanged. Safe to rerun.
 -- For older deployments, install report-revisions.sql before this migration.
 begin;
+do $$ begin
+  if to_regclass('public.qa_walkdowns') is not null then raise exception 'This migration predates named skids. Use named-walkdowns.sql instead.'; end if;
+end; $$;
 do $$
 begin
   if to_regclass('public.qa_project') is null then

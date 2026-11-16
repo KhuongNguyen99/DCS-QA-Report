@@ -157,21 +157,6 @@ export function createVoiceHandler({
           "sign_in_required",
           "Your session expired. Sign in again before transcribing.",
         );
-      const state = await abortable(
-        supabase.rpc("qa_load_state", {}),
-        controller.signal,
-      );
-      if (
-        state.error ||
-        !state.data?.inspector ||
-        state.data.inspector.id !== userResult.data.user.id
-      ) {
-        throw new VoiceError(
-          403,
-          "inspector_required",
-          "Only approved project inspectors can transcribe comments.",
-        );
-      }
       if (inFlight.has(userResult.data.user.id))
         throw new VoiceError(
           409,
@@ -199,6 +184,43 @@ export function createVoiceHandler({
       }
       const audio = form.get("audio");
       const recordKey = form.get("record_key");
+      const submittedWalkdownId = form.get("walkdown_id");
+      if (
+        form.getAll("walkdown_id").length !== 1 ||
+        typeof submittedWalkdownId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          submittedWalkdownId,
+        )
+      ) {
+        throw new VoiceError(
+          400,
+          "invalid_walkdown",
+          "Choose a named skid walkdown before transcribing.",
+        );
+      }
+      const walkdownId = submittedWalkdownId.toLowerCase();
+      const state = await abortable(
+        supabase.rpc("qa_load_state", { p_walkdown_id: walkdownId }),
+        controller.signal,
+      );
+      if (
+        state.error ||
+        !state.data?.inspector ||
+        state.data.inspector.id !== userResult.data.user.id ||
+        state.data.project?.walkdownId !== walkdownId
+      ) {
+        throw new VoiceError(
+          403,
+          "inspector_required",
+          "Choose an accessible skid walkdown and sign in as an approved inspector.",
+        );
+      }
+      if (state.data.project.nameRequired)
+        throw new VoiceError(
+          409,
+          "skid_name_required",
+          "Name this skid before recording inspection comments.",
+        );
       const durationMs = Number(form.get("duration_ms"));
       if (
         form.getAll("audio").length !== 1 ||
@@ -253,7 +275,10 @@ export function createVoiceHandler({
           "Voice comments are not configured yet. You can type your comment.",
         );
       const permitted = await abortable(
-        supabase.rpc("qa_authorize_voice", { p_record_key: recordKey }),
+        supabase.rpc("qa_authorize_voice", {
+          p_walkdown_id: walkdownId,
+          p_record_key: recordKey,
+        }),
         controller.signal,
       );
       if (permitted.error)

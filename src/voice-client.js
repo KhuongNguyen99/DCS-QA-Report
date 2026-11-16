@@ -143,6 +143,10 @@ export async function transcribeVoice({
   const session = await backend?.getSession();
   if (!session?.access_token)
     throw new Error("Sign in before transcribing your comment.");
+  if (!backend.walkdownId)
+    throw new Error(
+      "Choose a named skid report before transcribing your comment.",
+    );
   if (!config?.url || !config?.key)
     throw new Error("The shared project connection is missing.");
   const type = clip.blob.type.split(";")[0];
@@ -151,6 +155,7 @@ export async function transcribeVoice({
   const form = new FormData();
   form.append("audio", clip.blob, `comment.${extension}`);
   form.append("record_key", recordKey);
+  form.append("walkdown_id", backend.walkdownId);
   form.append("duration_ms", String(clip.durationMs));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 125_000);

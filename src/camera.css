@@ -40,6 +40,10 @@
   padding: 22px 24px 16px;
   border-bottom: 1px solid #e3e8ed;
 }
+.camera-header > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 .camera-eyebrow {
   margin: 0 0 4px;

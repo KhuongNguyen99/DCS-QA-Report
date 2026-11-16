@@ -5,6 +5,8 @@ import {
   MAX_AUDIO_BYTES,
 } from "../supabase/functions/transcribe-comment/handler.js";
 
+const walkdownId = "44444444-4444-4444-8444-444444444444";
+
 function fixture(overrides = {}) {
   const calls = [];
   const handler = createVoiceHandler({
@@ -41,6 +43,12 @@ function fixture(overrides = {}) {
             : {
                 data: {
                   inspector: { id: "inspector-1" },
+                  project: {
+                    walkdownId: overrides.wrongWalkdown
+                      ? "55555555-5555-4555-8555-555555555555"
+                      : walkdownId,
+                    nameRequired: !!overrides.unnamed,
+                  },
                   records: [{ key: "device:V-3541" }],
                 },
               };
@@ -89,6 +97,8 @@ function request({
   size = 256,
   key = "device:V-3541",
   duration = 2000,
+  walkdown = walkdownId,
+  duplicateWalkdown = false,
   headers = {},
 } = {}) {
   const form = new FormData();
@@ -98,6 +108,8 @@ function request({
     "comment.webm",
   );
   form.append("record_key", key);
+  if (walkdown !== null) form.append("walkdown_id", walkdown);
+  if (duplicateWalkdown) form.append("walkdown_id", walkdown);
   form.append("duration_ms", String(duration));
   return new Request(
     "https://example.supabase.co/functions/v1/transcribe-comment",
@@ -131,6 +143,10 @@ test("voice pipeline verifies user, membership, target and quota before isolatio
       "isolate",
       "transcribe",
     ],
+  );
+  assert.deepEqual(
+    calls.find((call) => call[0] === "qa_load_state"),
+    ["qa_load_state", { p_walkdown_id: walkdownId }],
   );
   const isolation = calls.find((call) => call[0] === "isolate");
   const transcription = calls.find((call) => call[0] === "transcribe");
@@ -172,7 +188,10 @@ test("whole-walkdown voice scope uses the same membership and quota checks witho
   );
   assert.deepEqual(
     calls.find((call) => call[0] === "qa_authorize_voice"),
-    ["qa_authorize_voice", { p_record_key: "walkdown:general" }],
+    [
+      "qa_authorize_voice",
+      { p_walkdown_id: walkdownId, p_record_key: "walkdown:general" },
+    ],
   );
   const denied = fixture({ nonmember: true });
   assert.equal(
@@ -270,4 +289,23 @@ test("silence and timeouts provide retry guidance", async () => {
     calls.some((call) => call[0] === "transcribe"),
     false,
   );
+});
+
+test("voice requires one existing named skid and cannot use a mismatched state", async () => {
+  for (const [options, input, status] of [
+    [{}, { walkdown: null }, 400],
+    [{}, { walkdown: "not-a-uuid" }, 400],
+    [{}, { duplicateWalkdown: true }, 400],
+    [{ wrongWalkdown: true }, {}, 403],
+    [{ unnamed: true }, {}, 409],
+  ]) {
+    const { handler, calls } = fixture(options);
+    assert.equal((await handler(request(input))).status, status);
+    assert.equal(
+      calls.some(
+        (call) => call[0] === "sdk" || call[0] === "qa_authorize_voice",
+      ),
+      false,
+    );
+  }
 });
