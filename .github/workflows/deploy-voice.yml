@@ -45,5 +45,5 @@ jobs:
             exit 1
           fi
           printf 'ELEVENLABS_API_KEY=%s\n' "$ELEVENLABS_API_KEY" > "$secret_file"
-          supabase secrets set --remote ybeinufetluekswsulvj --env-file "$secret_file" --yes
-          supabase functions deploy transcribe-comment --remote ybeinufetluekswsulvj --use-api --yes
+          supabase secrets set --remote=ybeinufetluekswsulvj --env-file "$secret_file" --yes
+          supabase functions deploy transcribe-comment --remote=ybeinufetluekswsulvj --use-api --yes
