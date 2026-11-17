@@ -1,26 +1,16 @@
 import { jsPDF } from "jspdf";
 import { inspectionTargets } from "./domain.js";
-import {
-  commentsFor,
-  inspectionProgress,
-  photosFor,
-  recordStatus,
-  terminalProgress,
-} from "./inspection.js";
+import { commentsFor, photosFor, recordStatus } from "./inspection.js";
 
 const REPORT_TITLE = "450k Skid x7 - DCS";
 const COVER_TITLE = "450k skid x7 - DCS";
-const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 570 };
+const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 558 };
 const COLOR = {
   ink: [30, 43, 54],
   muted: [83, 101, 116],
   line: [213, 222, 229],
-  blue: [17, 90, 130],
-  pale: [235, 245, 250],
-  white: [255, 255, 255],
   green: [31, 105, 57],
   red: [170, 49, 43],
-  amber: [145, 90, 20],
   gray: [104, 117, 127],
 };
 
@@ -69,27 +59,6 @@ export function fitImageInBox(imageWidth, imageHeight, boxWidth, boxHeight) {
   return { width: imageWidth * scale, height: imageHeight * scale };
 }
 
-function formatDate(value) {
-  if (!value) return "Not recorded";
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime())
-    ? printableText(value)
-    : printableText(
-        date.toLocaleString("en-US", {
-          dateStyle: "medium",
-          timeStyle: "short",
-        }),
-      );
-}
-
-function statusLabel(status) {
-  return status === "complete"
-    ? "Complete"
-    : status === "in-progress"
-      ? "In progress"
-      : "Not started";
-}
-
 export function qualityFor(key, state) {
   const quality = state.records.find((record) => record.key === key)?.quality;
   return quality === "good" ? "Good" : quality === "bad" ? "Bad" : "Unrated";
@@ -101,12 +70,6 @@ function qualityColor(quality) {
     : quality === "Bad"
       ? COLOR.red
       : COLOR.gray;
-}
-
-function personName(id, state) {
-  if (id && id === state.inspector?.id)
-    return state.inspector.name || state.inspector.email || id;
-  return id || "Inspector not recorded";
 }
 
 function setText(doc, color = COLOR.ink, size = 10, style = "normal") {
@@ -132,7 +95,10 @@ function newPage(doc, project, section) {
   return 61;
 }
 
-function drawFooters(doc, project) {
+function drawFooters(doc, project, generatedAt) {
+  const inspectedDate = generatedAt.toLocaleDateString("en-US", {
+    month: "short", day: "numeric", year: "numeric",
+  });
   const count = doc.getNumberOfPages();
   for (let page = 1; page <= count; page += 1) {
     doc.setPage(page);
@@ -146,6 +112,7 @@ function drawFooters(doc, project) {
     const lines = doc.splitTextToSize(footer, availableWidth);
     if (lines.length > 2)
       throw new Error("Skid name is too long to fit in the report footer.");
+    doc.text(`Inspected date: ${inspectedDate}`, PAGE.margin, 599 - lines.length * 11);
     lines.forEach((line, index) =>
       doc.text(line, PAGE.margin, 599 - (lines.length - index - 1) * 11),
     );
@@ -256,407 +223,114 @@ function drawCover(doc, project, generatedAt, logoImage) {
   doc.text(`Revision ${printableText(project.revision)}`, PAGE.margin, subtitleEnd + 40);
 }
 
-function drawOverview(doc, schedule, state, project, generatedAt, layoutImage) {
-  let y = newPage(doc, project, "Conduit layout");
+function drawOverview(doc, project, layoutImage) {
+  const y = newPage(doc, project, "Conduit layout");
   setText(doc, COLOR.ink, 28, "bold");
   doc.text("Conduit Layout", PAGE.margin, y);
   const dimensions = doc.getImageProperties(layoutImage);
   const fitted = fitImageInBox(
-    dimensions.width,
-    dimensions.height,
-    PAGE.width - PAGE.margin * 2,
-    290,
+    dimensions.width, dimensions.height,
+    PAGE.width - PAGE.margin * 2, PAGE.bottom - 110,
   );
   doc.addImage(
-    layoutImage,
-    dimensions.fileType,
+    layoutImage, dimensions.fileType,
     PAGE.margin + (PAGE.width - PAGE.margin * 2 - fitted.width) / 2,
-    88,
-    fitted.width,
-    fitted.height,
+    100 + (PAGE.bottom - 110 - fitted.height) / 2,
+    fitted.width, fitted.height,
   );
-
-  const equipment = schedule.equipment ?? [];
-  const progress = inspectionProgress(schedule.devices, schedule.groups, state, equipment);
-  const cardsY = 389;
-  const cardWidth = (PAGE.width - PAGE.margin * 2 - 36) / 4;
-  const metrics = [
-    [`${progress.devices}/${schedule.devices.length}`, "Devices complete"],
-    [`${progress.terminals}/${schedule.groups.length}`, "Terminals complete"],
-    [`${progress.equipment}/${equipment.length}`, "Equipment complete"],
-    [String(state.photos.length), "Evidence photos"],
-  ];
-  metrics.forEach(([value, label], index) => {
-    const x = PAGE.margin + index * (cardWidth + 12);
-    doc.setFillColor(...COLOR.pale);
-    doc.roundedRect(x, cardsY, cardWidth, 60, 5, 5, "F");
-    setText(doc, COLOR.blue, 17, "bold");
-    doc.text(value, x + 12, cardsY + 26);
-    setText(doc, COLOR.muted, 9);
-    doc.text(label, x + 12, cardsY + 45);
-  });
-
-  const statusCounts = { complete: 0, "in-progress": 0, "not-started": 0 };
-  const qualityCounts = { Good: 0, Bad: 0, Unrated: 0 };
-  for (const target of inspectionTargets(schedule)) {
-    statusCounts[recordStatus(target.key, state)] += 1;
-    qualityCounts[qualityFor(target.key, state)] += 1;
-  }
-  const countsY = cardsY + 78;
-  setText(doc, COLOR.ink, 10, "bold");
-  doc.text(
-    "Evidence status across all scheduled targets",
-    PAGE.margin,
-    countsY,
-  );
-  setText(doc, COLOR.muted, 9);
-  doc.text(
-    `${statusCounts.complete} complete  |  ${statusCounts["in-progress"]} in progress  |  ${statusCounts["not-started"]} not started / no evidence`,
-    PAGE.margin,
-    countsY + 20,
-  );
-  setText(doc, COLOR.muted, 9);
-  doc.text(
-    `Quality: ${qualityCounts.Good} good  |  ${qualityCounts.Bad} bad  |  ${qualityCounts.Unrated} unrated`,
-    PAGE.margin,
-    countsY + 35,
-  );
-
-  setText(doc, COLOR.muted, 8);
-  doc.text(
-    `Generated ${formatDate(generatedAt)} by ${printableText(state.inspector?.name || state.inspector?.email || "Inspector not recorded")}. Full target coverage follows.`,
-    PAGE.margin,
-    countsY + 56,
-  );
-}
-
-function cableLabel(device) {
-  return device.cables?.length
-    ? device.cables.map((cable) => `${cable.type} #${cable.number}`).join(", ")
-    : "No cable pairs listed";
 }
 
 function drawSummary(doc, schedule, state, project) {
-  let y;
-  function start() {
-    y = newPage(doc, project, "Schedule summary");
+  const targets = inspectionTargets(schedule);
+  const rows = Math.floor((PAGE.bottom - 103) / 22);
+  const gap = 24;
+  const width = (PAGE.width - PAGE.margin * 2 - gap) / 2;
+  for (let offset = 0; offset < targets.length; offset += rows * 2) {
+    const y = newPage(doc, project, "Inspection overview");
     setText(doc, COLOR.ink, 17, "bold");
-    doc.text("All scheduled targets", PAGE.margin, y);
-    y += 25;
-    setText(doc, COLOR.muted, 9);
-    doc.text("Target", PAGE.margin + 7, y);
-    doc.text("Evidence status", 220, y);
-    doc.text("Quality", 340, y);
-    doc.text("Cable pairs / coverage", 430, y);
-    y += 10;
-    doc.setDrawColor(...COLOR.line);
-    doc.line(PAGE.margin, y, PAGE.width - PAGE.margin, y);
-    y += 5;
-  }
-  function ensure(height) {
-    if (y + height > PAGE.bottom) {
-      start();
-      return true;
-    }
-    return false;
-  }
-  function groupHeader(group, progress, continued = false) {
-    const coverageLines = doc.splitTextToSize(
-      `${progress.complete}/${progress.total} devices complete; ${progress.terminalPhotos} terminal photos`,
-      300,
-    );
-    const height = Math.max(29, coverageLines.length * 11 + 13);
-    doc.setFillColor(...COLOR.pale);
-    doc.rect(PAGE.margin, y, PAGE.width - PAGE.margin * 2, height, "F");
-    setText(doc, COLOR.ink, 10, "bold");
-    doc.text(
-      `Terminal ${printableText(group.id)}${continued ? " (cont.)" : ""}`,
-      PAGE.margin + 7,
-      y + 17,
-    );
-    setText(doc, COLOR.blue, 9, "bold");
-    doc.text(
-      statusLabel(recordStatus(`terminal:${group.id}`, state)),
-      220,
-      y + 17,
-    );
-    const quality = qualityFor(`terminal:${group.id}`, state);
-    setText(doc, qualityColor(quality), 9, "bold");
-    doc.text(quality, 340, y + 17);
-    setText(doc, COLOR.ink, 9);
-    doc.text(coverageLines, 430, y + 17);
-    y += height + 2;
-  }
-  function sectionHeader(label) {
-    ensure(31);
-    doc.setFillColor(...COLOR.pale);
-    doc.rect(PAGE.margin, y, PAGE.width - PAGE.margin * 2, 27, "F");
-    setText(doc, COLOR.ink, 10, "bold");
-    doc.text(label, PAGE.margin + 7, y + 18);
-    y += 29;
-  }
-  start();
-  if (schedule.equipment?.length) {
-    sectionHeader("Equipment inspections");
-    for (const equipment of schedule.equipment) {
-      const key = `equipment:${equipment.id}`;
-      const coverage = `${photosFor(key, state).length} photos; ${commentsFor(key, state).length} comments`;
-      const coverageLines = doc.splitTextToSize(coverage, 300);
-      const rowHeight = Math.max(22, coverageLines.length * 11 + 9);
-      if (ensure(rowHeight)) sectionHeader("Equipment inspections (continued)");
-      setText(doc, COLOR.ink, 9, "bold");
-      doc.text(printableText(equipment.name), PAGE.margin + 7, y + 14);
-      const status = recordStatus(key, state);
-      setText(doc, status === "complete" ? COLOR.green : status === "in-progress" ? COLOR.amber : COLOR.gray, 9);
-      doc.text(statusLabel(status), 220, y + 14);
-      const quality = qualityFor(key, state);
-      setText(doc, qualityColor(quality), 9, "bold");
-      doc.text(quality, 340, y + 14);
-      setText(doc, COLOR.ink, 9);
-      doc.text(coverageLines, 430, y + 14);
-      y += rowHeight;
+    doc.text("Inspection overview", PAGE.margin, y);
+    for (let column = 0; column < 2; column += 1) {
+      const x = PAGE.margin + column * (width + gap);
+      setText(doc, COLOR.muted, 9);
+      doc.text("Item", x + 7, 88);
+      doc.text("Good/Bad", x + width - 7, 88, { align: "right" });
       doc.setDrawColor(...COLOR.line);
-      doc.line(PAGE.margin, y, PAGE.width - PAGE.margin, y);
+      doc.line(x, 98, x + width, 98);
+      targets.slice(offset + column * rows, offset + (column + 1) * rows)
+        .forEach((target, index) => {
+          const rowY = 103 + index * 22;
+          setText(doc, COLOR.ink, 9, "bold");
+          doc.text(printableText(target.name), x + 7, rowY + 14);
+          const quality = qualityFor(target.key, state);
+          if (quality !== "Unrated") {
+            setText(doc, qualityColor(quality), 9, "bold");
+            doc.text(quality, x + width - 7, rowY + 14, { align: "right" });
+          }
+          doc.setDrawColor(...COLOR.line);
+          doc.line(x, rowY + 22, x + width, rowY + 22);
+        });
     }
-    y += 10;
-  }
-  sectionHeader("Terminals and devices");
-  for (const group of schedule.groups) {
-    const progress = terminalProgress(group.id, schedule.devices, state);
-    ensure(46);
-    groupHeader(group, progress);
-    for (const device of schedule.devices.filter(
-      (item) => item.terminal === group.id,
-    )) {
-      const cableLines = doc.splitTextToSize(
-        printableText(cableLabel(device)),
-        300,
-      );
-      const rowHeight = Math.max(22, cableLines.length * 11 + 9);
-      if (ensure(rowHeight + 46)) groupHeader(group, progress, true);
-      setText(doc, COLOR.ink, 9, "bold");
-      doc.text(printableText(device.name), PAGE.margin + 7, y + 14);
-      const status = recordStatus(`device:${device.id}`, state);
-      setText(
-        doc,
-        status === "complete"
-          ? COLOR.green
-          : status === "in-progress"
-            ? COLOR.amber
-            : COLOR.gray,
-        9,
-      );
-      doc.text(statusLabel(status), 220, y + 14);
-      const quality = qualityFor(`device:${device.id}`, state);
-      setText(doc, qualityColor(quality), 9, "bold");
-      doc.text(quality, 340, y + 14);
-      setText(doc, COLOR.ink, 9);
-      doc.text(cableLines, 430, y + 14);
-      y += rowHeight;
-      doc.setDrawColor(...COLOR.line);
-      doc.line(PAGE.margin, y, PAGE.width - PAGE.margin, y);
-    }
-    y += 10;
   }
 }
 
-function drawWrappedText(
-  doc,
-  value,
-  x,
-  width,
-  startY,
-  project,
-  section,
-  lineHeight = 13,
-) {
-  let y = startY;
-  const text = printableText(value) || "(empty)";
-  const lines = text
+function prepareRecordComments(doc, comments) {
+  setText(doc, COLOR.ink, 9);
+  return comments.map((comment) => printableText(comment.text)
     .split("\n")
-    .flatMap((paragraph) => doc.splitTextToSize(paragraph || " ", width));
-  for (const line of lines) {
-    if (y + lineHeight > PAGE.bottom) {
-      y = newPage(doc, project, section);
-      setText(doc, COLOR.muted, 9, "bold");
-      doc.text("Continued", x, y);
-      y += 18;
-      setText(doc, COLOR.ink, 9);
-    }
-    doc.text(line, x, y);
-    y += lineHeight;
-  }
-  return y;
+    .flatMap((paragraph) => doc.splitTextToSize(
+      paragraph || " ", PAGE.width - PAGE.margin * 2,
+    )));
 }
 
-function drawComments(doc, comments, state, project, section, startY) {
-  let y = startY;
-  for (const comment of comments) {
-    if (y + 52 > PAGE.bottom)
-      y = newPage(doc, project, `${section} - comments`);
-    setText(doc, COLOR.blue, 9, "bold");
-    const author = comment.authorName || personName(comment.createdBy, state);
-    y =
-      drawWrappedText(
-        doc,
-        `${author}  |  ${formatDate(comment.createdAt)}`,
-        PAGE.margin,
-        PAGE.width - PAGE.margin * 2,
-        y,
-        project,
-        `${section} - comments`,
-        13,
-      ) + 4;
-    setText(doc, COLOR.ink, 9);
-    y =
-      drawWrappedText(
-        doc,
-        comment.text,
-        PAGE.margin + 8,
-        PAGE.width - PAGE.margin * 2 - 8,
-        y,
-        project,
-        `${section} - comments`,
-        13,
-      ) + 17;
-  }
-  return y;
-}
-
-function drawGeneralComments(doc, state, project) {
-  const comments = state.comments.filter(
-    (comment) => comment.recordKey === "walkdown:general",
-  );
-  if (!comments.length) return;
-  let y = newPage(doc, project, "General walkdown notes");
-  setText(doc, COLOR.ink, 18, "bold");
-  doc.text("General walkdown notes", PAGE.margin, y);
-  y += 25;
-  setText(doc, COLOR.muted, 9);
-  doc.text(
-    `${comments.length} note${comments.length === 1 ? "" : "s"} across the inspection`,
-    PAGE.margin,
-    y,
-  );
-  y += 20;
-  doc.setDrawColor(...COLOR.line);
-  doc.line(PAGE.margin, y, PAGE.width - PAGE.margin, y);
-  drawComments(doc, comments, state, project, "General walkdown notes", y + 25);
-}
-
-function drawRecordDetails(doc, entry, state, project, continued = false) {
-  const { key, label, device } = entry;
-  const status = recordStatus(key, state);
-  const photos = photosFor(key, state);
-  const comments = commentsFor(key, state);
-  const record = state.records.find((item) => item.key === key);
-  let y = newPage(doc, project, label);
-  setText(doc, COLOR.ink, 18, "bold");
-  doc.text(
-    printableText(`${label}${continued ? " (continued)" : ""}`),
-    PAGE.margin,
-    y,
-  );
-  y += 21;
-  setText(doc, COLOR.blue, 9, "bold");
-  doc.text(statusLabel(status), PAGE.margin, y);
-  setText(doc, COLOR.muted, 9);
-  doc.text(
-    `${photos.length} photo${photos.length === 1 ? "" : "s"}  |  ${comments.length} comment${comments.length === 1 ? "" : "s"}`,
-    PAGE.margin + 100,
-    y,
-  );
-  const quality = qualityFor(key, state);
-  setText(doc, qualityColor(quality), 9, "bold");
-  doc.text(`Quality: ${quality}`, PAGE.width - PAGE.margin, y, {
-    align: "right",
-  });
-  y += 17;
-  if (device) {
-    setText(doc, COLOR.ink, 9);
-    y =
-      drawWrappedText(
-        doc,
-        `Cable pairs: ${cableLabel(device)}`,
-        PAGE.margin,
-        PAGE.width - PAGE.margin * 2,
-        y,
-        project,
-        label,
-        11,
-      ) + 2;
-  }
-  if (record?.complete) {
-    setText(doc, COLOR.muted, 9);
-    y =
-      drawWrappedText(
-        doc,
-        `Completed ${formatDate(record.completedAt)} by ${personName(record.completedBy, state)}`,
-        PAGE.margin,
-        PAGE.width - PAGE.margin * 2,
-        y,
-        project,
-        label,
-        11,
-      ) + 2;
-  }
-  doc.setDrawColor(...COLOR.line);
-  doc.line(PAGE.margin, y, PAGE.width - PAGE.margin, y);
-  return y + 18;
-}
-
-function prepareRecordComments(doc, comments, state) {
-  const width = PAGE.width - PAGE.margin * 2;
-  return comments.map((comment) => {
-    setText(doc, COLOR.blue, 8, "bold");
-    const authorLines = doc.splitTextToSize(
-      printableText(
-        `${comment.authorName || personName(comment.createdBy, state)}  |  ${formatDate(comment.createdAt)}`,
-      ),
-      width,
-    );
-    setText(doc, COLOR.ink, 9);
-    const textLines = printableText(comment.text)
-      .split("\n")
-      .flatMap((paragraph) => doc.splitTextToSize(paragraph || " ", width - 8));
-    return { authorLines, textLines };
-  });
-}
-
-function drawRecordComments(doc, comments, startY, nextPage) {
+function drawRecordComments(doc, comments, startY, nextPage, showHeading = true) {
   if (!comments.length) return;
   let y = startY;
-  function heading(continued = false) {
+  function heading() {
+    if (!showHeading) return;
     setText(doc, COLOR.ink, 11, "bold");
-    doc.text(`Comments${continued ? " (continued)" : ""}`, PAGE.margin, y);
+    doc.text("Comments", PAGE.margin, y);
     y += 19;
   }
-  function ensure(height) {
-    if (y + height > PAGE.bottom) {
-      y = nextPage();
-      heading(true);
-    }
-  }
-  if (y + 19 + comments[0].authorLines.length * 10 + 14 > PAGE.bottom)
-    y = nextPage();
+  if (y + (showHeading ? 30 : 11) > PAGE.bottom) y = nextPage();
   heading();
-  for (const { authorLines, textLines } of comments) {
-    ensure(authorLines.length * 10 + 15);
-    for (const line of authorLines) {
-      ensure(10);
-      setText(doc, COLOR.blue, 8, "bold");
-      doc.text(line, PAGE.margin, y);
-      y += 10;
-    }
-    y += 3;
-    for (const line of textLines) {
-      ensure(11);
+  for (const lines of comments) {
+    for (const line of lines) {
+      if (y + 11 > PAGE.bottom) {
+        y = nextPage();
+        heading();
+      }
       setText(doc, COLOR.ink, 9);
-      doc.text(line, PAGE.margin + 8, y);
+      doc.text(line, PAGE.margin, y);
       y += 11;
     }
     y += 8;
   }
+}
+
+function drawGeneralComments(doc, state, project) {
+  const comments = prepareRecordComments(doc, commentsFor("walkdown:general", state));
+  if (!comments.length) return;
+  function nextPage() {
+    const y = newPage(doc, project, "Walkdown comments");
+    setText(doc, COLOR.ink, 18, "bold");
+    doc.text("Walkdown comments", PAGE.margin, y);
+    return y + 26;
+  }
+  drawRecordComments(doc, comments, nextPage(), nextPage, false);
+}
+
+function drawRecordDetails(doc, entry, state, project) {
+  const y = newPage(doc, project, entry.label);
+  setText(doc, COLOR.ink, 18, "bold");
+  doc.text(printableText(entry.label), PAGE.margin, y);
+  const quality = qualityFor(entry.key, state);
+  if (quality !== "Unrated") {
+    setText(doc, qualityColor(quality), 14, "bold");
+    doc.text(quality, PAGE.width - PAGE.margin, y, { align: "right" });
+  }
+  doc.setDrawColor(...COLOR.line);
+  doc.line(PAGE.margin, y + 17, PAGE.width - PAGE.margin, y + 17);
+  return y + 35;
 }
 
 async function prepareRecordPhotos(
@@ -690,75 +364,34 @@ async function prepareRecordPhotos(
         cause: error,
       });
     }
-    prepared.push({ photo, name, data, properties });
+    prepared.push({ data, properties });
   }
   return prepared;
 }
 
-function recordPhotoGrid(doc, photos, state, offset) {
+function recordPhotoGrid(photos) {
   const columns = photos.length === 4 ? 2 : Math.min(3, photos.length);
   const rows = Math.ceil(photos.length / columns);
   const gap = 12;
-  const width = (PAGE.width - PAGE.margin * 2 - (columns - 1) * gap) / columns;
-  const cells = photos.map((prepared, index) => {
-    setText(doc, COLOR.blue, 8, "bold");
-    const nameLines = doc.splitTextToSize(
-      `${offset + index + 1}. ${prepared.name}`,
-      width,
-    );
-    setText(doc, COLOR.muted, 7.5);
-    const metaLines = doc.splitTextToSize(
-      printableText(
-        `Captured ${formatDate(prepared.photo.createdAt)} by ${personName(prepared.photo.createdBy, state)}`,
-      ),
-      width,
-    );
-    return { ...prepared, nameLines, metaLines };
-  });
-  const captionHeight = Math.max(
-    ...cells.map(
-      ({ nameLines, metaLines }) => nameLines.length * 10 + metaLines.length * 9 + 10,
-    ),
-  );
   return {
-    cells, columns, rows, gap, width, captionHeight,
-    minHeight: rows * (110 + captionHeight) + (rows - 1) * gap,
+    cells: photos, columns, rows, gap,
+    width: (PAGE.width - PAGE.margin * 2 - (columns - 1) * gap) / columns,
+    minHeight: rows * 110 + (rows - 1) * gap,
   };
 }
 
 function drawRecordPhotoGrid(doc, grid, top, height) {
-  const { cells, columns, rows, gap, width, captionHeight } = grid;
+  const { cells, columns, rows, gap, width } = grid;
   const rowHeight = (height - (rows - 1) * gap) / rows;
-  const imageHeight = rowHeight - captionHeight;
-  cells.forEach(({ data, properties, nameLines, metaLines }, index) => {
+  cells.forEach(({ data, properties }, index) => {
     const x = PAGE.margin + (index % columns) * (width + gap);
     const y = top + Math.floor(index / columns) * (rowHeight + gap);
-    doc.setDrawColor(...COLOR.line);
-    doc.rect(x, y, width, imageHeight);
-    const fitted = fitImageInBox(
-      properties.width,
-      properties.height,
-      width,
-      imageHeight,
-    );
+    const fitted = fitImageInBox(properties.width, properties.height, width, rowHeight);
     doc.addImage(
-      data,
-      properties.fileType,
+      data, properties.fileType,
       x + (width - fitted.width) / 2,
-      y + (imageHeight - fitted.height) / 2,
-      fitted.width,
-      fitted.height,
-    );
-    setText(doc, COLOR.blue, 8, "bold");
-    nameLines.forEach((line, lineIndex) =>
-      doc.text(line, x, y + imageHeight + 11 + lineIndex * 10),
-    );
-    setText(doc, COLOR.muted, 7.5);
-    metaLines.forEach((line, lineIndex) =>
-      doc.text(
-        line, x,
-        y + imageHeight + 13 + nameLines.length * 10 + lineIndex * 9,
-      ),
+      y + (rowHeight - fitted.height) / 2,
+      fitted.width, fitted.height,
     );
   });
 }
@@ -767,54 +400,27 @@ async function drawRecord(
   doc, entry, state, project, backend, onProgress, completed, totalPhotos,
 ) {
   let y = drawRecordDetails(doc, entry, state, project);
-  const nextPage = () => drawRecordDetails(doc, entry, state, project, true);
-  const comments = prepareRecordComments(doc, commentsFor(entry.key, state), state);
+  const nextPage = () => drawRecordDetails(doc, entry, state, project);
+  const comments = prepareRecordComments(doc, commentsFor(entry.key, state));
   const commentsHeight = comments.length
-    ? 19 + comments.reduce(
-        (height, comment) => height + comment.authorLines.length * 10 +
-          3 + comment.textLines.length * 11 + 8,
-        0,
-      )
+    ? 19 + comments.reduce((height, lines) => height + lines.length * 11 + 8, 0)
     : 0;
   const photos = photosFor(entry.key, state);
-  for (let offset = 0; offset < photos.length;) {
-    const candidates = photos.slice(offset, offset + 6).map((photo) => ({
-      photo,
-      name: printableText(photo.name || "Inspection photo"),
-    }));
-    const available = PAGE.bottom - y - 16;
-    let grid;
-    for (let count = candidates.length; count > 0; count -= 1) {
-      const candidate = recordPhotoGrid(
-        doc, candidates.slice(0, count), state, offset,
-      );
-      if (candidate.minHeight <= available) {
-        grid = candidate;
-        break;
-      }
-    }
-    if (!grid)
-      throw new Error("Photo metadata is too long to fit on a landscape page.");
+  for (let offset = 0; offset < photos.length; offset += 6) {
     const prepared = await prepareRecordPhotos(
-      doc, grid.cells.map(({ photo }) => photo), backend,
+      doc, photos.slice(offset, offset + 6), backend,
       onProgress, completed + offset, totalPhotos,
     );
-    grid.cells = grid.cells.map((cell, index) => ({
-      ...cell, ...prepared[index],
-    }));
-    const lastPhotos = offset + grid.cells.length === photos.length;
-    // Keep readable photo sizes; long records continue instead of shrinking or omitting evidence.
+    const grid = recordPhotoGrid(prepared);
+    const available = PAGE.bottom - y;
+    const lastPhotos = offset + prepared.length === photos.length;
+    // Long records continue at readable sizes without cropping or omitting evidence.
     const reserve = lastPhotos && commentsHeight
-      ? Math.max(0, Math.min(commentsHeight, available - grid.minHeight - 12))
+      ? Math.max(0, Math.min(commentsHeight, available - grid.minHeight - 16))
       : 0;
-    const gridHeight = available - reserve - (reserve > 0 ? 12 : 0);
-    setText(doc, COLOR.ink, 11, "bold");
-    doc.text(
-      `Evidence photos${offset ? " (continued)" : ""}`, PAGE.margin, y,
-    );
-    drawRecordPhotoGrid(doc, grid, y + 12, gridHeight);
-    y += 16 + gridHeight + 12;
-    offset += grid.cells.length;
+    const gridHeight = available - reserve - (reserve > 0 ? 16 : 0);
+    drawRecordPhotoGrid(doc, grid, y, gridHeight);
+    y += gridHeight + 16;
     if (!lastPhotos) y = nextPage();
   }
   drawRecordComments(doc, comments, y, nextPage);
@@ -844,6 +450,8 @@ export async function createInspectionPdf({
   ) {
     throw new Error("Shared inspection data is incomplete.");
   }
+  if (!(generatedAt instanceof Date) || !Number.isFinite(generatedAt.getTime()))
+    throw new Error("The report creation date is invalid.");
   const walkdownId = state.project?.walkdownId;
   if (walkdownId && backend?.walkdownId && backend.walkdownId !== walkdownId)
     throw new Error("The selected skid does not match the loaded report data.");
@@ -865,12 +473,7 @@ export async function createInspectionPdf({
   }
   const entries = inspectionTargets(schedule).map((target) => ({
     key: target.key,
-    label: target.kind === "equipment"
-      ? `Equipment ${target.name}`
-      : target.kind === "terminal"
-        ? `Terminal ${target.id}`
-        : `Device ${target.name} - Terminal ${target.terminal}`,
-    device: target.kind === "device" ? target.device : null,
+    label: target.name,
   }));
   const validKeys = new Set(entries.map((entry) => entry.key));
   const orphan =
@@ -908,15 +511,15 @@ export async function createInspectionPdf({
   doc.addFileToVFS("NotoSans-Bold.ttf", boldFont);
   doc.addFont("NotoSans-Bold.ttf", "NotoSans", "bold");
   doc._reportBoldFont = true;
+  doc.setCreationDate(generatedAt);
   doc.setProperties({
     title: `${COVER_TITLE} - QA Report - ${project.skidName}`,
     subject: `Revision ${project.revision} inspection evidence for ${project.skidName}`,
-    author:
-      state.inspector?.name || state.inspector?.email || "Jeevy Fabrication",
+    author: "Jeevy Fabrication",
     creator: "Jeevy DCS QA Report",
   });
   drawCover(doc, project, generatedAt, logo);
-  drawOverview(doc, schedule, state, project, generatedAt, layout);
+  drawOverview(doc, project, layout);
   drawGeneralComments(doc, state, project);
   drawSummary(doc, schedule, state, project);
   let completed = 0;
@@ -931,7 +534,7 @@ export async function createInspectionPdf({
       `${totalPhotos - completed} evidence photo(s) are not assigned to scheduled targets. Refresh the inspection and try again.`,
     );
   }
-  drawFooters(doc, project);
+  drawFooters(doc, project, generatedAt);
   onProgress("Report ready");
   return doc.output("blob");
 }

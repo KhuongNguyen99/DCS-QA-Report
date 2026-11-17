@@ -28,6 +28,7 @@ const tinyPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAE0lEQVR4nGP88OMPAwMDEwMYAAAizgLoOA4+wgAAAABJRU5ErkJggg==",
   "base64",
 );
+const GENERATED_AT = new Date("2026-11-16T16:00:00Z");
 
 async function pdfContent(blob) {
   const bytes = Buffer.from(await blob.arrayBuffer());
@@ -107,7 +108,7 @@ async function compactReport(state) {
       state: { project: { ...schedule.project, skidName: "Skid 01" },
         records: [], photos: [], comments: [], ...state },
       backend: { getPhotoUrl: async (photo) => `/private/${photo.id}` },
-      generatedAt: new Date("2026-11-16T16:00:00Z"),
+      generatedAt: GENERATED_AT,
     });
     return { ...await pdfContent(blob), fetched };
   } finally {
@@ -119,7 +120,7 @@ function evidencePhotos(key, count) {
   return Array.from({ length: count }, (_, index) => ({
     id: `${key}-${index + 1}`, recordKey: key,
     name: `evidence-${key.split(":")[1]}-${index + 1}.png`,
-    createdAt: "2026-11-16T14:00:00Z", createdBy: "Inspector A",
+    createdAt: "2026-11-15T14:00:00Z", createdBy: "Inspector A",
   }));
 }
 
@@ -128,8 +129,22 @@ function photoPlacements(stream) {
     .map(([, width, height, x, y]) => ({ width: +width, height: +height, x: +x, y: +y }));
 }
 
+function detailPagesFor(pages, streams, name) {
+  return pages.map((text, index) => ({ text, stream: streams[index] }))
+    .filter(({ text }) => text.split("\n")[2] === name);
+}
+
+function assertPlainDetail(text, name, quality) {
+  assert.equal(text.split("\n")[2], name);
+  if (quality) assert.ok(text.split("\n").includes(quality), text);
+  else assert.doesNotMatch(text, /\b(?:Good|Bad|Unrated)\b/);
+  assert.doesNotMatch(text, /\b(?:Complete|Completed|In progress|Not started|Unrated)\b/);
+  assert.doesNotMatch(text, /Quality:|Cable pairs:|Evidence photos|Captured |\(continued\)|\(cont\.\)/);
+  assert.doesNotMatch(text, /Inspector A|evidence-[^\s]+\.png|Nov 15, 2026|photo\s*\|\s*\d+ comment/i);
+}
+
 for (const count of [1, 2, 3, 4, 6]) {
-  test(`${count} photos, comments, and QA details fit on one page per device and terminal`, async () => {
+  test(`${count} photos and comments fit on one plain page per device and terminal`, async () => {
     const keys = ["terminal:A", `device:${schedule.devices[0].id}`];
     const photos = keys.flatMap((key) => evidencePhotos(key, count));
     const { pages, streams, fetched } = await compactReport({
@@ -140,23 +155,22 @@ for (const count of [1, 2, 3, 4, 6]) {
         createdAt: "2026-11-16T15:00:00Z",
         text: `Verified ${recordKey}: cable labels and wiring are correct.` })),
     });
-    const details = pages.map((text, index) => ({ text, stream: streams[index] }))
-      .filter(({ text }) => text.includes("Evidence photos") && text.includes("Comments"));
-    assert.equal(details.length, 2, pages.join("\n---\n"));
+    const names = ["Terminal A", schedule.devices[0].name];
     assert.equal(fetched.filter((path) => path.startsWith("/private/")).length, photos.length);
-    for (let index = 0; index < details.length; index += 1) {
-      const { text, stream } = details[index];
+    for (let index = 0; index < names.length; index += 1) {
+      const details = detailPagesFor(pages, streams, names[index]);
+      assert.equal(details.length, 1, pages.join("\n---\n"));
+      const { text, stream } = details[0];
       assert.ok(text.includes(`Verified ${keys[index]}`));
-      assert.match(text, /Quality: Good/);
-      assert.match(text, /Completed/);
-      assert.doesNotMatch(text, /continued|next page/);
+      assertPlainDetail(text, names[index], "Good");
+      assert.match(text, /Comments/);
       for (const photo of photos.filter((photo) => photo.recordKey === keys[index]))
-        assert.ok(text.includes(photo.name), photo.name);
+        assert.ok(!text.includes(photo.name), photo.name);
       const placements = photoPlacements(stream);
       assert.equal(placements.length, count);
       placements.forEach(({ x, y, width, height }) => {
         assert.ok(x >= 43.1 && x + width <= 748.9);
-        assert.ok(y >= 42 && y + height <= 480);
+        assert.ok(y >= 53.9 && y + height <= 568.9);
         assert.ok(height >= 109.9, `Photo height ${height} should remain readable`);
         assert.ok(Math.abs(width - height) < 0.01); // Square fixture keeps its aspect ratio.
       });
@@ -164,7 +178,7 @@ for (const count of [1, 2, 3, 4, 6]) {
   });
 }
 
-test("equipment evidence and QA details fit on one page for each scheduled item", async () => {
+test("equipment photos and comments fit on one plain page for each scheduled item", async () => {
   const equipment = schedule.equipment;
   const counts = [1, 4, 6];
   const keys = equipment.map((item) => `equipment:${item.id}`);
@@ -182,43 +196,53 @@ test("equipment evidence and QA details fit on one page for each scheduled item"
   });
   assert.equal(fetched.filter((path) => path.startsWith("/private/")).length, photos.length);
   for (let index = 0; index < equipment.length; index += 1) {
-    const detailPages = pages.map((text, page) => ({ text, stream: streams[page] }))
-      .filter(({ text }) => text.includes(`Equipment ${equipment[index].name}`) &&
-        text.includes("Evidence photos"));
+    const detailPages = detailPagesFor(pages, streams, equipment[index].name);
     assert.equal(detailPages.length, 1, equipment[index].name);
     const { text, stream } = detailPages[0];
     assert.match(text, new RegExp(`Verified ${keys[index]}`));
-    assert.match(text, new RegExp(`Quality: ${index === 1 ? "Bad" : "Good"}`));
-    assert.match(text, /Completed/);
+    assertPlainDetail(text, equipment[index].name, index === 1 ? "Bad" : "Good");
     assert.match(text, /Comments/);
-    assert.doesNotMatch(text, /continued|next page/);
     for (const photo of photos.filter((item) => item.recordKey === keys[index]))
-      assert.ok(text.includes(photo.name), photo.name);
+      assert.ok(!text.includes(photo.name), photo.name);
     assert.equal(photoPlacements(stream).length, counts[index]);
   }
 });
 
-test("equipment appears in overview and summary alongside all 36 existing targets", async () => {
+test("a target with evidence and no quality has no rating on its detail page", async () => {
+  const key = "terminal:B";
+  const { pages, streams } = await compactReport({
+    photos: evidencePhotos(key, 1),
+    comments: [{ recordKey: key, text: "Connector inspected." }],
+  });
+  const details = detailPagesFor(pages, streams, "Terminal B");
+  assert.equal(details.length, 1);
+  assertPlainDetail(details[0].text, "Terminal B");
+  assert.match(details[0].text, /Connector inspected\./);
+  assert.equal(photoPlacements(details[0].stream).length, 1);
+});
+
+test("inspection overview lists all 39 targets with only names and rated quality", async () => {
   const completeKey = "equipment:control-box";
   const startedKey = "equipment:solenoid-box";
-  const { pages } = await compactReport({
+  const { pages, streams } = await compactReport({
     photos: evidencePhotos(completeKey, 1).concat(evidencePhotos(startedKey, 1)),
     records: [
       { key: completeKey, complete: true, quality: "good" },
       { key: startedKey, complete: false, quality: "bad" },
     ],
   });
-  assert.match(pages[1], /1\/3\nEquipment complete/);
-  assert.match(pages[1], /1 complete  \|  1 in progress  \|  37 not started/);
-  assert.match(pages[1], /Quality: 1 good  \|  1 bad  \|  37 unrated/);
-  const summary = pages.filter((page) => page.includes("All scheduled targets")).join("\n");
-  assert.match(summary, /Equipment inspections/);
-  assert.match(summary, /Control Box\nComplete\nGood/);
-  assert.match(summary, /Solenoid Box\nIn progress\nBad/);
-  assert.match(summary, /Transducer Panel\nNot started\nUnrated/);
+  assert.equal(photoPlacements(streams[1]).length, 1); // Conduit layout only.
+  assert.doesNotMatch(pages[1], /complete|progress|evidence|photo|Generated|Inspector|Quality:/i);
+  const summary = pages.filter((page) => page.includes("Inspection overview")).join("\n");
+  assert.ok(summary);
+  assert.match(summary, /Control Box\nGood/);
+  assert.match(summary, /Solenoid Box\nBad/);
+  assert.ok(summary.split("\n").includes("Transducer Panel"));
+  assert.doesNotMatch(summary, /\b(?:Complete|In progress|Not started|Unrated)\b|Quality:|Cable pairs|photo|comment|coverage/i);
   for (const group of schedule.groups) assert.ok(summary.includes(`Terminal ${group.id}`), group.id);
   for (const device of schedule.devices) assert.ok(summary.includes(device.name), device.name);
   assert.equal(schedule.groups.length + schedule.devices.length, 36);
+  assert.equal(schedule.groups.length + schedule.devices.length + schedule.equipment.length, 39);
 });
 
 test("equipment overflow repeats its heading and retains every photo and comment", async () => {
@@ -228,17 +252,19 @@ test("equipment overflow repeats its heading and retains every photo and comment
     `Equipment check ${index + 1}: enclosure seals and terminal wiring verified.`).join("\n");
   const { pages, text, streams } = await compactReport({
     photos,
+    records: [{ key, complete: true, quality: "good" }],
     comments: [{ recordKey: key, authorName: "Inspector A",
       createdAt: "2026-11-16T15:00:00Z", text: note }],
   });
-  const details = pages.filter((page) => page.includes("Equipment Control Box"));
+  const details = detailPagesFor(pages, streams, "Control Box");
   assert.ok(details.length >= 2);
-  assert.ok(details.slice(1).every((page) => page.includes("(continued)")));
-  for (const photo of photos) assert.equal(text.split(photo.name).length - 1, 1);
-  const normalized = text.replace(/\s+/g, "");
+  details.forEach(({ text: pageText }) => assertPlainDetail(pageText, "Control Box", "Good"));
+  for (const photo of photos) assert.ok(!text.includes(photo.name), photo.name);
+  const normalized = details.map(({ text: pageText }) => pageText).join("\n").replace(/\s+/g, "");
   for (const line of note.split("\n"))
     assert.ok(normalized.includes(line.replace(/\s+/g, "")), line);
-  assert.equal(streams.reduce((sum, stream) => sum + photoPlacements(stream).length, 0), 10);
+  assert.equal(details.reduce((sum, { stream }) => sum + photoPlacements(stream).length, 0), 8);
+  assert.equal(streams.reduce((sum, stream) => sum + photoPlacements(stream).length, 0), 10); // Cover, layout, 8 photos.
 });
 
 test("many photos and long notes continue with their target name and lose no evidence", async () => {
@@ -247,17 +273,19 @@ test("many photos and long notes continue with their target name and lose no evi
   const note = Array.from({ length: 100 }, (_, index) =>
     `Check ${index + 1}: verified cable routing, labels, and terminal connections.`).join("\n");
   const { pages, text, streams, fetched } = await compactReport({ photos,
+    records: [{ key, complete: false, quality: "bad" }],
     comments: [{ recordKey: key, authorName: "Inspector A",
       createdAt: "2026-11-16T15:00:00Z", text: note }],
   });
   assert.equal(new Set(fetched.filter((path) => path.startsWith("/private/"))).size, 13);
   assert.equal(fetched.filter((path) => path.startsWith("/private/")).length, 13);
-  const details = pages.filter((page) => page.includes(`Device ${schedule.devices[0].name} - Terminal A`));
-  assert.ok(details.length >= 4);
-  assert.ok(details.slice(1).every((page) => page.includes("(continued)")));
-  for (const photo of photos) assert.equal(text.split(photo.name).length - 1, 1);
-  const normalized = text.replace(/\s+/g, "");
+  const details = detailPagesFor(pages, streams, schedule.devices[0].name);
+  assert.ok(details.length >= 2);
+  details.forEach(({ text: pageText }) => assertPlainDetail(pageText, schedule.devices[0].name, "Bad"));
+  for (const photo of photos) assert.ok(!text.includes(photo.name), photo.name);
+  const normalized = details.map(({ text: pageText }) => pageText).join("\n").replace(/\s+/g, "");
   for (const line of note.split("\n")) assert.ok(normalized.includes(line.replace(/\s+/g, "")), line);
+  assert.equal(details.reduce((sum, { stream }) => sum + photoPlacements(stream).length, 0), 13);
   assert.equal(streams.reduce((sum, stream) => sum + photoPlacements(stream).length, 0), 15); // Cover, layout, 13 evidence images.
 });
 
@@ -292,7 +320,7 @@ test("quality labels are independent of completion and explicit when unrated", (
   assert.equal(qualityFor("terminal:B", state), "Unrated");
 });
 
-test("full report paginates long comments and includes every private photo", async () => {
+test("full report paginates plain comments, includes private photos, and dates every page", async () => {
   const originalFetch = globalThis.fetch;
   const fetched = [];
   const progress = [];
@@ -303,7 +331,7 @@ test("full report paginates long comments and includes every private photo", asy
     name: `evidence-${number}.png`,
     width: 1,
     height: 1,
-    createdAt: "2026-11-16T14:00:00Z",
+    createdAt: "2026-11-15T14:00:00Z",
     createdBy: "inspector-1",
   }));
   const state = {
@@ -318,7 +346,7 @@ test("full report paginates long comments and includes every private photo", asy
         key: `device:${schedule.devices[0].id}`,
         complete: true,
         quality: "good",
-        completedAt: "2026-11-16T15:00:00Z",
+        completedAt: "2026-11-15T15:00:00Z",
         completedBy: "inspector-1",
       },
       {
@@ -333,7 +361,7 @@ test("full report paginates long comments and includes every private photo", asy
         id: "long",
         recordKey: `device:${schedule.devices[0].id}`,
         text: "Observed cable routing and terminal labeling. ".repeat(90),
-        createdAt: "2026-11-16T14:30:00Z",
+        createdAt: "2026-11-15T14:30:00Z",
         authorName: "QA Inspector",
       },
       {
@@ -342,14 +370,14 @@ test("full report paginates long comments and includes every private photo", asy
         text: "Second inspection note with the complete cable route. ".repeat(
           75,
         ),
-        createdAt: "2026-11-16T14:45:00Z",
+        createdAt: "2026-11-15T14:45:00Z",
         authorName: "QA Inspector",
       },
       {
         id: "terminal",
         recordKey: `terminal:${schedule.groups[0].id}`,
         text: "Terminal inspected; photograph pending.",
-        createdAt: "2026-11-16T14:30:00Z",
+        createdAt: "2026-11-15T14:30:00Z",
         authorName: "QA Inspector",
       },
     ],
@@ -376,13 +404,13 @@ test("full report paginates long comments and includes every private photo", asy
       schedule,
       state,
       backend: { getPhotoUrl: async (photo) => `/private/${photo.id}` },
-      generatedAt: new Date("2026-11-16T16:00:00Z"),
+      generatedAt: GENERATED_AT,
       onProgress: (update) => progress.push(update),
     });
-    const { raw, text, pages: pageTexts } = await pdfContent(blob);
+    const { raw, text, pages: pageTexts, streams } = await pdfContent(blob);
     assert.ok(raw.startsWith("%PDF-"));
     const pages = (raw.match(/\/Type\s*\/Page\b/g) || []).length;
-    assert.ok(pages >= 8);
+    assert.ok(pages >= 6);
     assert.equal(
       (
         raw.match(
@@ -395,13 +423,19 @@ test("full report paginates long comments and includes every private photo", asy
     assert.match(text, /450k Skid x7 - DCS/); // Page header.
     assert.match(text, /450k skid x7 - DCS/); // Cover title.
     assert.match(raw, /450k skid x7 - DCS - QA Report - Pump House A/); // Full subtitle in PDF metadata.
+    assert.match(raw, /\/CreationDate\s*\(D:20261116/);
+    assert.doesNotMatch(raw, /\/Author\s*\((?:QA Inspector|qa@example\.com|inspector-1)\)/);
     assert.equal((text.match(/Revision 17/g) || []).length, pages + 1);
     assert.match(pageTexts[0], /QA Report - Pump House A/);
+    assert.match(pageTexts[0], /November 16, 2026/);
     assert.equal(pageTexts.length, pages);
     pageTexts.forEach((pageText, index) => {
       assert.match(pageText, /Revision 17 \| Skid: Pump House A/);
+      assert.match(pageText, /Inspected date: Nov 16, 2026/);
       assert.match(pageText, new RegExp(`Page ${index + 1} of ${pages}`));
     });
+    assert.doesNotMatch(text, /QA Inspector|qa@example\.com|inspector-1|evidence-[123]\.png|Captured |Nov 15, 2026/);
+    assert.equal(streams.reduce((sum, stream) => sum + photoPlacements(stream).length, 0), 5);
     for (let page = 1; page <= pages; page += 1) {
       assert.match(text, new RegExp(`Page ${page} of ${pages}`));
     }
@@ -459,13 +493,19 @@ test("general walkdown notes retain non-Latin text and paginate without changing
         ],
       },
       backend: null,
-      generatedAt: new Date("2026-11-16T16:00:00Z"),
+      generatedAt: GENERATED_AT,
     });
     const { raw, pages } = await pdfContent(blob);
     assert.ok((raw.match(/\/Type\s*\/Page\b/g) || []).length >= 5);
     pages.forEach((pageText) =>
       assert.match(pageText, /Revision 3 \| Skid: Проверка A/),
     );
+    const notes = pages.filter((pageText) => pageText.includes("Walkdown comments")).join("\n");
+    assert.ok(notes);
+    assert.doesNotMatch(notes, /Инспектор|Nguyễn Văn An|notes across|Captured |Nov 16, 2026,/);
+    const normalized = notes.replace(/\s+/g, "");
+    assert.ok(normalized.includes("Проверкакабеляиобщейкомпоновки."));
+    assert.ok(normalized.includes("Ghichúkiểmtratổngthểchotoànbộskid."));
     assert.equal(fetched.length, 4); // Layout, logo, and two fonts; no private images.
   } finally {
     globalThis.fetch = originalFetch;
@@ -618,6 +658,24 @@ test("report rejects evidence or backend data from another skid before loading a
   }
 });
 
+test("invalid document creation dates fail before fetching report assets", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetched = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error("Unexpected fetch"); };
+  try {
+    for (const generatedAt of [null, "2026-11-17", new Date("invalid")]) {
+      await assert.rejects(() => createInspectionPdf({
+        schedule,
+        state: { project: { ...schedule.project, skidName: "Skid A" }, records: [], photos: [], comments: [] },
+        generatedAt,
+      }), /creation date is invalid/);
+    }
+    assert.equal(fetched, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("a 120-character skid name stays complete in a wrapped footer on every page", async () => {
   const originalFetch = globalThis.fetch;
   const skidName = "W".repeat(120);
@@ -653,6 +711,7 @@ test("a 120-character skid name stays complete in a wrapped footer on every page
       const footer = pageText
         .split("Revision 3 | Skid: ")[1]
         .split(`Page ${index + 1} of ${pages.length}`)[0]
+        .replace(/Inspected date: [^\n]+/g, "")
         .replace(/\n/g, "");
       assert.equal(footer, skidName);
     });

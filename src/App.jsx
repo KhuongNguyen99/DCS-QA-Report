@@ -450,12 +450,13 @@ function App() {
       if (!current)
         throw new Error("Connect to the shared workspace before exporting.");
       const snapshot = structuredClone(current);
+      const generatedAt = new Date();
       const { createInspectionPdf } = await import("./report.js");
       const blob = await createInspectionPdf({
         schedule,
         state: snapshot,
         backend,
-        generatedAt: new Date(),
+        generatedAt,
         onProgress: setReporting,
       });
       const url = URL.createObjectURL(blob);
@@ -464,7 +465,7 @@ function App() {
       const skidFilename = snapshot.project.skidName
         .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
         .replace(/[. ]+$/g, "");
-      anchor.download = `450k-Skid-x7-${skidFilename}-DCS-QA-Report-Rev${snapshot.project.revision}-${new Date().toLocaleDateString("en-CA")}.pdf`;
+      anchor.download = `450k-Skid-x7-${skidFilename}-DCS-QA-Report-Rev${snapshot.project.revision}-${generatedAt.toLocaleDateString("en-CA")}.pdf`;
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 60000);
       setNotice("PDF report exported with the current shared evidence.");
