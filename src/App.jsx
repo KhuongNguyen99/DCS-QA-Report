@@ -9,7 +9,7 @@ import { createPortal } from "react-dom";
 import schedule from "./data/schedule.json";
 import { createBackend, validateBackendConfig } from "./backend.js";
 import { readConfig, saveConfig } from "./config.js";
-import { recordKey, groupDevices } from "./domain.js";
+import { recordKey, groupDevices, findManualDevices } from "./domain.js";
 import {
   photosFor,
   commentsFor,
@@ -65,16 +65,17 @@ const date = (value) =>
       })
     : "";
 
-function Modal({ title, children, onClose, className = "" }) {
+function Modal({ title, children, onClose, className = "", initialFocus }) {
   const ref = useRef(null);
   useEffect(() => {
     const previous = document.activeElement;
     ref.current.showModal();
+    if (initialFocus) ref.current.querySelector(initialFocus)?.focus();
     return () => {
       ref.current?.close();
       previous?.focus?.();
     };
-  }, []);
+  }, [initialFocus]);
   return createPortal(
     <dialog
       ref={ref}
@@ -139,6 +140,7 @@ function App() {
   const [record, setRecord] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [camera, setCamera] = useState(null);
+  const [manualEntry, setManualEntry] = useState(false);
   const [search, setSearch] = useState("");
   const [filterGroup, setFilterGroup] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
@@ -169,7 +171,9 @@ function App() {
     state.project?.walkdownId === selectedId &&
     !state.project?.nameRequired,
   );
-  const switchBlocked = Boolean(pending || reporting || camera || record);
+  const switchBlocked = Boolean(
+    pending || reporting || camera || record || manualEntry,
+  );
   const reportRevision = state.project?.revision ?? schedule.project.revision;
   const totals = inspectionProgress(schedule.devices, schedule.groups, state);
 
@@ -275,6 +279,7 @@ function App() {
   useEffect(() => {
     ++request.current;
     setState(EMPTY);
+    setManualEntry(false);
     if (signedIn && backend) refresh().catch(() => {});
   }, [backend, signedIn, refresh]);
 
@@ -417,12 +422,27 @@ function App() {
     return target;
   }
   function scan(terminal = null) {
-    if (!connected) {
-      if (!signedIn) setAuthOpen(true);
-      else setError("Create or name a skid report before documenting devices.");
-      return;
-    }
+    if (!readyToDocument()) return;
     setCamera({ target: null, terminal });
+  }
+  function readyToDocument() {
+    if (connected) return true;
+    if (!signedIn) setAuthOpen(true);
+    else setError("Create or name a skid report before documenting devices.");
+    return false;
+  }
+  function enterDeviceName() {
+    if (!readyToDocument()) return;
+    setCamera(null);
+    setRecord(null);
+    setManualEntry(true);
+  }
+  function startDeviceEvidence(deviceId) {
+    const device = schedule.devices.find((item) => item.id === deviceId);
+    if (!device || !readyToDocument()) return;
+    const target = openRecord("device", deviceId);
+    setManualEntry(false);
+    setCamera({ target, terminal: device.terminal });
   }
   async function exportReport() {
     if (!connected) return;
@@ -605,10 +625,22 @@ function App() {
             </div>
             <div className="heading-actions">
               {["layout", "devices"].includes(view) && (
-                <button className="button primary" onClick={() => scan(group)}>
-                  <Icon name="scan" />
-                  Scan device label
-                </button>
+                <>
+                  <button
+                    className="button primary"
+                    onClick={() => scan(group)}
+                  >
+                    <Icon name="scan" />
+                    Scan device label
+                  </button>
+                  <button
+                    className="button secondary"
+                    onClick={enterDeviceName}
+                  >
+                    <Icon name="search" />
+                    Enter device name
+                  </button>
+                </>
               )}
               {view === "report" && (
                 <button
@@ -1188,7 +1220,20 @@ function App() {
           onClose={() => setSkidDialog(null)}
         />
       )}
-      {record && !camera && (
+      {manualEntry && connected && (
+        <Modal
+          title="Enter device name"
+          onClose={() => setManualEntry(false)}
+          className="auth-dialog"
+          initialFocus="#manual-device-name"
+        >
+          <ManualDeviceEntry
+            skidName={state.project.skidName}
+            onSelect={startDeviceEvidence}
+          />
+        </Modal>
+      )}
+      {record && !camera && !manualEntry && (
         <Modal
           title={record.title}
           onClose={() => setRecord(null)}
@@ -1239,20 +1284,8 @@ function App() {
           devices={schedule.devices}
           terminal={camera.terminal}
           onClose={() => setCamera(null)}
-          onMatch={(deviceId) => {
-            const device = schedule.devices.find((d) => d.id === deviceId);
-            if (device) {
-              const target = {
-                key: recordKey("device", device.id),
-                title: device.name,
-                terminal: device.terminal,
-                kind: "device",
-                device,
-              };
-              setCamera({ target, terminal: device.terminal });
-              setRecord(target);
-            }
-          }}
+          onMatch={startDeviceEvidence}
+          onManualEntry={enterDeviceName}
           onPhoto={(photo) => {
             if (!camera.target)
               throw new Error("Choose a device before saving evidence.");
@@ -1260,6 +1293,55 @@ function App() {
           }}
         />
       )}
+    </div>
+  );
+}
+
+function ManualDeviceEntry({ skidName, onSelect }) {
+  const [query, setQuery] = useState("");
+  const devices = findManualDevices(query, schedule.devices);
+  return (
+    <div className="manual-device-entry">
+      <p className="help-text">Skid: {skidName}</p>
+      <label htmlFor="manual-device-name">Device name</label>
+      <input
+        id="manual-device-name"
+        type="search"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        autoFocus
+        autoComplete="off"
+        autoCapitalize="characters"
+        spellCheck={false}
+        maxLength={120}
+        placeholder="e.g. V-3541"
+      />
+      <p className="help-text">
+        Choose the device from the Conduit Cable Schedule to take photos and add
+        comments.
+      </p>
+      <p className="help-text" role="status">
+        {devices.length
+          ? `${devices.length} matching device${devices.length === 1 ? "" : "s"}`
+          : "No scheduled devices match. Check the device name and try again."}
+      </p>
+      <ul className="manual-device-results">
+        {devices.map((device) => (
+          <li key={device.id}>
+            <button
+              type="button"
+              onClick={() => onSelect(device.id)}
+              aria-label={`Select ${device.name}, Terminal ${device.terminal}`}
+            >
+              <span>
+                <strong>{device.name}</strong>
+                <small>Terminal {device.terminal}</small>
+              </span>
+              <Icon name="camera" size={18} />
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

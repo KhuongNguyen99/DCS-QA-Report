@@ -5,6 +5,24 @@ export function groupDevices(devices, terminal = null) {
   return devices.filter((device) => device.terminal === selected);
 }
 
+/** Search scheduled devices for manual selection; never create a new device. */
+export function findManualDevices(text, devices) {
+  const compact = (value) =>
+    String(value)
+      .normalize("NFKC")
+      .toUpperCase()
+      .replace(/[‐‑‒–—―−﹣－\s-]/g, "");
+  const query = compact(text);
+  if (!query) return devices;
+  const recognized = new Set(
+    matchDeviceLabels(text, devices).map((match) => match.deviceId),
+  );
+  return devices.filter(
+    (device) =>
+      compact(device.name).includes(query) || recognized.has(device.id),
+  );
+}
+
 /** Stable keys shared by device and terminal QA records. */
 export function recordKey(kind, id) {
   if (kind === "device") return `device:${id}`;
@@ -100,8 +118,8 @@ export function matchDeviceLabels(text, devices, terminal = null) {
       continue;
     const hasOcrNoise = Boolean(
       leadingNoise ||
-        trailingNoise ||
-        /[OIL]/.test(upperNumber + (upperIndex ?? "")),
+      trailingNoise ||
+      /[OIL]/.test(upperNumber + (upperIndex ?? "")),
     );
     const matchedText = original.slice(
       found.index + boundary.length,

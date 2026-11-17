@@ -52,6 +52,7 @@ export default function CameraDialog({
   devices = [],
   terminal = null,
   onMatch,
+  onManualEntry,
   onPhoto,
   onClose,
 }) {
@@ -431,6 +432,9 @@ export default function CameraDialog({
                   disabled={busy}
                 >
                   Choose label photo
+                </button>
+                <button type="button" onClick={onManualEntry}>
+                  Enter device name
                 </button>
                 {busy && (
                   <button type="button" onClick={cancelRead}>

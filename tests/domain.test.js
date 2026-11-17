@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { groupDevices, matchDeviceLabels, recordKey } from "../src/domain.js";
+import {
+  groupDevices,
+  matchDeviceLabels,
+  recordKey,
+  findManualDevices,
+} from "../src/domain.js";
 
 const schedule = JSON.parse(
   readFileSync(new URL("../src/data/schedule.json", import.meta.url), "utf8"),
@@ -9,6 +14,18 @@ const schedule = JSON.parse(
 const devices = schedule.devices;
 const ids = (text, terminal = null) =>
   matchDeviceLabels(text, devices, terminal).map((match) => match.deviceId);
+
+test("manual device search accepts partial or old labels and keeps scheduled identities", () => {
+  const found = (query) =>
+    findManualDevices(query, devices).map((device) => device.id);
+  assert.equal(findManualDevices("", devices).length, 28);
+  assert.deepEqual(found("v3541").sort(), ["V-3541", "V-3541-Y"]);
+  assert.deepEqual(found("OV-3541F"), ["V-3541"]);
+  assert.deepEqual(found("V–3511-Y"), ["V-3511-Y"]);
+  assert.deepEqual(found("3571#2"), ["V-3571#2"]);
+  assert.deepEqual(found("UNKNOWN-9999"), []);
+  assert.deepEqual(found("V-35411"), []);
+});
 
 test("latest schedule has 28 devices from 30 cable rows and preserves updated cable numbers", () => {
   assert.equal(devices.length, 28);

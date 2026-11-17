@@ -7,7 +7,7 @@ Shared field inspection for **450k Skid x7 - DCS**. The app is a mobile-friendly
 1. Sign in with an approved inspector email. Open the email's sign-in link, or enter its code if one is included.
 2. Create a **New skid report** and enter its skid name, or select an existing report. Each skid has separate photos, comments, quality, completion, and revision. Existing pre-skid data is preserved as **Unassigned skid** and must be named before continuing.
 3. Tap A–H on the conduit layout to open that terminal group, or use **QA overview** for all 28 devices and 8 terminals.
-4. Scan a device label or open its row. Label matching tolerates surrounding text such as `OV-3541F` and `*V-3541#`; ambiguous matches need your selection.
+4. Scan a device label, use **Enter device name** to search and choose a scheduled device, or open its row. Manual entry is also available inside the scanner. Label matching tolerates surrounding text such as `OV-3541F` and `*V-3541#`; ambiguous matches need your selection.
 5. Capture or upload evidence photos and add comments. Each terminal also has its own evidence record.
 6. Choose **Good** or **Bad** in the Quality column. The checkboxes are mutually exclusive; clicking the selected choice clears it.
 7. Review evidence and mark QA complete. A terminal turns green after its own evidence and all its devices are complete.
