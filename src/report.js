@@ -512,7 +512,7 @@ function drawGeneralComments(doc, state, project) {
   drawComments(doc, comments, state, project, "General walkdown notes", y + 25);
 }
 
-function drawRecordDetails(doc, entry, state, project) {
+function drawRecordDetails(doc, entry, state, project, continued = false) {
   const { key, label, device } = entry;
   const status = recordStatus(key, state);
   const photos = photosFor(key, state);
@@ -520,9 +520,13 @@ function drawRecordDetails(doc, entry, state, project) {
   const record = state.records.find((item) => item.key === key);
   let y = newPage(doc, project, label);
   setText(doc, COLOR.ink, 18, "bold");
-  doc.text(printableText(label), PAGE.margin, y);
-  y += 25;
-  setText(doc, COLOR.blue, 10, "bold");
+  doc.text(
+    printableText(`${label}${continued ? " (continued)" : ""}`),
+    PAGE.margin,
+    y,
+  );
+  y += 21;
+  setText(doc, COLOR.blue, 9, "bold");
   doc.text(statusLabel(status), PAGE.margin, y);
   setText(doc, COLOR.muted, 9);
   doc.text(
@@ -535,7 +539,7 @@ function drawRecordDetails(doc, entry, state, project) {
   doc.text(`Quality: ${quality}`, PAGE.width - PAGE.margin, y, {
     align: "right",
   });
-  y += 23;
+  y += 17;
   if (device) {
     setText(doc, COLOR.ink, 9);
     y =
@@ -547,8 +551,8 @@ function drawRecordDetails(doc, entry, state, project) {
         y,
         project,
         label,
-        13,
-      ) + 7;
+        11,
+      ) + 2;
   }
   if (record?.complete) {
     setText(doc, COLOR.muted, 9);
@@ -561,55 +565,76 @@ function drawRecordDetails(doc, entry, state, project) {
         y,
         project,
         label,
-        13,
-      ) + 8;
+        11,
+      ) + 2;
   }
   doc.setDrawColor(...COLOR.line);
   doc.line(PAGE.margin, y, PAGE.width - PAGE.margin, y);
-  y += 22;
-  setText(doc, COLOR.ink, 12, "bold");
-  doc.text("Comments", PAGE.margin, y);
-  y += 19;
-  if (!comments.length) {
-    setText(doc, COLOR.muted, 9);
-    doc.text("No comments recorded.", PAGE.margin, y);
-    y += 18;
-  }
-  y = drawComments(doc, comments, state, project, label, y);
-  if (photos.length) {
-    if (y + 26 > PAGE.bottom) y = newPage(doc, project, label);
-    setText(doc, COLOR.muted, 9);
-    doc.text(
-      `All ${photos.length} photo${photos.length === 1 ? "" : "s"} follow on the next page${photos.length > 2 ? "s" : ""}.`,
-      PAGE.margin,
-      y,
+  return y + 18;
+}
+
+function prepareRecordComments(doc, comments, state) {
+  const width = PAGE.width - PAGE.margin * 2;
+  return comments.map((comment) => {
+    setText(doc, COLOR.blue, 8, "bold");
+    const authorLines = doc.splitTextToSize(
+      printableText(
+        `${comment.authorName || personName(comment.createdBy, state)}  |  ${formatDate(comment.createdAt)}`,
+      ),
+      width,
     );
+    setText(doc, COLOR.ink, 9);
+    const textLines = printableText(comment.text)
+      .split("\n")
+      .flatMap((paragraph) => doc.splitTextToSize(paragraph || " ", width - 8));
+    return { authorLines, textLines };
+  });
+}
+
+function drawRecordComments(doc, comments, startY, nextPage) {
+  if (!comments.length) return;
+  let y = startY;
+  function heading(continued = false) {
+    setText(doc, COLOR.ink, 11, "bold");
+    doc.text(`Comments${continued ? " (continued)" : ""}`, PAGE.margin, y);
+    y += 19;
+  }
+  function ensure(height) {
+    if (y + height > PAGE.bottom) {
+      y = nextPage();
+      heading(true);
+    }
+  }
+  if (y + 19 + comments[0].authorLines.length * 10 + 14 > PAGE.bottom)
+    y = nextPage();
+  heading();
+  for (const { authorLines, textLines } of comments) {
+    ensure(authorLines.length * 10 + 15);
+    for (const line of authorLines) {
+      ensure(10);
+      setText(doc, COLOR.blue, 8, "bold");
+      doc.text(line, PAGE.margin, y);
+      y += 10;
+    }
+    y += 3;
+    for (const line of textLines) {
+      ensure(11);
+      setText(doc, COLOR.ink, 9);
+      doc.text(line, PAGE.margin + 8, y);
+      y += 11;
+    }
+    y += 8;
   }
 }
 
-async function drawPhotoPage(
+async function prepareRecordPhotos(
   doc,
   photos,
-  entry,
   backend,
-  project,
-  state,
   onProgress,
   completed,
   totalPhotos,
 ) {
-  const y = newPage(doc, project, `${entry.label} - photos`);
-  setText(doc, COLOR.ink, 16, "bold");
-  doc.text(printableText(entry.label), PAGE.margin, y);
-  const quality = qualityFor(entry.key, state);
-  setText(doc, qualityColor(quality), 9, "bold");
-  doc.text(`Quality: ${quality}`, PAGE.margin, y + 20);
-
-  const gap = 18;
-  const slotWidth =
-    photos.length === 1
-      ? PAGE.width - PAGE.margin * 2
-      : (PAGE.width - PAGE.margin * 2 - gap) / 2;
   const prepared = [];
   for (let index = 0; index < photos.length; index += 1) {
     const photo = photos[index];
@@ -633,51 +658,135 @@ async function drawPhotoPage(
         cause: error,
       });
     }
-    setText(doc, COLOR.blue, 10, "bold");
-    const nameLines = doc.splitTextToSize(name, slotWidth);
-    setText(doc, COLOR.muted, 9);
+    prepared.push({ photo, name, data, properties });
+  }
+  return prepared;
+}
+
+function recordPhotoGrid(doc, photos, state, offset) {
+  const columns = photos.length === 4 ? 2 : Math.min(3, photos.length);
+  const rows = Math.ceil(photos.length / columns);
+  const gap = 12;
+  const width = (PAGE.width - PAGE.margin * 2 - (columns - 1) * gap) / columns;
+  const cells = photos.map((prepared, index) => {
+    setText(doc, COLOR.blue, 8, "bold");
+    const nameLines = doc.splitTextToSize(
+      `${offset + index + 1}. ${prepared.name}`,
+      width,
+    );
+    setText(doc, COLOR.muted, 7.5);
     const metaLines = doc.splitTextToSize(
       printableText(
-        `Captured ${formatDate(photo.createdAt)} by ${personName(photo.createdBy, state)}`,
+        `Captured ${formatDate(prepared.photo.createdAt)} by ${personName(prepared.photo.createdBy, state)}`,
       ),
-      slotWidth,
+      width,
     );
-    prepared.push({ data, properties, nameLines, metaLines });
-  }
-
-  const imageTop = Math.max(
-    161,
-    ...prepared.map(
-      ({ nameLines, metaLines }) =>
-        101 + nameLines.length * 13 + metaLines.length * 11 + 10,
+    return { ...prepared, nameLines, metaLines };
+  });
+  const captionHeight = Math.max(
+    ...cells.map(
+      ({ nameLines, metaLines }) => nameLines.length * 10 + metaLines.length * 9 + 10,
     ),
   );
-  const boxHeight = PAGE.bottom - imageTop - 5;
-  if (boxHeight < 160)
-    throw new Error("Photo metadata is too long to fit on a landscape page.");
-  prepared.forEach(({ data, properties, nameLines, metaLines }, index) => {
-    const x = PAGE.margin + index * (slotWidth + gap);
-    setText(doc, COLOR.blue, 10, "bold");
-    doc.text(nameLines, x, 101);
-    setText(doc, COLOR.muted, 9);
-    doc.text(metaLines, x, 101 + nameLines.length * 13 + 5);
+  return {
+    cells, columns, rows, gap, width, captionHeight,
+    minHeight: rows * (110 + captionHeight) + (rows - 1) * gap,
+  };
+}
+
+function drawRecordPhotoGrid(doc, grid, top, height) {
+  const { cells, columns, rows, gap, width, captionHeight } = grid;
+  const rowHeight = (height - (rows - 1) * gap) / rows;
+  const imageHeight = rowHeight - captionHeight;
+  cells.forEach(({ data, properties, nameLines, metaLines }, index) => {
+    const x = PAGE.margin + (index % columns) * (width + gap);
+    const y = top + Math.floor(index / columns) * (rowHeight + gap);
     doc.setDrawColor(...COLOR.line);
-    doc.rect(x, imageTop, slotWidth, boxHeight);
+    doc.rect(x, y, width, imageHeight);
     const fitted = fitImageInBox(
       properties.width,
       properties.height,
-      slotWidth,
-      boxHeight,
+      width,
+      imageHeight,
     );
     doc.addImage(
       data,
       properties.fileType,
-      x + (slotWidth - fitted.width) / 2,
-      imageTop + (boxHeight - fitted.height) / 2,
+      x + (width - fitted.width) / 2,
+      y + (imageHeight - fitted.height) / 2,
       fitted.width,
       fitted.height,
     );
+    setText(doc, COLOR.blue, 8, "bold");
+    nameLines.forEach((line, lineIndex) =>
+      doc.text(line, x, y + imageHeight + 11 + lineIndex * 10),
+    );
+    setText(doc, COLOR.muted, 7.5);
+    metaLines.forEach((line, lineIndex) =>
+      doc.text(
+        line, x,
+        y + imageHeight + 13 + nameLines.length * 10 + lineIndex * 9,
+      ),
+    );
   });
+}
+
+async function drawRecord(
+  doc, entry, state, project, backend, onProgress, completed, totalPhotos,
+) {
+  let y = drawRecordDetails(doc, entry, state, project);
+  const nextPage = () => drawRecordDetails(doc, entry, state, project, true);
+  const comments = prepareRecordComments(doc, commentsFor(entry.key, state), state);
+  const commentsHeight = comments.length
+    ? 19 + comments.reduce(
+        (height, comment) => height + comment.authorLines.length * 10 +
+          3 + comment.textLines.length * 11 + 8,
+        0,
+      )
+    : 0;
+  const photos = photosFor(entry.key, state);
+  for (let offset = 0; offset < photos.length;) {
+    const candidates = photos.slice(offset, offset + 6).map((photo) => ({
+      photo,
+      name: printableText(photo.name || "Inspection photo"),
+    }));
+    const available = PAGE.bottom - y - 16;
+    let grid;
+    for (let count = candidates.length; count > 0; count -= 1) {
+      const candidate = recordPhotoGrid(
+        doc, candidates.slice(0, count), state, offset,
+      );
+      if (candidate.minHeight <= available) {
+        grid = candidate;
+        break;
+      }
+    }
+    if (!grid)
+      throw new Error("Photo metadata is too long to fit on a landscape page.");
+    const prepared = await prepareRecordPhotos(
+      doc, grid.cells.map(({ photo }) => photo), backend,
+      onProgress, completed + offset, totalPhotos,
+    );
+    grid.cells = grid.cells.map((cell, index) => ({
+      ...cell, ...prepared[index],
+    }));
+    const lastPhotos = offset + grid.cells.length === photos.length;
+    // Keep readable photo sizes; long records continue instead of shrinking or omitting evidence.
+    const reserve = lastPhotos && commentsHeight
+      ? Math.max(0, Math.min(commentsHeight, available - grid.minHeight - 12))
+      : 0;
+    const gridHeight = available - reserve - (reserve > 0 ? 12 : 0);
+    setText(doc, COLOR.ink, 11, "bold");
+    doc.text(
+      `Evidence photos${offset ? " (continued)" : ""}`, PAGE.margin, y,
+    );
+    drawRecordPhotoGrid(doc, grid, y + 12, gridHeight);
+    y += 16 + gridHeight + 12;
+    offset += grid.cells.length;
+    if (!lastPhotos) y = nextPage();
+  }
+  drawRecordComments(doc, comments, y, nextPage);
+  return photos.length;
 }
 
 /** Builds a full inspection snapshot. The caller handles download or sharing. */
@@ -782,23 +891,9 @@ export async function createInspectionPdf({
   let completed = 0;
   for (const entry of entries) {
     if (recordStatus(entry.key, state) === "not-started") continue;
-    drawRecordDetails(doc, entry, state, project);
-    const photos = photosFor(entry.key, state);
-    for (let index = 0; index < photos.length; index += 2) {
-      const pagePhotos = photos.slice(index, index + 2);
-      await drawPhotoPage(
-        doc,
-        pagePhotos,
-        entry,
-        backend,
-        project,
-        state,
-        onProgress,
-        completed,
-        totalPhotos,
-      );
-      completed += pagePhotos.length;
-    }
+    completed += await drawRecord(
+      doc, entry, state, project, backend, onProgress, completed, totalPhotos,
+    );
   }
   if (completed !== totalPhotos) {
     throw new Error(

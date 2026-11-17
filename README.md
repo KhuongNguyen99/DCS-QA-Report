@@ -11,7 +11,7 @@ Shared field inspection for **450k Skid x7 - DCS**. The app is a mobile-friendly
 5. Capture or upload evidence photos and add comments. Each terminal also has its own evidence record. Use **Flashlight** in the camera to toggle the rear-camera torch when your phone/browser supports it; closing the camera turns it off.
 6. Choose **Good** or **Bad** in the camera, record, or overview table. Quality saves immediately and stays in sync across those screens. The checkboxes are mutually exclusive; clicking the selected choice clears it.
 7. Review evidence and mark QA complete. A terminal turns green after its own evidence and all its devices are complete. On its terminal page, **Mark complete** below **Inspect terminal** saves terminal QA directly once those prerequisites are met.
-8. Export the whole inspection from **Report**. The PDF includes unfinished items, quality, photos, comments, authors, and timestamps.
+8. Export the whole inspection from **Report**. Each documented device or terminal starts on its own page, with quality, photos, comments, authors, and timestamps together. The layout fits up to six photos with brief comments on one page when space permits; longer records continue without cropping or omitting evidence. Unfinished items remain in the summary.
 
 **Documented** in the overview means at least one saved photo. It is separate from quality and completed QA review. Comments are optional. Draft comments stay with their skid when switching reports and survive camera navigation until posted, the page is reloaded, or the inspector signs out.
 

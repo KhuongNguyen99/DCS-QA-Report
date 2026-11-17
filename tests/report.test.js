@@ -59,11 +59,13 @@ async function pdfContent(blob) {
     );
     fonts.set(font, glyphs);
   }
-  const pages = [...objects.values()]
+  const streams = [...objects.values()]
     .filter((body) => /\/Type\s*\/Page\b/.test(body))
     .map((body) => {
       const contentId = body.match(/\/Contents\s+(\d+) 0 R/)?.[1];
-      const stream = streamFor(objects.get(contentId));
+      return streamFor(objects.get(contentId));
+    });
+  const pages = streams.map((stream) => {
       return [...stream.matchAll(/BT\r?\n([\s\S]*?)\r?\nET/g)]
         .map(([, block]) => {
           const hex = block.match(/<([0-9a-fA-F]+)>\s*Tj/)?.[1];
@@ -78,8 +80,105 @@ async function pdfContent(blob) {
         })
         .join("\n");
     });
-  return { raw, text: pages.join("\n"), pages };
+  return { raw, text: pages.join("\n"), pages, streams };
 }
+
+async function compactReport(state) {
+  const originalFetch = globalThis.fetch;
+  const fetched = [];
+  globalThis.fetch = async (url) => {
+    const path = String(url);
+    fetched.push(path);
+    const payload = path.includes("conduit-layout") ? layout
+      : path.includes("jeevy-logo-black") ? logo
+        : path.includes("NotoSans-Regular") ? regularFont
+          : path.includes("NotoSans-Bold") ? boldFont : tinyPng;
+    return new Response(new Blob([payload], {
+      type: path.includes(".ttf") ? "font/ttf" : "image/png",
+    }));
+  };
+  try {
+    const blob = await createInspectionPdf({
+      schedule,
+      state: { project: { ...schedule.project, skidName: "Skid 01" },
+        records: [], photos: [], comments: [], ...state },
+      backend: { getPhotoUrl: async (photo) => `/private/${photo.id}` },
+      generatedAt: new Date("2026-11-16T16:00:00Z"),
+    });
+    return { ...await pdfContent(blob), fetched };
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+function evidencePhotos(key, count) {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `${key}-${index + 1}`, recordKey: key,
+    name: `evidence-${key.split(":")[1]}-${index + 1}.png`,
+    createdAt: "2026-11-16T14:00:00Z", createdBy: "Inspector A",
+  }));
+}
+
+function photoPlacements(stream) {
+  return [...stream.matchAll(/([\d.]+) 0 0 ([\d.]+) ([\d.]+) ([\d.]+) cm\s*\/I\d+ Do/g)]
+    .map(([, width, height, x, y]) => ({ width: +width, height: +height, x: +x, y: +y }));
+}
+
+for (const count of [1, 2, 3, 4, 6]) {
+  test(`${count} photos, comments, and QA details fit on one page per device and terminal`, async () => {
+    const keys = ["terminal:A", `device:${schedule.devices[0].id}`];
+    const photos = keys.flatMap((key) => evidencePhotos(key, count));
+    const { pages, streams, fetched } = await compactReport({
+      photos,
+      records: keys.map((key) => ({ key, complete: true, quality: "good",
+        completedAt: "2026-11-16T15:00:00Z", completedBy: "Inspector A" })),
+      comments: keys.map((recordKey) => ({ recordKey, authorName: "Inspector A",
+        createdAt: "2026-11-16T15:00:00Z",
+        text: `Verified ${recordKey}: cable labels and wiring are correct.` })),
+    });
+    const details = pages.map((text, index) => ({ text, stream: streams[index] }))
+      .filter(({ text }) => text.includes("Evidence photos") && text.includes("Comments"));
+    assert.equal(details.length, 2);
+    assert.equal(fetched.filter((path) => path.startsWith("/private/")).length, photos.length);
+    for (let index = 0; index < details.length; index += 1) {
+      const { text, stream } = details[index];
+      assert.ok(text.includes(`Verified ${keys[index]}`));
+      assert.match(text, /Quality: Good/);
+      assert.match(text, /Completed/);
+      assert.doesNotMatch(text, /continued|next page/);
+      for (const photo of photos.filter((photo) => photo.recordKey === keys[index]))
+        assert.ok(text.includes(photo.name), photo.name);
+      const placements = photoPlacements(stream);
+      assert.equal(placements.length, count);
+      placements.forEach(({ x, y, width, height }) => {
+        assert.ok(x >= 43.1 && x + width <= 748.9);
+        assert.ok(y >= 42 && y + height <= 480);
+        assert.ok(height >= 109.9, `Photo height ${height} should remain readable`);
+        assert.ok(Math.abs(width - height) < 0.01); // Square fixture keeps its aspect ratio.
+      });
+    }
+  });
+}
+
+test("many photos and long notes continue with their target name and lose no evidence", async () => {
+  const key = `device:${schedule.devices[0].id}`;
+  const photos = evidencePhotos(key, 13);
+  const note = Array.from({ length: 100 }, (_, index) =>
+    `Check ${index + 1}: verified cable routing, labels, and terminal connections.`).join("\n");
+  const { pages, text, streams, fetched } = await compactReport({ photos,
+    comments: [{ recordKey: key, authorName: "Inspector A",
+      createdAt: "2026-11-16T15:00:00Z", text: note }],
+  });
+  assert.equal(new Set(fetched.filter((path) => path.startsWith("/private/"))).size, 13);
+  assert.equal(fetched.filter((path) => path.startsWith("/private/")).length, 13);
+  const details = pages.filter((page) => page.includes(`Device ${schedule.devices[0].name} - Terminal A`));
+  assert.ok(details.length >= 4);
+  assert.ok(details.slice(1).every((page) => page.includes("(continued)")));
+  for (const photo of photos) assert.equal(text.split(photo.name).length - 1, 1);
+  const normalized = text.replace(/\s+/g, "");
+  for (const line of note.split("\n")) assert.ok(normalized.includes(line.replace(/\s+/g, "")), line);
+  assert.equal(streams.reduce((sum, stream) => sum + photoPlacements(stream).length, 0), 15); // Cover, layout, 13 evidence images.
+});
 
 test("image placement preserves aspect ratio without cropping", () => {
   assert.deepEqual(fitImageInBox(4000, 2000, 500, 400), {
