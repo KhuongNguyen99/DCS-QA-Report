@@ -153,6 +153,18 @@
   color: #516376;
   font-size: 14px;
 }
+.camera-torch {
+  align-items: center;
+  margin-top: 12px;
+}
+.camera-torch small {
+  color: #516376;
+}
+.camera-torch button.is-on {
+  background: #fff4cc;
+  border-color: #b98a28;
+  color: #655220;
+}
 .camera-task {
   margin-top: 16px;
 }

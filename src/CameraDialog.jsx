@@ -3,6 +3,11 @@ import { createPortal } from "react-dom";
 import { matchDeviceLabels } from "./domain.js";
 import { createOcrSession } from "./ocr.js";
 import { normalizePhoto, validatePhotoMetadata } from "./photos.js";
+import {
+  cameraTorchState,
+  setCameraTorch,
+  stopCameraStream,
+} from "./camera-torch.js";
 import "./camera.css";
 
 function errorMessage(error, fallback) {
@@ -59,6 +64,11 @@ export default function CameraDialog({
   const [mode, setMode] = useState(target ? "photo" : "scan");
   const [cameraError, setCameraError] = useState("");
   const [cameraReady, setCameraReady] = useState(false);
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+  const [torchBusy, setTorchBusy] = useState(false);
+  const [torchError, setTorchError] = useState("");
+  const torchBusyRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [ocrProgress, setOcrProgress] = useState("");
   const [scanError, setScanError] = useState("");
@@ -98,7 +108,7 @@ export default function CameraDialog({
       captureRef.current += 1;
       ocrRef.current?.dispose();
       ocrRef.current = null;
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+      stopCameraStream(streamRef.current);
       streamRef.current = null;
       if (previewRef.current) URL.revokeObjectURL(previewRef.current);
     };
@@ -119,7 +129,7 @@ export default function CameraDialog({
       })
       .then(async (stream) => {
         if (cancelled || !mountedRef.current) {
-          stream.getTracks().forEach((track) => track.stop());
+          stopCameraStream(stream);
           return;
         }
         streamRef.current = stream;
@@ -132,7 +142,12 @@ export default function CameraDialog({
             /* The user can still use the upload fallback. */
           }
         }
-        if (!cancelled && mountedRef.current) setCameraReady(true);
+        if (!cancelled && mountedRef.current) {
+          const torch = cameraTorchState(stream.getVideoTracks()[0]);
+          setTorchSupported(torch.supported);
+          setTorchOn(torch.enabled);
+          setCameraReady(true);
+        }
       })
       .catch((error) => {
         if (!cancelled && mountedRef.current)
@@ -140,7 +155,7 @@ export default function CameraDialog({
       });
     return () => {
       cancelled = true;
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+      stopCameraStream(streamRef.current);
       streamRef.current = null;
     };
   }, []);
@@ -162,9 +177,34 @@ export default function CameraDialog({
     runRef.current += 1;
     captureRef.current += 1;
     ocrRef.current?.dispose();
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+    stopCameraStream(streamRef.current);
     streamRef.current = null;
     onClose();
+  }
+
+  async function toggleTorch() {
+    const stream = streamRef.current;
+    const track = stream?.getVideoTracks()[0];
+    if (!track || torchBusyRef.current) return;
+    torchBusyRef.current = true;
+    setTorchBusy(true);
+    setTorchError("");
+    try {
+      const enabled = await setCameraTorch(track, !torchOn);
+      if (mountedRef.current && streamRef.current === stream)
+        setTorchOn(enabled);
+    } catch {
+      if (mountedRef.current && streamRef.current === stream) {
+        setTorchOn(cameraTorchState(track).enabled);
+        setTorchError(
+          "The flashlight could not be changed. Try again or use another camera.",
+        );
+      }
+    } finally {
+      torchBusyRef.current = false;
+      if (mountedRef.current && streamRef.current === stream)
+        setTorchBusy(false);
+    }
   }
 
   function clearPreview() {
@@ -412,6 +452,29 @@ export default function CameraDialog({
               {mode === "scan"
                 ? "Fill the frame with the printed device label."
                 : "Frame the equipment and any relevant detail."}
+            </p>
+          )}
+          <div className="camera-actions camera-torch">
+            <button
+              type="button"
+              aria-pressed={torchOn}
+              className={torchOn ? "is-on" : ""}
+              disabled={!cameraReady || !torchSupported || torchBusy || saving}
+              onClick={toggleTorch}
+            >
+              {torchBusy
+                ? "Changing flashlight…"
+                : `Flashlight ${torchOn ? "on" : "off"}`}
+            </button>
+            {cameraReady && !torchSupported && (
+              <small>
+                Flashlight is not available on this camera or browser.
+              </small>
+            )}
+          </div>
+          {torchError && (
+            <p className="camera-error" role="alert">
+              {torchError}
             </p>
           )}
 
