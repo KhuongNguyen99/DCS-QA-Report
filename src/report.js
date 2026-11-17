@@ -13,6 +13,8 @@ const COLOR = {
   red: [170, 49, 43],
   gray: [104, 117, 127],
 };
+const COMMENT = { size: 14, lineHeight: 18, headingSize: 13, headingHeight: 22, gap: 10 };
+const COMMENT_COLOR = [196, 32, 32];
 
 /** Noto Sans covers Latin (including Vietnamese), Greek, and Cyrillic text. */
 export function printableText(value) {
@@ -263,7 +265,7 @@ function drawSummary(doc, schedule, state, project) {
           doc.text(printableText(target.name), x + 7, rowY + 14);
           const quality = qualityFor(target.key, state);
           if (quality !== "Unrated") {
-            setText(doc, qualityColor(quality), 9, "bold");
+            setText(doc, qualityColor(quality), 12, "bold");
             doc.text(quality, x + width - 7, rowY + 14, { align: "right" });
           }
           doc.setDrawColor(...COLOR.line);
@@ -274,7 +276,7 @@ function drawSummary(doc, schedule, state, project) {
 }
 
 function prepareRecordComments(doc, comments) {
-  setText(doc, COLOR.ink, 9);
+  setText(doc, COMMENT_COLOR, COMMENT.size, "bold");
   return comments.map((comment) => printableText(comment.text)
     .split("\n")
     .flatMap((paragraph) => doc.splitTextToSize(
@@ -287,23 +289,24 @@ function drawRecordComments(doc, comments, startY, nextPage, showHeading = true)
   let y = startY;
   function heading() {
     if (!showHeading) return;
-    setText(doc, COLOR.ink, 11, "bold");
+    setText(doc, COMMENT_COLOR, COMMENT.headingSize, "bold");
     doc.text("Comments", PAGE.margin, y);
-    y += 19;
+    y += COMMENT.headingHeight;
   }
-  if (y + (showHeading ? 30 : 11) > PAGE.bottom) y = nextPage();
+  if (y + (showHeading ? COMMENT.headingHeight : 0) + COMMENT.lineHeight > PAGE.bottom)
+    y = nextPage();
   heading();
   for (const lines of comments) {
     for (const line of lines) {
-      if (y + 11 > PAGE.bottom) {
+      if (y + COMMENT.lineHeight > PAGE.bottom) {
         y = nextPage();
         heading();
       }
-      setText(doc, COLOR.ink, 9);
+      setText(doc, COMMENT_COLOR, COMMENT.size, "bold");
       doc.text(line, PAGE.margin, y);
-      y += 11;
+      y += COMMENT.lineHeight;
     }
-    y += 8;
+    y += COMMENT.gap;
   }
 }
 
@@ -325,7 +328,7 @@ function drawRecordDetails(doc, entry, state, project) {
   doc.text(printableText(entry.label), PAGE.margin, y);
   const quality = qualityFor(entry.key, state);
   if (quality !== "Unrated") {
-    setText(doc, qualityColor(quality), 14, "bold");
+    setText(doc, qualityColor(quality), 28, "bold");
     doc.text(quality, PAGE.width - PAGE.margin, y, { align: "right" });
   }
   doc.setDrawColor(...COLOR.line);
@@ -403,7 +406,9 @@ async function drawRecord(
   const nextPage = () => drawRecordDetails(doc, entry, state, project);
   const comments = prepareRecordComments(doc, commentsFor(entry.key, state));
   const commentsHeight = comments.length
-    ? 19 + comments.reduce((height, lines) => height + lines.length * 11 + 8, 0)
+    ? COMMENT.headingHeight + comments.reduce(
+        (height, lines) => height + lines.length * COMMENT.lineHeight + COMMENT.gap, 0,
+      )
     : 0;
   const photos = photosFor(entry.key, state);
   for (let offset = 0; offset < photos.length; offset += 6) {
