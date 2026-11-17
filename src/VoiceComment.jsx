@@ -126,9 +126,7 @@ export default function VoiceComment({
       onTranscript(text);
       setClip(null);
       setPhase("idle");
-      setNotice(
-        "Transcript added to the draft. Review it, then add your comment.",
-      );
+      setNotice("Review transcript before posting.");
     } catch (failure) {
       if (current !== generation.current || controller.signal.aborted) return;
       setError(failure.message || "Transcription failed. Try again.");
@@ -138,7 +136,6 @@ export default function VoiceComment({
     }
   }
 
-  const busy = phase === "permission" || phase === "transcribing";
   return (
     <div className="voice-comment">
       <div className="voice-comment__actions">
@@ -207,10 +204,9 @@ export default function VoiceComment({
         {phase === "permission" && "Waiting for microphone permission…"}
         {phase === "recording" &&
           (elapsed < MIN_RECORDING_MS
-            ? `Record at least 5 seconds for noise removal. ${Math.ceil((MIN_RECORDING_MS - elapsed) / 1000)}s remaining.`
-            : "Recording your comment. Stops automatically at 90 seconds.")}
-        {phase === "transcribing" &&
-          "Removing background noise, then transcribing…"}
+            ? `Minimum 5s · ${Math.ceil((MIN_RECORDING_MS - elapsed) / 1000)}s remaining`
+            : "Recording · 90s maximum")}
+        {phase === "transcribing" && "Transcribing…"}
         {notice}
       </div>
       {error && (
@@ -220,15 +216,11 @@ export default function VoiceComment({
       )}
       {!supported && (
         <p className="voice-comment__help">
-          Microphone recording is unavailable here. You can type your comment.
+          Microphone unavailable. Type your comment.
         </p>
       )}
-      {!busy && !notice && (
-        <p className="voice-comment__help">
-          Record 5–90 seconds. Review the recording before sending it to
-          ElevenLabs for noise removal and transcription. Edit the text before
-          adding the comment.
-        </p>
+      {phase === "idle" && !notice && supported && (
+        <p className="voice-comment__help">5–90 seconds</p>
       )}
     </div>
   );

@@ -85,16 +85,12 @@ export default function CommentPanel({
           onChange={(e) => onDraft(e.target.value)}
           maxLength={4000}
           placeholder={
-            recordKey === "walkdown:general"
-              ? "Add overall observations, outstanding work, or notes for the whole walkdown…"
-              : "Add a note about wiring, labels, or anything that needs attention…"
+            recordKey === "walkdown:general" ? "Walkdown comment…" : "Comment…"
           }
           disabled={!connected || posting}
         />
         <div className="comment-form-footer">
-          <small>
-            {draft.length}/4,000 · Shared with your inspection team.
-          </small>
+          <small>{draft.length}/4,000</small>
           <button
             className="small-button"
             type="submit"

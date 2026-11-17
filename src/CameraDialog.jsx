@@ -9,6 +9,7 @@ import {
   stopCameraStream,
 } from "./camera-torch.js";
 import "./camera.css";
+import QualityControl from "./QualityControl.jsx";
 
 function errorMessage(error, fallback) {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -19,15 +20,15 @@ function cameraErrorMessage(error) {
     error?.name === "NotAllowedError" ||
     error?.name === "PermissionDeniedError"
   ) {
-    return "Camera access was denied. You can still choose a photo from your device.";
+    return "Camera permission denied. Allow access or choose a photo.";
   }
   if (
     error?.name === "NotFoundError" ||
     error?.name === "DevicesNotFoundError"
   ) {
-    return "No camera was found. You can still choose a photo from your device.";
+    return "No camera found. Choose a photo.";
   }
-  return "The camera could not start. You can still choose a photo from your device.";
+  return "Camera unavailable. Choose a photo.";
 }
 
 function captureVideoFrame(video) {
@@ -56,6 +57,9 @@ export default function CameraDialog({
   target,
   devices = [],
   terminal = null,
+  quality,
+  qualityDisabled,
+  onQuality,
   onMatch,
   onManualEntry,
   onPhoto,
@@ -117,9 +121,7 @@ export default function CameraDialog({
   useEffect(() => {
     let cancelled = false;
     if (!navigator.mediaDevices?.getUserMedia) {
-      setCameraError(
-        "Camera access is unavailable in this browser. You can choose a photo instead.",
-      );
+      setCameraError("Camera unavailable. Choose a photo.");
       return undefined;
     }
     navigator.mediaDevices
@@ -240,7 +242,7 @@ export default function CameraDialog({
       const found = matchDeviceLabels(text, devices, terminal);
       if (!found.length) {
         setScanError(
-          "No device label matched. Try a clearer photo or select the device from the report.",
+          "No matching device. Try another photo or enter its name.",
         );
         return;
       }
@@ -427,11 +429,17 @@ export default function CameraDialog({
               </button>
             </nav>
           )}
-          {mode === "photo" && recognized && (
-            <p className="camera-match" role="status">
-              Recognized device {recognized}. Check the label before saving
-              evidence.
-            </p>
+          {mode === "photo" && target && (
+            <section className="camera-quality">
+              <h3>Quality</h3>
+              <QualityControl
+                key={target.key}
+                name={target.title}
+                value={quality}
+                disabled={qualityDisabled || saving}
+                onChange={onQuality}
+              />
+            </section>
           )}
           <div className="camera-viewfinder">
             <video
@@ -447,13 +455,6 @@ export default function CameraDialog({
               </p>
             )}
           </div>
-          {cameraReady && (
-            <p className="camera-hint">
-              {mode === "scan"
-                ? "Fill the frame with the printed device label."
-                : "Frame the equipment and any relevant detail."}
-            </p>
-          )}
           <div className="camera-actions camera-torch">
             <button
               type="button"
@@ -467,9 +468,7 @@ export default function CameraDialog({
                 : `Flashlight ${torchOn ? "on" : "off"}`}
             </button>
             {cameraReady && !torchSupported && (
-              <small>
-                Flashlight is not available on this camera or browser.
-              </small>
+              <small>Flashlight unavailable.</small>
             )}
           </div>
           {torchError && (
@@ -526,7 +525,6 @@ export default function CameraDialog({
               {matches.length > 0 && (
                 <div className="camera-results">
                   <h3>Choose the matching device</h3>
-                  <p>Check the label before continuing.</p>
                   <div className="camera-result-list">
                     {matches.map((item) => (
                       <button

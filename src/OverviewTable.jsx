@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import Icon from "./Icons.jsx";
+import QualityControl from "./QualityControl.jsx";
 import {
   photosFor,
   commentsFor,
@@ -14,13 +15,12 @@ export default function OverviewTable({
   onOpen,
   onStart,
   onQuality,
+  pending = false,
 }) {
   const [search, setSearch] = useState("");
   const [terminal, setTerminal] = useState("");
   const [kind, setKind] = useState("");
   const [documentation, setDocumentation] = useState("");
-  const [saving, setSaving] = useState("");
-  const [error, setError] = useState("");
   const targets = useMemo(
     () =>
       schedule.groups.flatMap((group) => [
@@ -55,17 +55,6 @@ export default function OverviewTable({
         (documentation === "documented") ===
           photosFor(item.key, state).length > 0),
   );
-  async function quality(item, value) {
-    setSaving(item.key);
-    setError("");
-    try {
-      await onQuality(item.key, value);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving("");
-    }
-  }
   return (
     <>
       <div className="filter-bar">
@@ -120,11 +109,6 @@ export default function OverviewTable({
           QA Revision {state.project?.revision ?? schedule.project.revision}
         </span>
       </div>
-      {error && (
-        <p className="field-error table-error" role="alert">
-          {error}
-        </p>
-      )}
       <section className="card">
         <div className="overview-scroll">
           <table className="overview-table">
@@ -179,11 +163,6 @@ export default function OverviewTable({
                         </span>
                         <span>
                           <strong>{item.name}</strong>
-                          <small>
-                            {item.kind === "terminal"
-                              ? "Terminal evidence"
-                              : "Field device"}
-                          </small>
                         </span>
                       </div>
                     </td>
@@ -224,31 +203,12 @@ export default function OverviewTable({
                       </span>
                     </td>
                     <td>
-                      <div className="quality-options">
-                        {["good", "bad"].map((value) => (
-                          <label
-                            key={value}
-                            className={`quality-choice ${value}`}
-                          >
-                            <input
-                              type="checkbox"
-                              aria-label={`${value === "good" ? "Good" : "Bad"} quality for ${item.name}`}
-                              checked={connected && record?.quality === value}
-                              disabled={!connected || Boolean(saving)}
-                              onChange={() =>
-                                quality(
-                                  item,
-                                  record?.quality === value ? null : value,
-                                )
-                              }
-                            />
-                            {value === "good" ? "Good" : "Bad"}
-                          </label>
-                        ))}
-                      </div>
-                      {saving === item.key && (
-                        <small role="status">Saving…</small>
-                      )}
+                      <QualityControl
+                        name={item.name}
+                        value={connected ? record?.quality : null}
+                        disabled={!connected || pending}
+                        onChange={(value) => onQuality(item.key, value)}
+                      />
                     </td>
                     <td>
                       <span
@@ -300,14 +260,9 @@ export default function OverviewTable({
           <div className="empty-state">
             <Icon name="search" size={28} />
             <h3>No matching items</h3>
-            <p>Clear the filters to see every device and terminal.</p>
+            <p>Clear filters.</p>
           </div>
         )}
-        <p className="overview-help">
-          <Icon name="info" size={14} />
-          Documented means at least one saved photo. Quality and completed QA
-          review are tracked separately.
-        </p>
       </section>
     </>
   );

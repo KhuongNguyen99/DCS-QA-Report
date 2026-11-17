@@ -9,7 +9,7 @@ Shared field inspection for **450k Skid x7 - DCS**. The app is a mobile-friendly
 3. Tap A–H on the conduit layout to open that terminal group, or use **QA overview** for all 28 devices and 8 terminals.
 4. Scan a device label, use **Enter device name** to search and choose a scheduled device, or open its row. Manual entry is also available inside the scanner. Label matching tolerates surrounding text such as `OV-3541F` and `*V-3541#`; ambiguous matches need your selection.
 5. Capture or upload evidence photos and add comments. Each terminal also has its own evidence record. Use **Flashlight** in the camera to toggle the rear-camera torch when your phone/browser supports it; closing the camera turns it off.
-6. Choose **Good** or **Bad** in the Quality column. The checkboxes are mutually exclusive; clicking the selected choice clears it.
+6. Choose **Good** or **Bad** in the camera, record, or overview table. Quality saves immediately and stays in sync across those screens. The checkboxes are mutually exclusive; clicking the selected choice clears it.
 7. Review evidence and mark QA complete. A terminal turns green after its own evidence and all its devices are complete. On its terminal page, **Mark complete** below **Inspect terminal** saves terminal QA directly once those prerequisites are met.
 8. Export the whole inspection from **Report**. The PDF includes unfinished items, quality, photos, comments, authors, and timestamps.
 

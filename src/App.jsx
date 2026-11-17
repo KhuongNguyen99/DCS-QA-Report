@@ -22,6 +22,7 @@ import CameraDialog from "./CameraDialog.jsx";
 import Icon from "./Icons.jsx";
 import OverviewTable from "./OverviewTable.jsx";
 import CommentPanel from "./CommentPanel.jsx";
+import QualityControl from "./QualityControl.jsx";
 
 const EMPTY = { records: [], photos: [], comments: [], inspector: null };
 const TITLES = {
@@ -527,11 +528,6 @@ function App() {
             <Icon name="cloud" />
             <span>{signedIn ? "Shared workspace" : "Workspace preview"}</span>
           </div>
-          <p>
-            {signedIn
-              ? "Each skid keeps its own inspection evidence."
-              : "Sign in to capture and share inspection evidence."}
-          </p>
           <button
             className="inspector-chip"
             onClick={() =>
@@ -611,17 +607,6 @@ function App() {
                   ? `Terminal ${group}`
                   : TITLES[view]}
               </h1>
-              <p>
-                {group && view === "layout"
-                  ? "Inspect terminal evidence and every connected device."
-                  : view === "layout"
-                    ? "Choose a terminal to start your inspection."
-                    : view === "devices"
-                      ? "Documentation, quality, and QA status for every device and terminal."
-                      : view === "report"
-                        ? "A complete record of your team’s inspection evidence."
-                        : "Private evidence, shared across your inspection team."}
-              </p>
             </div>
             <div className="heading-actions">
               {["layout", "devices"].includes(view) && (
@@ -683,7 +668,7 @@ function App() {
                 <p>
                   {session?.user
                     ? "Your account is signed in, but the shared inspection could not be loaded. Check your inspector access or retry."
-                    : "Sign in to add photos, leave comments, and see your team’s progress."}
+                    : "Sign in to document a skid."}
                 </p>
               </div>
               <button
@@ -739,10 +724,6 @@ function App() {
                   New skid report
                 </button>
               </div>
-              <p>
-                Photos, comments, QA status, and revisions belong to the
-                selected skid.
-              </p>
             </section>
           )}
 
@@ -758,13 +739,13 @@ function App() {
                       ? "Load this skid report to continue"
                       : "Create a report for your skid"}
               </h2>
-              <p>
-                {selectedSkid?.nameRequired
-                  ? "The existing inspection is preserved. Enter its skid name to continue documenting and export the report."
-                  : selectedSkid
-                    ? "The shared report could not be loaded. Retry to reopen this skid’s inspection evidence."
-                    : "Enter the skid name manually, or select an existing report above."}
-              </p>
+              {selectedSkid && (
+                <p>
+                  {selectedSkid.nameRequired
+                    ? "Name the existing inspection to continue."
+                    : "Unable to load this skid. Retry."}
+                </p>
+              )}
               {!loading && (
                 <button
                   className="button primary"
@@ -822,11 +803,6 @@ function App() {
                     max={schedule.devices.length}
                     value={connected ? totals.devices : 0}
                   />
-                  <small>
-                    {connected
-                      ? "Mark each device complete after reviewing its evidence."
-                      : "Shared progress appears after sign-in."}
-                  </small>
                 </div>
               </section>
               <section className="card map-card">
@@ -866,11 +842,6 @@ function App() {
                   </div>
                 </div>
                 <div className="map-footer">
-                  <span>
-                    <Icon name="info" size={15} />
-                    Tap a marker to inspect. On your phone, swipe to pan the
-                    layout.
-                  </span>
                   <div className="legend">
                     <span>
                       <i className="empty" />
@@ -959,7 +930,6 @@ function App() {
                   </div>
                   <div>
                     <h2>Terminal {group} evidence</h2>
-                    <p>Photograph the terminal group and its connections.</p>
                     <div className="inline-meta">
                       <span>
                         <Icon name="camera" size={15} />
@@ -1018,7 +988,6 @@ function App() {
               </div>
               <div className="section-heading">
                 <h2>Devices in terminal {group}</h2>
-                <span>Review every device, then complete terminal QA.</span>
               </div>
               <div className="card device-list">
                 {groupDevices(schedule.devices, group).map((device) => (
@@ -1039,6 +1008,7 @@ function App() {
               schedule={schedule}
               state={state}
               connected={connected}
+              pending={pending > 0}
               onOpen={openRecord}
               onStart={(kind, id) => {
                 const target = openRecord(kind, id);
@@ -1066,11 +1036,6 @@ function App() {
                       ? `${selectedSkid.skidName} — QA Report`
                       : "Your inspection, in one report"}
                   </h2>
-                  <p>
-                    Includes all 28 devices, 8 terminal groups, photos,
-                    comments, and completion status. Unfinished items are
-                    clearly marked.
-                  </p>
                 </div>
                 <span className="report-tag">
                   {connected && totals.devices === 28 && totals.terminals === 8
@@ -1103,9 +1068,6 @@ function App() {
               <section className="card">
                 <div className="card-heading">
                   <h2>Report coverage</h2>
-                  <span className="subtle-label">
-                    All terminal groups are included
-                  </span>
                 </div>
                 <div className="coverage-list">
                   {schedule.groups.map((g) => {
@@ -1166,11 +1128,6 @@ function App() {
                   />
                 </div>
               </section>
-              <p className="report-footnote">
-                <Icon name="cloud" size={16} />
-                The PDF uses a fresh snapshot of your shared inspection when you
-                export.
-              </p>
               {reporting && (
                 <div className="report-progress" role="status">
                   <span className="spinner" />
@@ -1258,6 +1215,13 @@ function App() {
             onDraft={(value) => updateDraft(record.key, value)}
             state={state}
             connected={connected}
+            qualityDisabled={pending > 0}
+            onQuality={(value) =>
+              mutate(
+                () => backend.setQuality(record.key, value),
+                "Quality saved",
+              )
+            }
             backend={backend}
             onCamera={() => {
               if (!connected) {
@@ -1294,6 +1258,17 @@ function App() {
           target={camera.target}
           devices={schedule.devices}
           terminal={camera.terminal}
+          quality={
+            state.records.find((item) => item.key === camera.target?.key)
+              ?.quality ?? null
+          }
+          qualityDisabled={!connected || pending > 0}
+          onQuality={(value) =>
+            mutate(
+              () => backend.setQuality(camera.target.key, value),
+              "Quality saved",
+            )
+          }
           onClose={() => setCamera(null)}
           onMatch={startDeviceEvidence}
           onManualEntry={enterDeviceName}
@@ -1391,10 +1366,6 @@ function ManualDeviceEntry({ skidName, onSelect }) {
         maxLength={120}
         placeholder="e.g. V-3541"
       />
-      <p className="help-text">
-        Choose the device from the Conduit Cable Schedule to take photos and add
-        comments.
-      </p>
       <p className="help-text" role="status">
         {devices.length
           ? `${devices.length} matching device${devices.length === 1 ? "" : "s"}`
@@ -1463,11 +1434,6 @@ function SkidDialog({ mode, current, onSave, onClose }) {
             autoComplete="off"
           />
         </label>
-        <p className="help-text">
-          {mode === "new"
-            ? "This creates a separate inspection for this skid. Its photos, comments, QA status, and revisions stay together."
-            : "Renaming keeps this report’s existing evidence and advances its revision."}
-        </p>
         {error && (
           <p role="alert" className="field-error">
             {error}
@@ -1681,6 +1647,8 @@ function RecordPanel({
   onDraft,
   state,
   connected,
+  qualityDisabled,
+  onQuality,
   backend,
   onCamera,
   onPhoto,
@@ -1751,6 +1719,18 @@ function RecordPanel({
           </button>
         </div>
       )}
+      <section className="record-quality">
+        <h3>Quality</h3>
+        <QualityControl
+          name={target.title}
+          value={
+            state.records.find((item) => item.key === target.key)?.quality ??
+            null
+          }
+          disabled={!connected || qualityDisabled || Boolean(busy)}
+          onChange={onQuality}
+        />
+      </section>
       <div className="record-section-heading">
         <h3>
           Evidence photos <span>{photos.length}</span>
@@ -1803,12 +1783,7 @@ function RecordPanel({
           <span className="empty-photo-icon">
             <Icon name="camera" size={29} />
           </span>
-          <strong>No evidence photos yet</strong>
-          <p>
-            {target.kind === "device"
-              ? "Photograph the device label and its wiring."
-              : "Photograph this terminal group and its connections."}
-          </p>
+          <strong>No photos</strong>
           <button
             className="button secondary"
             disabled={!connected}
@@ -1822,7 +1797,7 @@ function RecordPanel({
       {busy === "photos" && (
         <p className="save-progress" role="status">
           <span className="spinner" />
-          Uploading photos to the shared workspace…
+          Uploading photos…
         </p>
       )}
       <CommentPanel
@@ -1852,15 +1827,13 @@ function RecordPanel({
                 ? "Complete this terminal group"
                 : "Finish device QA"}
           </strong>
-          <p>
-            {status === "complete"
-              ? "Evidence reviewed and shared with your team."
-              : !photos.length
-                ? "Add at least one evidence photo first."
-                : !devicesReady
-                  ? "Complete all devices in this group before finishing terminal QA."
-                  : "Review the photos and comments, then mark this item complete."}
-          </p>
+          {status !== "complete" && (!photos.length || !devicesReady) && (
+            <p>
+              {!photos.length
+                ? "Add a photo first."
+                : "Complete all devices first."}
+            </p>
+          )}
         </div>
         <button
           className={`button ${status === "complete" ? "secondary" : "primary"}`}
@@ -1913,16 +1886,6 @@ function AuthDialog({ backend, config, setConfig, onClose, onVerified }) {
   }
   return (
     <Modal title="Inspector sign-in" onClose={onClose} className="auth-dialog">
-      <div className="auth-intro">
-        <span className="auth-icon">
-          <Icon name="cloud" size={28} />
-        </span>
-        <h3>One inspection. Your whole team.</h3>
-        <p>
-          Sign in with an approved inspector email to share photos, comments,
-          and progress.
-        </p>
-      </div>
       <form className="auth-form" onSubmit={submit}>
         <label>
           Email address
@@ -1957,8 +1920,7 @@ function AuthDialog({ backend, config, setConfig, onClose, onVerified }) {
         )}
         {sent && (
           <p className="help-text">
-            Check the email sent to {email}. Open the sign-in link, or enter the
-            code if the email includes one.
+            Open the sign-in link sent to {email}, or enter its code.
           </p>
         )}
         <button
@@ -1994,7 +1956,7 @@ function AuthDialog({ backend, config, setConfig, onClose, onVerified }) {
       </form>
       <p className="auth-footer">
         <Icon name="info" size={15} />
-        Only inspectors on your project’s allowlist can access QA evidence.
+        Approved inspectors only.
       </p>
       {!backend && <ConfigForm config={config} onSave={setConfig} />}
     </Modal>
@@ -2114,10 +2076,6 @@ function Workspace({
           <span className="subtle-label">Administrator settings</span>
         </div>
         <div className="settings-content">
-          <p>
-            This app connects to your team’s Supabase project. Access is
-            controlled by the inspector allowlist and private photo storage.
-          </p>
           <ConfigForm config={config} onSave={setConfig} />
           <a
             className="text-link"
@@ -2129,13 +2087,6 @@ function Workspace({
             <Icon name="arrow" size={15} />
           </a>
         </div>
-      </section>
-      <section className="settings-note">
-        <Icon name="cloud" />
-        <p>
-          Photos stay in the private shared workspace. Reading a label with OCR
-          happens on your device; the label image is not sent to an OCR service.
-        </p>
       </section>
     </div>
   );

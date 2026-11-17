@@ -86,6 +86,7 @@
 }
 
 .camera-tabs {
+  flex-direction: row;
   margin-bottom: 14px;
 }
 

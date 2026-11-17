@@ -1728,6 +1728,43 @@ h3 > span {
   gap: 12px;
   align-items: center;
 }
+.quality-control > small {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+}
+.record-quality,
+.camera-quality {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 18px 0;
+}
+.record-quality .quality-choice,
+.camera-quality .quality-choice {
+  min-height: 42px;
+  min-width: 85px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 14px;
+  gap: 8px;
+}
+.record-quality .quality-choice.good:has(input:checked),
+.camera-quality .quality-choice.good:has(input:checked) {
+  background: #eef5e7;
+  border-color: #87a46f;
+}
+.record-quality .quality-choice.bad:has(input:checked),
+.camera-quality .quality-choice.bad:has(input:checked) {
+  background: #fff0ed;
+  border-color: #bd7155;
+}
+.quality-choice:has(input:disabled) {
+  cursor: not-allowed;
+}
 .quality-choice {
   display: flex;
   gap: 5px;
