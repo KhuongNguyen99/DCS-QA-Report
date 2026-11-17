@@ -892,6 +892,16 @@ main {
 .terminal-evidence > div:nth-child(2) {
   flex: 1;
 }
+.terminal-evidence-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 160px;
+}
+.terminal-evidence-actions small {
+  max-width: 220px;
+  color: var(--muted);
+}
 .terminal-evidence h2 {
   font-size: 16px;
 }
@@ -1851,8 +1861,9 @@ h3 > span {
     padding: 20px;
     flex-wrap: wrap;
   }
-  .terminal-evidence .button {
+  .terminal-evidence-actions {
     margin-left: 65px;
+    flex-basis: 100%;
   }
   .terminal-progress-card {
     padding: 20px;
@@ -2155,7 +2166,7 @@ h3 > span {
   .terminal-evidence p {
     font-size: 10px;
   }
-  .terminal-evidence .button {
+  .terminal-evidence-actions {
     width: 100%;
     margin-left: 0;
     margin-top: 5px;

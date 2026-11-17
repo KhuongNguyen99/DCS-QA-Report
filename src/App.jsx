@@ -978,13 +978,24 @@ function App() {
                       </span>
                     </div>
                   </div>
-                  <button
-                    className="button secondary"
-                    onClick={() => openRecord("terminal", group)}
-                  >
-                    Inspect terminal
-                    <Icon name="arrow" size={16} />
-                  </button>
+                  <TerminalActions
+                    key={`${selectedId}:${group}`}
+                    group={group}
+                    state={state}
+                    connected={connected}
+                    pending={pending > 0}
+                    onInspect={() => openRecord("terminal", group)}
+                    onComplete={() =>
+                      mutate(
+                        () =>
+                          backend.setComplete(
+                            recordKey("terminal", group),
+                            true,
+                          ),
+                        `Terminal ${group} marked complete`,
+                      )
+                    }
+                  />
                 </div>
                 <div className="card terminal-progress-card">
                   <span className="eyebrow">DEVICE COVERAGE</span>
@@ -1292,6 +1303,70 @@ function App() {
             return mutate(() => backend.addPhoto(camera.target.key, photo));
           }}
         />
+      )}
+    </div>
+  );
+}
+
+function TerminalActions({
+  group,
+  state,
+  connected,
+  pending,
+  onInspect,
+  onComplete,
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const savingRef = useRef(false);
+  const progress = terminalProgress(group, schedule.devices, state);
+  const ready =
+    connected &&
+    progress.total > 0 &&
+    progress.complete === progress.total &&
+    progress.terminalPhotos > 0;
+  async function complete() {
+    if (!ready || progress.done || pending || savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    setError("");
+    try {
+      await onComplete();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  }
+  return (
+    <div className="terminal-evidence-actions">
+      <button
+        className="button secondary"
+        onClick={onInspect}
+        disabled={saving}
+      >
+        Inspect terminal <Icon name="arrow" size={16} />
+      </button>
+      <button
+        className="button primary"
+        onClick={complete}
+        disabled={!ready || progress.done || saving || pending}
+      >
+        <Icon name="check" size={16} />
+        {saving ? "Saving…" : progress.done ? "Complete" : "Mark complete"}
+      </button>
+      {connected && !ready && !progress.done && (
+        <small>
+          {!progress.terminalPhotos
+            ? "Add a terminal photo first."
+            : "Complete every device in this group first."}
+        </small>
+      )}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
       )}
     </div>
   );
