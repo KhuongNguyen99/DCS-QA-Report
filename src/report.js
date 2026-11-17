@@ -1,4 +1,5 @@
 import { jsPDF } from "jspdf";
+import { inspectionTargets } from "./domain.js";
 import {
   commentsFor,
   inspectionProgress,
@@ -275,12 +276,14 @@ function drawOverview(doc, schedule, state, project, generatedAt, layoutImage) {
     fitted.height,
   );
 
-  const progress = inspectionProgress(schedule.devices, schedule.groups, state);
+  const equipment = schedule.equipment ?? [];
+  const progress = inspectionProgress(schedule.devices, schedule.groups, state, equipment);
   const cardsY = 389;
-  const cardWidth = (PAGE.width - PAGE.margin * 2 - 24) / 3;
+  const cardWidth = (PAGE.width - PAGE.margin * 2 - 36) / 4;
   const metrics = [
     [`${progress.devices}/${schedule.devices.length}`, "Devices complete"],
     [`${progress.terminals}/${schedule.groups.length}`, "Terminals complete"],
+    [`${progress.equipment}/${equipment.length}`, "Equipment complete"],
     [String(state.photos.length), "Evidence photos"],
   ];
   metrics.forEach(([value, label], index) => {
@@ -295,14 +298,10 @@ function drawOverview(doc, schedule, state, project, generatedAt, layoutImage) {
 
   const statusCounts = { complete: 0, "in-progress": 0, "not-started": 0 };
   const qualityCounts = { Good: 0, Bad: 0, Unrated: 0 };
-  for (const group of schedule.groups)
-    statusCounts[recordStatus(`terminal:${group.id}`, state)] += 1;
-  for (const device of schedule.devices)
-    statusCounts[recordStatus(`device:${device.id}`, state)] += 1;
-  for (const group of schedule.groups)
-    qualityCounts[qualityFor(`terminal:${group.id}`, state)] += 1;
-  for (const device of schedule.devices)
-    qualityCounts[qualityFor(`device:${device.id}`, state)] += 1;
+  for (const target of inspectionTargets(schedule)) {
+    statusCounts[recordStatus(target.key, state)] += 1;
+    qualityCounts[qualityFor(target.key, state)] += 1;
+  }
   const countsY = cardsY + 78;
   setText(doc, COLOR.ink, 10, "bold");
   doc.text(
@@ -342,7 +341,7 @@ function drawSummary(doc, schedule, state, project) {
   function start() {
     y = newPage(doc, project, "Schedule summary");
     setText(doc, COLOR.ink, 17, "bold");
-    doc.text("All terminals and devices", PAGE.margin, y);
+    doc.text("All scheduled targets", PAGE.margin, y);
     y += 25;
     setText(doc, COLOR.muted, 9);
     doc.text("Target", PAGE.margin + 7, y);
@@ -388,7 +387,40 @@ function drawSummary(doc, schedule, state, project) {
     doc.text(coverageLines, 430, y + 17);
     y += height + 2;
   }
+  function sectionHeader(label) {
+    ensure(31);
+    doc.setFillColor(...COLOR.pale);
+    doc.rect(PAGE.margin, y, PAGE.width - PAGE.margin * 2, 27, "F");
+    setText(doc, COLOR.ink, 10, "bold");
+    doc.text(label, PAGE.margin + 7, y + 18);
+    y += 29;
+  }
   start();
+  if (schedule.equipment?.length) {
+    sectionHeader("Equipment inspections");
+    for (const equipment of schedule.equipment) {
+      const key = `equipment:${equipment.id}`;
+      const coverage = `${photosFor(key, state).length} photos; ${commentsFor(key, state).length} comments`;
+      const coverageLines = doc.splitTextToSize(coverage, 300);
+      const rowHeight = Math.max(22, coverageLines.length * 11 + 9);
+      if (ensure(rowHeight)) sectionHeader("Equipment inspections (continued)");
+      setText(doc, COLOR.ink, 9, "bold");
+      doc.text(printableText(equipment.name), PAGE.margin + 7, y + 14);
+      const status = recordStatus(key, state);
+      setText(doc, status === "complete" ? COLOR.green : status === "in-progress" ? COLOR.amber : COLOR.gray, 9);
+      doc.text(statusLabel(status), 220, y + 14);
+      const quality = qualityFor(key, state);
+      setText(doc, qualityColor(quality), 9, "bold");
+      doc.text(quality, 340, y + 14);
+      setText(doc, COLOR.ink, 9);
+      doc.text(coverageLines, 430, y + 14);
+      y += rowHeight;
+      doc.setDrawColor(...COLOR.line);
+      doc.line(PAGE.margin, y, PAGE.width - PAGE.margin, y);
+    }
+    y += 10;
+  }
+  sectionHeader("Terminals and devices");
   for (const group of schedule.groups) {
     const progress = terminalProgress(group.id, schedule.devices, state);
     ensure(46);
@@ -831,16 +863,15 @@ export async function createInspectionPdf({
   ) {
     throw new Error("Name this skid before exporting its QA report.");
   }
-  const entries = schedule.groups.flatMap((group) => [
-    { key: `terminal:${group.id}`, label: `Terminal ${group.id}` },
-    ...schedule.devices
-      .filter((device) => device.terminal === group.id)
-      .map((device) => ({
-        key: `device:${device.id}`,
-        label: `Device ${device.name} - Terminal ${group.id}`,
-        device,
-      })),
-  ]);
+  const entries = inspectionTargets(schedule).map((target) => ({
+    key: target.key,
+    label: target.kind === "equipment"
+      ? `Equipment ${target.name}`
+      : target.kind === "terminal"
+        ? `Terminal ${target.id}`
+        : `Device ${target.name} - Terminal ${target.terminal}`,
+    device: target.kind === "device" ? target.device : null,
+  }));
   const validKeys = new Set(entries.map((entry) => entry.key));
   const orphan =
     state.photos.find((item) => !validKeys.has(item.recordKey)) ||

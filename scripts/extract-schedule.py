@@ -27,9 +27,9 @@ GROUPS = [
 ]
 
 EQUIPMENT = [
-    {"id": "control-box", "name": "Control Box", "color": "#397CAC", "hotspot": {"x": 84, "y": 18}},
-    {"id": "solenoid-box", "name": "Solenoid Box", "color": "#218C90", "hotspot": {"x": 82, "y": 62}},
-    {"id": "transducer-panel", "name": "Transducer Panel", "color": "#8A63A9", "hotspot": {"x": 19, "y": 71}},
+    {"id": "control-box", "name": "Control Box", "color": "#397CAC", "hotspot": {"x": 84, "y": 12}},
+    {"id": "solenoid-box", "name": "Solenoid Box", "color": "#218C90", "hotspot": {"x": 82, "y": 55}},
+    {"id": "transducer-panel", "name": "Transducer Panel", "color": "#8A63A9", "hotspot": {"x": 16, "y": 81}},
 ]
 
 

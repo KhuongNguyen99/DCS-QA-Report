@@ -1,5 +1,11 @@
 import React from "react";
 const paths = {
+  equipment: (
+    <>
+      <rect x="4" y="3" width="16" height="18" rx="2" />
+      <path d="M8 7h8M8 11h5M16 15v3M9 15h2" />
+    </>
+  ),
   layout: (
     <>
       <rect x="3" y="3" width="18" height="18" rx="3" />

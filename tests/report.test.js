@@ -142,7 +142,7 @@ for (const count of [1, 2, 3, 4, 6]) {
     });
     const details = pages.map((text, index) => ({ text, stream: streams[index] }))
       .filter(({ text }) => text.includes("Evidence photos") && text.includes("Comments"));
-    assert.equal(details.length, 2, pages.slice(5).join("\n---\n"));
+    assert.equal(details.length, 2, pages.join("\n---\n"));
     assert.equal(fetched.filter((path) => path.startsWith("/private/")).length, photos.length);
     for (let index = 0; index < details.length; index += 1) {
       const { text, stream } = details[index];
@@ -163,6 +163,83 @@ for (const count of [1, 2, 3, 4, 6]) {
     }
   });
 }
+
+test("equipment evidence and QA details fit on one page for each scheduled item", async () => {
+  const equipment = schedule.equipment;
+  const counts = [1, 4, 6];
+  const keys = equipment.map((item) => `equipment:${item.id}`);
+  const photos = keys.flatMap((key, index) => evidencePhotos(key, counts[index]));
+  const { pages, streams, fetched } = await compactReport({
+    photos,
+    records: keys.map((key, index) => ({
+      key, complete: true, quality: index === 1 ? "bad" : "good",
+      completedAt: "2026-11-16T15:00:00Z", completedBy: "Inspector A",
+    })),
+    comments: keys.map((recordKey) => ({
+      recordKey, authorName: "Inspector A", createdAt: "2026-11-16T15:00:00Z",
+      text: `Verified ${recordKey}: enclosure, wiring, and labeling are correct.`,
+    })),
+  });
+  assert.equal(fetched.filter((path) => path.startsWith("/private/")).length, photos.length);
+  for (let index = 0; index < equipment.length; index += 1) {
+    const detailPages = pages.map((text, page) => ({ text, stream: streams[page] }))
+      .filter(({ text }) => text.includes(`Equipment ${equipment[index].name}`) &&
+        text.includes("Evidence photos"));
+    assert.equal(detailPages.length, 1, equipment[index].name);
+    const { text, stream } = detailPages[0];
+    assert.match(text, new RegExp(`Verified ${keys[index]}`));
+    assert.match(text, new RegExp(`Quality: ${index === 1 ? "Bad" : "Good"}`));
+    assert.match(text, /Completed/);
+    assert.match(text, /Comments/);
+    assert.doesNotMatch(text, /continued|next page/);
+    for (const photo of photos.filter((item) => item.recordKey === keys[index]))
+      assert.ok(text.includes(photo.name), photo.name);
+    assert.equal(photoPlacements(stream).length, counts[index]);
+  }
+});
+
+test("equipment appears in overview and summary alongside all 36 existing targets", async () => {
+  const completeKey = "equipment:control-box";
+  const startedKey = "equipment:solenoid-box";
+  const { pages } = await compactReport({
+    photos: evidencePhotos(completeKey, 1).concat(evidencePhotos(startedKey, 1)),
+    records: [
+      { key: completeKey, complete: true, quality: "good" },
+      { key: startedKey, complete: false, quality: "bad" },
+    ],
+  });
+  assert.match(pages[1], /1\/3\nEquipment complete/);
+  assert.match(pages[1], /1 complete  \|  1 in progress  \|  37 not started/);
+  assert.match(pages[1], /Quality: 1 good  \|  1 bad  \|  37 unrated/);
+  const summary = pages.filter((page) => page.includes("All scheduled targets")).join("\n");
+  assert.match(summary, /Equipment inspections/);
+  assert.match(summary, /Control Box\nComplete\nGood/);
+  assert.match(summary, /Solenoid Box\nIn progress\nBad/);
+  assert.match(summary, /Transducer Panel\nNot started\nUnrated/);
+  for (const group of schedule.groups) assert.ok(summary.includes(`Terminal ${group.id}`), group.id);
+  for (const device of schedule.devices) assert.ok(summary.includes(device.name), device.name);
+  assert.equal(schedule.groups.length + schedule.devices.length, 36);
+});
+
+test("equipment overflow repeats its heading and retains every photo and comment", async () => {
+  const key = "equipment:control-box";
+  const photos = evidencePhotos(key, 8);
+  const note = Array.from({ length: 80 }, (_, index) =>
+    `Equipment check ${index + 1}: enclosure seals and terminal wiring verified.`).join("\n");
+  const { pages, text, streams } = await compactReport({
+    photos,
+    comments: [{ recordKey: key, authorName: "Inspector A",
+      createdAt: "2026-11-16T15:00:00Z", text: note }],
+  });
+  const details = pages.filter((page) => page.includes("Equipment Control Box"));
+  assert.ok(details.length >= 2);
+  assert.ok(details.slice(1).every((page) => page.includes("(continued)")));
+  for (const photo of photos) assert.equal(text.split(photo.name).length - 1, 1);
+  const normalized = text.replace(/\s+/g, "");
+  for (const line of note.split("\n"))
+    assert.ok(normalized.includes(line.replace(/\s+/g, "")), line);
+  assert.equal(streams.reduce((sum, stream) => sum + photoPlacements(stream).length, 0), 10);
+});
 
 test("many photos and long notes continue with their target name and lose no evidence", async () => {
   const key = `device:${schedule.devices[0].id}`;
@@ -421,6 +498,20 @@ test("report refuses to omit evidence assigned outside the schedule", async () =
           state: {
             project: { skidName: "Pump House A" },
             records: [],
+            comments: [],
+            photos: [{ id: "orphan-equipment", recordKey: "equipment:UNKNOWN" }],
+          },
+          backend: { getPhotoUrl: async () => "/photo" },
+        }),
+      /not assigned to a scheduled target/,
+    );
+    await assert.rejects(
+      () =>
+        createInspectionPdf({
+          schedule,
+          state: {
+            project: { skidName: "Pump House A" },
+            records: [],
             photos: [],
             comments: [
               {
@@ -492,6 +583,18 @@ test("report rejects evidence or backend data from another skid before loading a
           state: {
             ...state,
             photos: [{ recordKey: `device:${schedule.devices[0].id}`, walkdownId: "skid-b" }],
+          },
+          backend: { walkdownId: "skid-a", getPhotoUrl: async () => "/photo" },
+        }),
+      /evidence from another skid/,
+    );
+    await assert.rejects(
+      () =>
+        createInspectionPdf({
+          schedule,
+          state: {
+            ...state,
+            photos: [{ recordKey: "equipment:control-box", walkdownId: "skid-b" }],
           },
           backend: { walkdownId: "skid-a", getPhotoUrl: async () => "/photo" },
         }),

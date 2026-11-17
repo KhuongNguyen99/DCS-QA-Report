@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import Icon from "./Icons.jsx";
 import QualityControl from "./QualityControl.jsx";
+import { inspectionTargets } from "./domain.js";
 import {
   photosFor,
   commentsFor,
@@ -22,26 +23,7 @@ export default function OverviewTable({
   const [kind, setKind] = useState("");
   const [documentation, setDocumentation] = useState("");
   const targets = useMemo(
-    () =>
-      schedule.groups.flatMap((group) => [
-        {
-          id: group.id,
-          key: `terminal:${group.id}`,
-          kind: "terminal",
-          name: `Terminal ${group.id}`,
-          terminal: group.id,
-          cables: [],
-          color: group.color,
-        },
-        ...schedule.devices
-          .filter((d) => d.terminal === group.id)
-          .map((d) => ({
-            ...d,
-            key: `device:${d.id}`,
-            kind: "device",
-            color: group.color,
-          })),
-      ]),
+    () => inspectionTargets(schedule),
     [schedule],
   );
   const shown = targets.filter(
@@ -64,7 +46,7 @@ export default function OverviewTable({
             aria-label="Search overview"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search devices, terminals, or cable numbers…"
+            placeholder="Search inspections…"
           />
         </label>
         <label className="select-field">
@@ -84,7 +66,8 @@ export default function OverviewTable({
         <label className="select-field">
           <span className="sr-only">Item type</span>
           <select value={kind} onChange={(e) => setKind(e.target.value)}>
-            <option value="">Devices & terminals</option>
+            <option value="">All items</option>
+            <option value="equipment">Equipment only</option>
             <option value="device">Devices only</option>
             <option value="terminal">Terminals only</option>
           </select>
@@ -103,7 +86,7 @@ export default function OverviewTable({
       </div>
       <div className="list-heading">
         <span>
-          {shown.length} of {targets.length} items · 28 devices + 8 terminals
+          {shown.length} of {targets.length} items
         </span>
         <span>
           QA Revision {state.project?.revision ?? schedule.project.revision}
@@ -113,12 +96,12 @@ export default function OverviewTable({
         <div className="overview-scroll">
           <table className="overview-table">
             <caption className="sr-only">
-              All devices and terminal groups with shared documentation,
+              All equipment, devices, and terminal groups with shared documentation,
               quality, and QA progress
             </caption>
             <thead>
               <tr>
-                <th scope="col">Device / terminal</th>
+                <th scope="col">Inspection item</th>
                 <th scope="col">Group</th>
                 <th scope="col">Cable</th>
                 <th scope="col">Documentation</th>
@@ -158,7 +141,7 @@ export default function OverviewTable({
                           {item.kind === "terminal" ? (
                             item.terminal
                           ) : (
-                            <Icon name="device" size={16} />
+                            <Icon name={item.kind === "equipment" ? "equipment" : "device"} size={16} />
                           )}
                         </span>
                         <span>
@@ -166,7 +149,7 @@ export default function OverviewTable({
                         </span>
                       </div>
                     </td>
-                    <td>{item.terminal}</td>
+                    <td>{item.terminal || "—"}</td>
                     <td>
                       <div className="overview-cables">
                         {item.cables.length

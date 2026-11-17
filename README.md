@@ -6,7 +6,7 @@ Shared field inspection for **450k Skid x7 - DCS**. The app is a mobile-friendly
 
 1. Sign in with an approved inspector email. Open the email's sign-in link, or enter its code if one is included.
 2. Create a **New skid report** and enter its skid name, or select an existing report. Each skid has separate photos, comments, quality, completion, and revision. Existing pre-skid data is preserved as **Unassigned skid** and must be named before continuing.
-3. Tap A–H on the conduit layout to open that terminal group, or use **QA overview** for all 28 devices and 8 terminals.
+3. Tap A–H or **Control Box**, **Solenoid Box**, or **Transducer Panel** on the conduit layout, or use **QA overview** for all 39 inspection items: 28 field devices, 8 terminals, and 3 equipment items. Equipment also has its own cards below the map and an **Equipment only** overview filter.
 4. Scan a device label, use **Enter device name** to search and choose a scheduled device, or open its row. Manual entry is also available inside the scanner. Label matching tolerates surrounding text such as `OV-3541F` and `*V-3541#`; ambiguous matches need your selection.
 5. Capture or upload evidence photos and add comments. Each terminal also has its own evidence record. Use **Flashlight** in the camera to toggle the rear-camera torch when your phone/browser supports it; closing the camera turns it off.
 6. Choose **Good** or **Bad** in the camera, record, or overview table. Quality saves immediately and stays in sync across those screens. The checkboxes are mutually exclusive; clicking the selected choice clears it.
@@ -14,6 +14,8 @@ Shared field inspection for **450k Skid x7 - DCS**. The app is a mobile-friendly
 8. Export the whole inspection from **Report**. Each documented device or terminal starts on its own page, with quality, photos, comments, authors, and timestamps together. The layout fits up to six photos with brief comments on one page when space permits; longer records continue without cropping or omitting evidence. Unfinished items remain in the summary.
 
 **Documented** in the overview means at least one saved photo. It is separate from quality and completed QA review. Comments are optional. Draft comments stay with their skid when switching reports and survive camera navigation until posted, the page is reloaded, or the inspector signs out.
+
+Each equipment inspection has its own photos, typed/voice comments, quality, and completion for the selected skid. Completing equipment requires its own saved photo and does not complete any field device or terminal. Overall progress and **Complete inspection** include all 39 items. Equipment appears in PDF coverage and gets the same compact evidence pages as devices and terminals.
 
 Use **General walkdown comments** on the layout or report screen for notes about the whole inspection. Typed and voice notes are shared with the team and included in their own PDF section.
 

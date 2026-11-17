@@ -16,6 +16,8 @@ Use a dedicated Supabase project. In its SQL Editor, run the entire [`schema.sql
 
 To upgrade an existing named-walkdown deployment, run [`equipment-inspections.sql`](./equipment-inspections.sql), then `VERIFY.sql`. The migration adds three empty equipment records to every existing skid and advances each affected report revision once. Rerunning it makes no further changes. It preserves all previous records, evidence, comments, quality, and completion. The [manual GitHub workflow](../.github/workflows/migrate-equipment.yml) can apply the same migration through the QA-Report environment and run a read-only catalog check; it does not run on push.
 
+The workflow's `SUPABASE_ACCESS_TOKEN` needs **Database: Read-write** on this project. A token limited to Edge Functions/Secrets cannot apply this migration. Replace the GitHub environment secret with a newly scoped token if Supabase returns `403` with `database_read` missing; existing token scopes cannot be edited. See [Supabase token permissions](https://supabase.com/docs/guides/platform/personal-access-tokens).
+
 To upgrade the older single-report deployment, run [`named-walkdowns.sql`](./named-walkdowns.sql), then `equipment-inspections.sql`, then `VERIFY.sql`. The first migration atomically moves all existing inspection data into **Unassigned skid**, preserving IDs, photo paths, timestamps, status, and its previous revision. An inspector must manually rename that skid before adding evidence, comments, quality, completion, or voice drafts. New skids require unique names of 1–120 characters and start with 39 empty inspection rows at report revision 3 after the equipment migration. Names are unique without regard to case; IDs remain stable after renaming.
 
 
@@ -164,13 +166,13 @@ Run `npm test` for adapter and executable PostgreSQL-compatible PGlite migration
 
 - Comments are append-only. Corrections are new comments, preserving author and server timestamp.
 
-- Each device and terminal has one shared Quality value: Good, Bad, or unrated. Selecting one excludes the other; clearing it returns to unrated. The latest change, including a clear, records the inspector and server timestamp. Quality changes preserve evidence completion.
+- Each equipment item, device, and terminal has one shared Quality value: Good, Bad, or unrated. Selecting one excludes the other; clearing it returns to unrated. The latest change, including a clear, records the inspector and server timestamp. Quality changes preserve evidence completion.
 
 - Any active inspector can add evidence/comments and complete or reopen an item. Only the photographer or administrator can remove a photo.
 
 - Uploads reserve metadata before sending bytes, then finalize after the server finds the private object. Pending uploads never count as evidence.
 
-- Removing a saved photo reopens the record and parent terminal before Storage deletion. If cleanup fails, the app reports the failure; retry removal by the same photo ID or ask the administrator to remove the tombstoned file in Storage.
+- Removing a saved photo reopens its record and, for field devices, its parent terminal before Storage deletion. Equipment remains independent of terminal completion. If cleanup fails, the app reports the failure; retry removal by the same photo ID or ask the administrator to remove the tombstoned file in Storage.
 
 - Completion and evidence changes are serialized by a database transaction lock for that skid. Different skids can be edited independently. Terminal completion checks the server's canonical device catalog.
 

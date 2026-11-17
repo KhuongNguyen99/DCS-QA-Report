@@ -9,7 +9,7 @@ import { createPortal } from "react-dom";
 import schedule from "./data/schedule.json";
 import { createBackend, validateBackendConfig } from "./backend.js";
 import { readConfig, saveConfig } from "./config.js";
-import { recordKey, groupDevices, findManualDevices } from "./domain.js";
+import { recordKey, groupDevices, findManualDevices, inspectionTargets } from "./domain.js";
 import {
   photosFor,
   commentsFor,
@@ -25,6 +25,7 @@ import CommentPanel from "./CommentPanel.jsx";
 import QualityControl from "./QualityControl.jsx";
 
 const EMPTY = { records: [], photos: [], comments: [], inspector: null };
+const TARGETS = inspectionTargets(schedule);
 const TITLES = {
   layout: "Conduit layout",
   devices: "QA overview",
@@ -176,7 +177,8 @@ function App() {
     pending || reporting || camera || record || manualEntry,
   );
   const reportRevision = state.project?.revision ?? schedule.project.revision;
-  const totals = inspectionProgress(schedule.devices, schedule.groups, state);
+  const totals = inspectionProgress(schedule.devices, schedule.groups, state, schedule.equipment);
+  const completedTargets = totals.devices + totals.terminals + totals.equipment;
 
   const loadWorkspace = useCallback(async () => {
     if (!workspaceBackend) return;
@@ -410,15 +412,9 @@ function App() {
     }
   }
   function openRecord(kind, id) {
-    const device =
-      kind === "device" ? schedule.devices.find((d) => d.id === id) : null;
-    const target = {
-      key: recordKey(kind, id),
-      title: device?.name || `Terminal ${id}`,
-      terminal: device?.terminal || id,
-      kind,
-      device,
-    };
+    const item = TARGETS.find((target) => target.kind === kind && target.id === id);
+    if (!item) throw new Error("Choose an item from the inspection schedule.");
+    const target = { ...item, title: item.name };
     setRecord(target);
     return target;
   }
@@ -517,7 +513,7 @@ function App() {
               <span>{label}</span>
               {id === "devices" && (
                 <small>
-                  {schedule.devices.length + schedule.groups.length}
+                  {TARGETS.length}
                 </small>
               )}
             </button>
@@ -780,28 +776,28 @@ function App() {
                   icon="device"
                 />
                 <Stat
-                  value={connected ? `${totals.terminals}/8` : "8"}
+                  value={connected ? `${totals.terminals}/${schedule.groups.length}` : schedule.groups.length}
                   label={connected ? "Terminals complete" : "Terminal groups"}
                   icon="layout"
                 />
                 <Stat
-                  value={connected ? totals.photos : "—"}
-                  label="Evidence photos"
-                  icon="camera"
+                  value={connected ? `${totals.equipment}/${schedule.equipment.length}` : schedule.equipment.length}
+                  label={connected ? "Equipment complete" : "Equipment to inspect"}
+                  icon="equipment"
                 />
                 <div className="overall-progress">
                   <div>
                     <span>Overall inspection</span>
                     <strong>
                       {connected
-                        ? `${Math.round((totals.devices / schedule.devices.length) * 100)}%`
+                        ? `${Math.round((completedTargets / TARGETS.length) * 100)}%`
                         : "Preview"}
                     </strong>
                   </div>
                   <progress
-                    aria-label="Device inspection completion"
-                    max={schedule.devices.length}
-                    value={connected ? totals.devices : 0}
+                    aria-label="Overall inspection completion"
+                    max={TARGETS.length}
+                    value={connected ? completedTargets : 0}
                   />
                 </div>
               </section>
@@ -811,7 +807,6 @@ function App() {
                     <span className="eyebrow">INSPECTION MAP</span>
                     <h2>Conduit layout</h2>
                   </div>
-                  <span className="subtle-label">Terminals A–H</span>
                 </div>
                 <div className="map-scroll">
                   <div className="map-stage">
@@ -839,6 +834,21 @@ function App() {
                         </button>
                       );
                     })}
+                    {schedule.equipment.map((item) => {
+                      const status = recordStatus(recordKey("equipment", item.id), state);
+                      return (
+                        <button
+                          key={item.id}
+                          aria-label={`Open ${item.name}${connected && status === "complete" ? ", complete" : ""}`}
+                          className={`map-pin map-equipment ${connected ? status : ""} ${connected && status === "complete" ? "done" : ""}`}
+                          style={{ left: `${item.hotspot.x}%`, top: `${item.hotspot.y}%` }}
+                          onClick={() => openRecord("equipment", item.id)}
+                        >
+                          <span>{item.name}</span>
+                          {connected && status === "complete" && <Icon name="check" size={11} />}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
                 <div className="map-footer">
@@ -858,6 +868,17 @@ function App() {
                   </div>
                 </div>
               </section>
+              <div className="section-heading">
+                <h2>Equipment</h2>
+              </div>
+              <div className="equipment-grid">
+                {schedule.equipment.map((item) => (
+                  <EquipmentCard
+                    key={item.id} item={item} state={state} connected={connected}
+                    onClick={() => openRecord("equipment", item.id)}
+                  />
+                ))}
+              </div>
               <div className="section-heading">
                 <h2>Terminal groups</h2>
                 <span>
@@ -1038,19 +1059,19 @@ function App() {
                   </h2>
                 </div>
                 <span className="report-tag">
-                  {connected && totals.devices === 28 && totals.terminals === 8
+                  {connected && completedTargets === TARGETS.length
                     ? "Complete inspection"
                     : "Partial inspection"}
                 </span>
               </section>
               <section className="stats-strip report-stats">
                 <Stat
-                  value={connected ? `${totals.devices}/28` : "—"}
+                  value={connected ? `${totals.devices}/${schedule.devices.length}` : "—"}
                   label="Devices complete"
                   icon="device"
                 />
                 <Stat
-                  value={connected ? `${totals.terminals}/8` : "—"}
+                  value={connected ? `${totals.terminals}/${schedule.groups.length}` : "—"}
                   label="Terminals complete"
                   icon="layout"
                 />
@@ -1060,9 +1081,9 @@ function App() {
                   icon="camera"
                 />
                 <Stat
-                  value={connected ? state.comments.length : "—"}
-                  label="Comments"
-                  icon="comment"
+                  value={connected ? `${totals.equipment}/${schedule.equipment.length}` : "—"}
+                  label="Equipment complete"
+                  icon="equipment"
                 />
               </section>
               <section className="card">
@@ -1070,6 +1091,20 @@ function App() {
                   <h2>Report coverage</h2>
                 </div>
                 <div className="coverage-list">
+                  {schedule.equipment.map((item) => {
+                    const key = recordKey("equipment", item.id);
+                    return (
+                      <div className="coverage-row" key={key}>
+                        <div className="terminal-letter" style={{ "--group-color": item.color }}>
+                          <Icon name="equipment" size={17} />
+                        </div>
+                        <strong>{item.name}</strong>
+                        <span>{photosFor(key, state).length} photos</span>
+                        <span>{commentsFor(key, state).length} comments</span>
+                        <Status value={recordStatus(key, state)} connected={connected} />
+                      </div>
+                    );
+                  })}
                   {schedule.groups.map((g) => {
                     const p = terminalProgress(g.id, schedule.devices, state);
                     return (
@@ -1515,6 +1550,31 @@ function TerminalCard({ group, state, connected, onClick }) {
   );
 }
 
+function EquipmentCard({ item, state, connected, onClick }) {
+  const key = recordKey("equipment", item.id);
+  const status = recordStatus(key, state);
+  return (
+    <button
+      className={`terminal-card equipment-card ${connected && status === "complete" ? "done" : ""}`}
+      onClick={onClick}
+      style={{ "--group-color": item.color }}
+      aria-label={`Inspect ${item.name}`}
+    >
+      <div className="terminal-card-top">
+        <span className="terminal-letter"><Icon name="equipment" size={18} /></span>
+        {connected && status === "complete"
+          ? <span className="complete-circle"><Icon name="check" size={17} /></span>
+          : <Icon name="arrow" size={16} />}
+      </div>
+      <strong>{item.name}</strong>
+      <div className="terminal-card-bottom">
+        <span><Icon name="camera" size={14} />{connected ? photosFor(key, state).length : "—"}</span>
+        <Status value={status} connected={connected} />
+      </div>
+    </button>
+  );
+}
+
 function DeviceRow({ device, state, connected, onClick }) {
   const key = recordKey("device", device.id);
   const status = recordStatus(key, state);
@@ -1699,7 +1759,7 @@ function RecordPanel({
     <div className="record-content">
       <div className="record-summary">
         <span className="terminal-badge">Skid: {state.project?.skidName}</span>
-        <span className="terminal-badge">Terminal {target.terminal}</span>
+        {target.terminal && <span className="terminal-badge">Terminal {target.terminal}</span>}
         <Status value={status} connected={connected} />
         {target.device && (
           <span className="record-cables">
@@ -1825,7 +1885,9 @@ function RecordPanel({
               ? "QA completed"
               : target.kind === "terminal"
                 ? "Complete this terminal group"
-                : "Finish device QA"}
+                : target.kind === "equipment"
+                  ? "Finish equipment QA"
+                  : "Finish device QA"}
           </strong>
           {status !== "complete" && (!photos.length || !devicesReady) && (
             <p>

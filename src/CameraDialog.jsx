@@ -406,7 +406,7 @@ export default function CameraDialog({
         </header>
 
         <div className="camera-body">
-          {target && (
+          {target && target.kind !== "equipment" && (
             <nav className="camera-tabs" aria-label="Camera task">
               <button
                 type="button"
