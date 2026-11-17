@@ -38,8 +38,12 @@ async function pdfContent(blob) {
     ),
   );
   const streamFor = (body) => {
-    const stream = body?.match(/stream\r?\n([\s\S]*?)\r?\nendstream/)?.[1];
-    if (!stream) return "";
+    const marker = body?.match(/stream\r?\n/);
+    const length = Number(body?.match(/\/Length\s+(\d+)/)?.[1]);
+    if (!marker || !Number.isSafeInteger(length)) return "";
+    // Compressed bytes can end with CR; use /Length instead of consuming it as a line ending.
+    const start = marker.index + marker[0].length;
+    const stream = body.slice(start, start + length);
     try {
       return inflateSync(Buffer.from(stream, "latin1")).toString("latin1");
     } catch {
@@ -138,7 +142,7 @@ for (const count of [1, 2, 3, 4, 6]) {
     });
     const details = pages.map((text, index) => ({ text, stream: streams[index] }))
       .filter(({ text }) => text.includes("Evidence photos") && text.includes("Comments"));
-    assert.equal(details.length, 2);
+    assert.equal(details.length, 2, pages.slice(5).join("\n---\n"));
     assert.equal(fetched.filter((path) => path.startsWith("/private/")).length, photos.length);
     for (let index = 0; index < details.length; index += 1) {
       const { text, stream } = details[index];
