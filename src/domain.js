@@ -27,7 +27,28 @@ export function findManualDevices(text, devices) {
 export function recordKey(kind, id) {
   if (kind === "device") return `device:${id}`;
   if (kind === "terminal") return `terminal:${String(id).trim().toUpperCase()}`;
+  if (kind === "equipment") return `equipment:${id}`;
   throw new RangeError(`Unknown record kind: ${kind}`);
+}
+
+/** Shared inspection catalog; field-device OCR remains limited to devices. */
+export function inspectionTargets(schedule) {
+  return [
+    ...(schedule.equipment || []).map((item) => ({
+      ...item, key: recordKey("equipment", item.id), kind: "equipment",
+      terminal: null, cables: [],
+    })),
+    ...schedule.groups.flatMap((group) => [
+      {
+        id: group.id, key: recordKey("terminal", group.id), kind: "terminal",
+        name: `Terminal ${group.id}`, terminal: group.id, cables: [], color: group.color,
+      },
+      ...groupDevices(schedule.devices, group.id).map((device) => ({
+        ...device, key: recordKey("device", device.id), kind: "device",
+        color: group.color, device,
+      })),
+    ]),
+  ];
 }
 
 // A leading O/0 or one trailing letter/# is tolerated as OCR noise, but never

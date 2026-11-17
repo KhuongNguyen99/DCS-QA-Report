@@ -35,6 +35,20 @@ test("terminal goes green only with all devices and its own evidence reviewed", 
   assert.deepEqual(inspectionProgress(devices, [{ id: "B" }], state), {
     devices: 1,
     terminals: 0,
+    equipment: 0,
     photos: 3,
   });
+});
+
+test("equipment completion is independent of field devices and terminal coverage", () => {
+  const state = blank();
+  const equipment = [{ id: "control-box" }, { id: "solenoid-box" }, { id: "transducer-panel" }];
+  state.records.push({ key: "equipment:control-box", complete: true });
+  assert.equal(inspectionProgress(devices, [{ id: "B" }], state, equipment).equipment, 0);
+  state.photos.push({ recordKey: "equipment:control-box" });
+  assert.equal(recordStatus("equipment:control-box", state), "complete");
+  assert.deepEqual(inspectionProgress(devices, [{ id: "B" }], state, equipment), {
+    devices: 0, terminals: 0, equipment: 1, photos: 1,
+  });
+  assert.equal(terminalProgress("B", devices, state).started, false);
 });

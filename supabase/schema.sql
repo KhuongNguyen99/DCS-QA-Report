@@ -19,14 +19,38 @@ on conflict (email) do nothing;
 
 create table if not exists public.qa_targets (
   key text primary key,
-  kind text not null check (kind in ('device', 'terminal')),
-  terminal text not null check (terminal ~ '^[A-H]$'),
+  kind text not null check (kind in ('device', 'terminal', 'equipment')),
+  terminal text check ((kind = 'equipment' and terminal is null)
+    or (kind in ('device', 'terminal') and terminal is not null and terminal ~ '^[A-H]$')),
   label text not null,
-  check ((kind = 'terminal' and key = 'terminal:' || terminal) or (kind = 'device' and key = 'device:' || label))
+  check ((kind = 'terminal' and key = 'terminal:' || terminal)
+    or (kind = 'device' and key = 'device:' || label)
+    or (kind = 'equipment' and ((key = 'equipment:control-box' and label = 'Control Box')
+      or (key = 'equipment:solenoid-box' and label = 'Solenoid Box')
+      or (key = 'equipment:transducer-panel' and label = 'Transducer Panel'))))
 );
+-- Existing projects still have the original device/terminal-only checks.
+alter table public.qa_targets drop constraint if exists qa_targets_kind_check;
+alter table public.qa_targets drop constraint if exists qa_targets_terminal_check;
+alter table public.qa_targets drop constraint if exists qa_targets_check;
+alter table public.qa_targets alter column terminal drop not null;
+alter table public.qa_targets add constraint qa_targets_kind_check check (kind in ('device', 'terminal', 'equipment'));
+alter table public.qa_targets add constraint qa_targets_terminal_check check ((kind = 'equipment' and terminal is null)
+  or (kind in ('device', 'terminal') and terminal is not null and terminal ~ '^[A-H]$'));
+alter table public.qa_targets add constraint qa_targets_check check ((kind = 'terminal' and key = 'terminal:' || terminal)
+  or (kind = 'device' and key = 'device:' || label)
+  or (kind = 'equipment' and ((key = 'equipment:control-box' and label = 'Control Box')
+    or (key = 'equipment:solenoid-box' and label = 'Solenoid Box')
+    or (key = 'equipment:transducer-panel' and label = 'Transducer Panel'))));
 insert into public.qa_targets (key, kind, terminal, label)
 select 'terminal:' || letter, 'terminal', letter, letter
 from unnest(array['A','B','C','D','E','F','G','H']) as letter
+on conflict (key) do nothing;
+
+insert into public.qa_targets (key, kind, terminal, label) values
+  ('equipment:control-box', 'equipment', null, 'Control Box'),
+  ('equipment:solenoid-box', 'equipment', null, 'Solenoid Box'),
+  ('equipment:transducer-panel', 'equipment', null, 'Transducer Panel')
 on conflict (key) do nothing;
 -- These 28 IDs/group assignments are from 450k skid x7 - DCS, revision 3.
 insert into public.qa_targets (key, kind, terminal, label)
@@ -296,6 +320,19 @@ begin
 end;
 $$;
 
+-- Existing reports gain one empty record per equipment target. INSERT does not
+-- fire the record revision trigger, so advance only reports receiving new rows.
+with added as (
+  insert into public.qa_records(walkdown_id, key)
+  select w.id, t.key from public.qa_walkdowns w cross join public.qa_targets t
+  where t.kind = 'equipment'
+  on conflict (walkdown_id, key) do nothing
+  returning walkdown_id
+)
+update public.qa_walkdowns w set revision = revision + 1,
+  updated_at = clock_timestamp(), last_change_txid = pg_catalog.txid_current()
+where w.id in (select distinct walkdown_id from added);
+
 create or replace function qa_private.bump_report_revision()
 returns trigger language plpgsql security definer set search_path = '' as $$
 begin
@@ -406,7 +443,7 @@ create or replace function public.qa_prepare_photo(p_walkdown_id uuid, p_id uuid
 returns void language plpgsql security definer set search_path = '' as $$
 begin
   perform qa_private.require_walkdown(p_walkdown_id, true);
-  if not exists (select 1 from public.qa_targets where key = p_record_key) then raise exception 'Unknown device or terminal.'; end if;
+  if not exists (select 1 from public.qa_targets where key = p_record_key) then raise exception 'Unknown inspection target.'; end if;
   if p_path is null or p_path not in (auth.uid()::text || '/' || p_id::text || '.jpg', auth.uid()::text || '/' || p_id::text || '.png', auth.uid()::text || '/' || p_id::text || '.webp') then
     raise exception 'Invalid photo storage path.';
   end if;
@@ -462,7 +499,7 @@ declare target public.qa_targets%rowtype; updated public.qa_records%rowtype;
 begin
   perform qa_private.require_walkdown(p_walkdown_id, true);
   select * into target from public.qa_targets where key = p_record_key;
-  if not found then raise exception 'Unknown device or terminal.'; end if;
+  if not found then raise exception 'Unknown inspection target.'; end if;
   if p_complete is null then raise exception 'Completion must be true or false.'; end if;
   if p_complete then
     if not exists (select 1 from public.qa_photos p join storage.objects o on o.bucket_id = 'qa-evidence' and o.name = p.path
@@ -489,7 +526,7 @@ begin
   if p_quality is not null and p_quality not in ('good','bad') then raise exception 'Quality must be Good, Bad, or unrated.'; end if;
   update public.qa_records set quality = p_quality, quality_by = auth.uid(), quality_at = clock_timestamp(), updated_at = clock_timestamp()
   where walkdown_id = p_walkdown_id and key = p_record_key returning * into updated;
-  if not found then raise exception 'Unknown device or terminal.'; end if;
+  if not found then raise exception 'Unknown inspection target.'; end if;
   return to_jsonb(updated);
 end;
 $$;

@@ -404,6 +404,37 @@ test("comment and completion input is validated before sending authoritative RPC
   ]);
 });
 
+test("only the three scheduled equipment keys are accepted for inspection actions", async () => {
+  const { backend, calls } = fixture();
+  const keys = [
+    "equipment:control-box",
+    "equipment:solenoid-box",
+    "equipment:transducer-panel",
+  ];
+  for (const key of keys) {
+    await backend.addComment(key, "Equipment note");
+    await backend.setQuality(key, "good");
+    await backend.setComplete(key, false);
+  }
+  await backend.addPhoto(keys[0], sample);
+  for (const key of [
+    "equipment:other",
+    "equipment:Control-Box",
+    "equipment:control-box:extra",
+    "equipment:control-box/../terminal:A",
+  ]) {
+    await assert.rejects(backend.addComment(key, "note"), /project schedule/);
+    await assert.rejects(backend.setComplete(key, true), /project schedule/);
+    await assert.rejects(backend.setQuality(key, "good"), /project schedule/);
+    await assert.rejects(backend.addPhoto(key, sample), /project schedule/);
+  }
+  assert.deepEqual(
+    calls.filter((call) => call[0].startsWith("qa_") && call[1]?.p_record_key)
+      .map((call) => call[1].p_record_key),
+    keys.flatMap((key) => [key, key, key]).concat(keys[0]),
+  );
+});
+
 test("private photo URLs are cached briefly and removal reopens the record before storage deletion", async () => {
   const { backend, calls, photo } = fixture();
   await backend.getPhotoUrl(photo);
@@ -530,4 +561,15 @@ test("database catalog matches every exact revision-3 schedule ID and terminal",
   );
   assert.equal(seeded.length, 28);
   assert.deepEqual(seeded.sort(), expected.sort());
+  const equipment = [
+    ["equipment:control-box", "Control Box"],
+    ["equipment:solenoid-box", "Solenoid Box"],
+    ["equipment:transducer-panel", "Transducer Panel"],
+  ];
+  assert.deepEqual(
+    schedule.equipment.map((item) => [`equipment:${item.id}`, item.name]),
+    equipment,
+  );
+  for (const [key, label] of equipment)
+    assert.match(sql, new RegExp(`\\('${key}', 'equipment', null, '${label}'\\)`));
 });

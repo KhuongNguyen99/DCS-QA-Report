@@ -264,7 +264,7 @@ export function createVoiceHandler({
         throw new VoiceError(
           400,
           "invalid_record",
-          "Choose a device or terminal from the project schedule.",
+          "Choose an inspection target from the project schedule.",
         );
       }
       const apiKey = getEnv("ELEVENLABS_API_KEY");

@@ -30,9 +30,9 @@ function validateEmail(value) {
 function validateRecordKey(value) {
   if (
     typeof value !== "string" ||
-    !/^(terminal:[A-H]|device:[A-Z]{1,4}-\d{4}(?:#[1-9]\d*|-Y)?)$/.test(value)
+    !/^(terminal:[A-H]|device:[A-Z]{1,4}-\d{4}(?:#[1-9]\d*|-Y)?|equipment:(?:control-box|solenoid-box|transducer-panel))$/.test(value)
   ) {
-    throw new Error("Choose a device or terminal from the project schedule.");
+    throw new Error("Choose an inspection target from the project schedule.");
   }
   return value;
 }

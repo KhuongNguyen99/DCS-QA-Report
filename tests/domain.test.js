@@ -6,6 +6,7 @@ import {
   matchDeviceLabels,
   recordKey,
   findManualDevices,
+  inspectionTargets,
 } from "../src/domain.js";
 
 const schedule = JSON.parse(
@@ -14,6 +15,23 @@ const schedule = JSON.parse(
 const devices = schedule.devices;
 const ids = (text, terminal = null) =>
   matchDeviceLabels(text, devices, terminal).map((match) => match.deviceId);
+
+test("inspection catalog adds three equipment items without changing field-device identity", () => {
+  const targets = inspectionTargets(schedule);
+  assert.equal(targets.length, 39);
+  assert.equal(new Set(targets.map((target) => target.key)).size, 39);
+  assert.deepEqual(targets.filter((target) => target.kind === "equipment").map(
+    ({ key, name, terminal, cables }) => ({ key, name, terminal, cables }),
+  ), [
+    { key: "equipment:control-box", name: "Control Box", terminal: null, cables: [] },
+    { key: "equipment:solenoid-box", name: "Solenoid Box", terminal: null, cables: [] },
+    { key: "equipment:transducer-panel", name: "Transducer Panel", terminal: null, cables: [] },
+  ]);
+  assert.equal(targets.filter((target) => target.kind === "device").length, 28);
+  assert.equal(targets.filter((target) => target.kind === "terminal").length, 8);
+  assert.deepEqual(findManualDevices("control box", devices), []);
+  assert.equal(recordKey("equipment", "control-box"), "equipment:control-box");
+});
 
 test("manual device search accepts partial or old labels and keeps scheduled identities", () => {
   const found = (query) =>

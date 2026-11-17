@@ -49,7 +49,7 @@ function fixture(overrides = {}) {
                       : walkdownId,
                     nameRequired: !!overrides.unnamed,
                   },
-                  records: [{ key: "device:V-3541" }],
+                  records: overrides.records ?? [{ key: "device:V-3541" }],
                 },
               };
         },
@@ -211,6 +211,17 @@ test("whole-walkdown voice scope uses the same membership and quota checks witho
     unknown.calls.some((call) => call[0] === "sdk"),
     false,
   );
+});
+
+test("equipment voice comments use an equipment record in the named skid", async () => {
+  const key = "equipment:control-box";
+  const { handler, calls } = fixture({ records: [{ key }] });
+  assert.equal((await handler(request({ key }))).status, 200);
+  assert.deepEqual(
+    calls.find((call) => call[0] === "qa_authorize_voice"),
+    ["qa_authorize_voice", { p_walkdown_id: walkdownId, p_record_key: key }],
+  );
+  assert.equal((await handler(request({ key: "equipment:other" }))).status, 400);
 });
 
 test("missing or invalid login, nonmembers and unknown records cannot start a paid request", async () => {

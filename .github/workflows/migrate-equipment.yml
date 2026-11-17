@@ -1,0 +1,70 @@
+name: Add equipment inspections
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migrate-equipment-inspections
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    environment: QA-Report
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Apply migration and verify catalog
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { readFile } from 'node:fs/promises';
+
+          const token = process.env.SUPABASE_ACCESS_TOKEN;
+          if (!token) throw new Error('Add SUPABASE_ACCESS_TOKEN to the QA-Report GitHub environment.');
+          const base = 'https://api.supabase.com/v1/projects/ybeinufetluekswsulvj/database/query';
+          async function query(path, sql) {
+            const response = await fetch(base + path, {
+              method: 'POST',
+              headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+              body: JSON.stringify({ query: sql }),
+            });
+            const result = await response.text();
+            if (!response.ok) throw new Error(`Supabase query failed (${response.status}): ${result}`);
+            return result;
+          }
+          await query('', await readFile('supabase/equipment-inspections.sql', 'utf8'));
+          const verification = await query('/read-only', `
+            select (
+              (select count(*) from public.qa_targets) = 39
+              and (select count(*) from public.qa_targets where kind = 'device') = 28
+              and (select count(*) from public.qa_targets where kind = 'terminal') = 8
+              and (select count(*) from public.qa_targets where kind = 'equipment'
+                and terminal is null and (key, label) in (
+                  ('equipment:control-box', 'Control Box'),
+                  ('equipment:solenoid-box', 'Solenoid Box'),
+                  ('equipment:transducer-panel', 'Transducer Panel'))) = 3
+              and not exists (
+                select 1 from public.qa_walkdowns w left join public.qa_records r on r.walkdown_id = w.id
+                group by w.id having count(r.key) <> 39)
+            ) as equipment_catalog_verified;
+          `);
+          const result = JSON.parse(verification);
+          const passed = Array.isArray(result)
+            ? result[0]?.equipment_catalog_verified
+            : result.data?.[0]?.equipment_catalog_verified ?? result.result?.[0]?.equipment_catalog_verified ?? result.equipment_catalog_verified;
+          if (passed !== true) throw new Error(`Equipment catalog verification failed: ${verification}`);
+          console.log('Equipment catalog and every walkdown verified at 39 records.');
+          NODE

@@ -10,6 +10,7 @@ const oldSchema = await readFile(
 );
 const schema = await sql("schema.sql");
 const migration = await sql("named-walkdowns.sql");
+const equipmentMigration = await sql("equipment-inspections.sql");
 const quota = await sql("voice-rate-limit.sql");
 const verification = await sql("VERIFY.sql");
 const first = "11111111-1111-4111-8111-111111111111";
@@ -268,10 +269,32 @@ test("named skid migration preserves legacy evidence, isolates reports, and clos
   const beforeRerun = await list();
   await db.exec("reset role");
   await db.exec(migration);
-  await db.exec(schema);
   await user();
   assert.deepEqual(await list(), beforeRerun);
-  assert.equal((await state(legacy)).photos[0].id, legacyPhoto);
+  assert.equal((await state(legacy)).records.length, 36);
+  const beforeEquipmentState = await state(legacy);
+  await db.exec("reset role");
+  await db.exec(equipmentMigration);
+  await user();
+  const afterEquipment = await list();
+  for (const prior of beforeRerun.walkdowns) {
+    const upgraded = afterEquipment.walkdowns.find((w) => w.id === prior.id);
+    assert.equal(upgraded.revision, prior.revision + 1);
+    assert.equal((await state(prior.id)).records.length, 39);
+  }
+  const upgradedLegacy = await state(legacy);
+  assert.deepEqual(
+    upgradedLegacy.records.filter((r) => !r.key.startsWith("equipment:")),
+    beforeEquipmentState.records,
+  );
+  assert.deepEqual(upgradedLegacy.photos, beforeEquipmentState.photos);
+  assert.deepEqual(upgradedLegacy.comments, beforeEquipmentState.comments);
+  await db.exec("reset role");
+  await db.exec(equipmentMigration);
+  await db.exec(schema);
+  await user();
+  assert.deepEqual(await list(), afterEquipment);
+  assert.deepEqual((await state(legacy)).photos, beforeEquipmentState.photos);
   await db.exec("reset role");
   await db.exec(verification);
   t.diagnostic(
@@ -279,7 +302,7 @@ test("named skid migration preserves legacy evidence, isolates reports, and clos
   );
 });
 
-test("fresh installation creates 36 empty records only after manual skid naming", async (t) => {
+test("fresh installation creates 39 empty records only after manual skid naming", async (t) => {
   const fresh = await PGlite.create();
   await fresh.exec(setup);
   await fresh.exec(schema);
@@ -304,11 +327,11 @@ test("fresh installation creates 36 empty records only after manual skid naming"
         newReport.id,
       ])
     ).rows[0].result.records.length,
-    36,
+    39,
   );
   await fresh.exec("reset role");
   await fresh.exec(verification);
   t.diagnostic(
-    "PASS: clean installation starts with no unnamed report and creates exactly 36 fresh records per manually named skid.",
+    "PASS: clean installation starts with no unnamed report and creates exactly 39 fresh records per manually named skid.",
   );
 });

@@ -43,13 +43,16 @@ export function terminalProgress(terminal, devices, state) {
   };
 }
 
-export function inspectionProgress(devices, groups, state) {
+export function inspectionProgress(devices, groups, state, equipment = []) {
   return {
     devices: devices.filter(
       (device) => recordStatus(`device:${device.id}`, state) === "complete",
     ).length,
     terminals: groups.filter(
       (group) => terminalProgress(group.id, devices, state).done,
+    ).length,
+    equipment: equipment.filter(
+      (item) => recordStatus(`equipment:${item.id}`, state) === "complete",
     ).length,
     photos: state.photos.length,
   };

@@ -1,19 +1,32 @@
--- Run after schema.sql or named-walkdowns.sql in Supabase SQL Editor.
+-- Run after schema.sql or equipment-inspections.sql in Supabase SQL Editor.
 -- Read-only: no users, reports, evidence, or revisions are created/changed.
 select
   (select count(*) from public.qa_targets where kind = 'device') as devices_expected_28,
   (select count(*) from public.qa_targets where kind = 'terminal') as terminals_expected_8,
+  (select count(*) from public.qa_targets where kind = 'equipment') as equipment_expected_3,
   (select count(*) from public.qa_walkdowns) as named_or_legacy_walkdowns,
   (select not public from storage.buckets where id = 'qa-evidence') as private_bucket_expected_true,
   (select active and is_admin from public.qa_inspectors where email = 'khuong@jeevyfabrication.com') as admin_enabled_expected_true;
 
--- Each existing walkdown has 36 records and revision >= 3. A fresh install has
+-- Each existing walkdown has 39 records and revision >= 3. A fresh install has
 -- no walkdowns until an inspector manually creates one. Legacy data is retained
--- in Unassigned skid until renamed; its revision must match the pre-upgrade value.
+-- in Unassigned skid until renamed; adding equipment advances its revision once.
 select w.id, w.skid_name, w.name_required, w.revision, w.updated_at,
-  count(r.key) as records_expected_36
+  count(r.key) as records_expected_39
 from public.qa_walkdowns w left join public.qa_records r on r.walkdown_id = w.id
  group by w.id order by w.created_at;
+-- Expected: exactly these three equipment rows with NULL terminal.
+select key, kind, terminal, label from public.qa_targets where kind = 'equipment' order by key;
+-- Expected: zero rows. This catches missing/extra equipment rows and records.
+select w.id as walkdown_with_incomplete_catalog
+from public.qa_walkdowns w left join public.qa_records r on r.walkdown_id = w.id
+group by w.id having count(r.key) <> 39;
+select key as unexpected_equipment_target from public.qa_targets
+where kind = 'equipment' and (key, label, terminal) is distinct from
+  (case key when 'equipment:control-box' then key when 'equipment:solenoid-box' then key
+    when 'equipment:transducer-panel' then key else null end,
+   case key when 'equipment:control-box' then 'Control Box' when 'equipment:solenoid-box' then 'Solenoid Box'
+    when 'equipment:transducer-panel' then 'Transducer Panel' else null end, null);
 select tgname as installed_revision_trigger from pg_trigger
 where not tgisinternal and tgname in ('qa_records_report_revision','qa_comments_report_revision',
   'qa_photos_insert_report_revision','qa_photos_update_report_revision','qa_photos_delete_report_revision')

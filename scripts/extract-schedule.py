@@ -26,6 +26,12 @@ GROUPS = [
     {"id": "H", "color": "#806E58", "hotspot": {"x": 1.7, "y": 32.5}},
 ]
 
+EQUIPMENT = [
+    {"id": "control-box", "name": "Control Box", "color": "#397CAC", "hotspot": {"x": 84, "y": 18}},
+    {"id": "solenoid-box", "name": "Solenoid Box", "color": "#218C90", "hotspot": {"x": 82, "y": 62}},
+    {"id": "transducer-panel", "name": "Transducer Panel", "color": "#8A63A9", "hotspot": {"x": 19, "y": 71}},
+]
+
 
 def extract(docx_path: Path, output_root: Path) -> dict:
     document = Document(docx_path)
@@ -57,6 +63,7 @@ def extract(docx_path: Path, output_root: Path) -> dict:
 
     data = {
         "project": {"title": "450k skid x7 - DCS", "revision": 3},
+        "equipment": EQUIPMENT,
         "groups": GROUPS,
         "devices": list(devices_by_id.values()),
     }

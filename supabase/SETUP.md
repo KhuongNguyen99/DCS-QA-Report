@@ -10,19 +10,21 @@ The static GitHub Pages app uses Supabase Auth, PostgreSQL, private Storage, and
 
 
 
-Use a dedicated Supabase project. In its SQL Editor, run the entire [`schema.sql`](./schema.sql), then [`VERIFY.sql`](./VERIFY.sql). The schema seeds 28 devices and terminals A–H from the revision-3 schedule. Running it again preserves existing inspection records, photos, and comments.
+Use a dedicated Supabase project. In its SQL Editor, run the entire [`schema.sql`](./schema.sql), then [`VERIFY.sql`](./VERIFY.sql). The schema seeds 28 devices, terminals A–H, and three equipment targets: Control Box, Solenoid Box, and Transducer Panel. Running it again preserves existing inspection records, photos, and comments.
 
 
 
-To upgrade the existing single-report deployment, run [`named-walkdowns.sql`](./named-walkdowns.sql), then `VERIFY.sql`. It atomically moves all existing inspection data into **Unassigned skid**, preserving IDs, photo paths, timestamps, status, and the current revision. An inspector must manually rename that skid before adding evidence, comments, quality, completion, or voice drafts. New skids require unique names of 1–120 characters and start with 36 empty inspection rows at report revision 3. Names are unique without regard to case; IDs remain stable after renaming.
+To upgrade an existing named-walkdown deployment, run [`equipment-inspections.sql`](./equipment-inspections.sql), then `VERIFY.sql`. The migration adds three empty equipment records to every existing skid and advances each affected report revision once. Rerunning it makes no further changes. It preserves all previous records, evidence, comments, quality, and completion. The [manual GitHub workflow](../.github/workflows/migrate-equipment.yml) can apply the same migration through the QA-Report environment and run a read-only catalog check; it does not run on push.
+
+To upgrade the older single-report deployment, run [`named-walkdowns.sql`](./named-walkdowns.sql), then `equipment-inspections.sql`, then `VERIFY.sql`. The first migration atomically moves all existing inspection data into **Unassigned skid**, preserving IDs, photo paths, timestamps, status, and its previous revision. An inspector must manually rename that skid before adding evidence, comments, quality, completion, or voice drafts. New skids require unique names of 1–120 characters and start with 39 empty inspection rows at report revision 3 after the equipment migration. Names are unique without regard to case; IDs remain stable after renaming.
 
 
 
-The migration revokes every old unscoped RPC overload. Deploy the updated frontend and voice function with this migration; stale browser tabs must refresh. After this upgrade, use the current main schema or named-walkdowns migration only. The older `report-revisions.sql`, `walkdown-comments.sql`, and `voice-rate-limit.sql` stop with an error if named skids already exist, preventing accidental reintroduction of unscoped access.
+The named-walkdowns migration revokes every old unscoped RPC overload. Deploy the updated frontend and voice function with these migrations; stale browser tabs must refresh. After this upgrade, use the current main schema or equipment-inspections migration for maintenance. The older `report-revisions.sql`, `walkdown-comments.sql`, and `voice-rate-limit.sql` stop with an error if named skids already exist, preventing accidental reintroduction of unscoped access.
 
 
 
-Check the verification output: 28 catalog devices, 8 terminals, 36 records **per walkdown**, revisions at least 3, five revision triggers, four realtime tables, private bucket, enabled admin, RLS enabled, and all browser write/anonymous access columns false. A fresh installation has no walkdowns until an inspector creates one. Current `qa_*` functions must have an empty `search_path`; old unscoped overloads must show no authenticated execute privilege. Review unexpected Storage policies: permissive policies are combined, so a broad older policy can bypass this project's restrictions.
+Check the verification output: 28 catalog devices, 8 terminals, 3 equipment targets with NULL terminals, 39 records **per walkdown**, revisions at least 3, five revision triggers, four realtime tables, private bucket, enabled admin, RLS enabled, and all browser write/anonymous access columns false. A fresh installation has no walkdowns until an inspector creates one. Current `qa_*` functions must have an empty `search_path`; old unscoped overloads must show no authenticated execute privilege. Review unexpected Storage policies: permissive policies are combined, so a broad older policy can bypass this project's restrictions.
 
 
 
