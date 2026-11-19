@@ -69,6 +69,28 @@ test("camera sessions still recognize the supplied image without label preproces
   } finally { session.dispose(); }
 });
 
+test("label recognition forwards each photo's rotation without retaining the prior rotation", async () => {
+  const preparations = [];
+  const session = createOcrSession(() => {}, {
+    labelMode: true,
+    workerFactory: async () => fakeWorker(),
+    prepareImage: async (image, options) => {
+      preparations.push({ image, options });
+      return { image: {}, dispose() {} };
+    },
+  });
+  try {
+    await session.recognize("first original", { quarterTurns: 1 });
+    await session.recognize("first original", { quarterTurns: -1 });
+    await session.recognize("second original");
+    assert.deepEqual(preparations, [
+      { image: "first original", options: { quarterTurns: 1 } },
+      { image: "first original", options: { quarterTurns: -1 } },
+      { image: "second original", options: { quarterTurns: 0 } },
+    ]);
+  } finally { session.dispose(); }
+});
+
 test("empty sparse recognition gets one bounded alternate-layout pass", async () => {
   const calls = [];
   const worker = fakeWorker(async (_image, options) => {

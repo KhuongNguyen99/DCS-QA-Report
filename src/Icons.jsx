@@ -45,6 +45,8 @@ const paths = {
   check: <path d="m5 12 4 4L19 6" />,
   arrow: <path d="m9 5 7 7-7 7" />,
   back: <path d="m15 5-7 7 7 7" />,
+  "rotate-left": <path d="M3 4v6h6M3.5 15a9 9 0 1 0 2.1-9.4L3 10" />,
+  "rotate-right": <path d="M21 4v6h-6M20.5 15a9 9 0 1 1-2.1-9.4L21 10" />,
   close: <path d="m6 6 12 12M6 18 18 6" />,
   download: (
     <>

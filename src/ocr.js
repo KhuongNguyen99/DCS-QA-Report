@@ -81,7 +81,7 @@ export function createOcrSession(onProgress = () => {}, {
     return entry;
   }
 
-  async function recognize(image) {
+  async function recognize(image, { quarterTurns = 0 } = {}) {
     if (disposed) throw cancelledError();
     if (activeRun) throw new Error("Another label is still being read.");
     const entry = getWorkerEntry();
@@ -99,7 +99,7 @@ export function createOcrSession(onProgress = () => {}, {
       const worker = await entry.promise;
       if (finished || disposed || current !== entry || entry.failed) throw cancelledError();
       if (labelMode) {
-        prepared = await prepareImage(image);
+        prepared = await prepareImage(image, { quarterTurns });
         if (finished || disposed || current !== entry || entry.failed) {
           releaseImage();
           throw cancelledError();

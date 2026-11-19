@@ -24,10 +24,10 @@ export function createOcrSession(onProgress = () => {}) {
     }
   };
   return {
-    async recognize(file) {
+    async recognize(file, { quarterTurns = 0 } = {}) {
       let job;
       const result = new Promise((resolve, reject) => {
-        job = { name: file.name, resolve, reject };
+        job = { name: file.name, quarterTurns, resolve, reject };
         pending.add(job);
         window.ocrCalls.push(job);
       });
@@ -121,6 +121,7 @@ async function setup(t) {
     IS_REACT_ACT_ENVIRONMENT: true,
     ocrCalls: [], ocrSessions: 0, ocrDisposed: 0, keepCancelledOcr: new Set(),
     saves: [], objectUrls: new Set(), decoded: 0, closedBitmaps: 0,
+    deferDecode: false, decodeJobs: [],
   });
   // React's browser act scheduler needs MessageChannel; jsdom omits it.
   window.MessageChannel = class {
@@ -142,11 +143,15 @@ async function setup(t) {
     return url;
   };
   window.URL.revokeObjectURL = (url) => window.objectUrls.delete(url);
-  window.createImageBitmap = async () => {
+  const bitmap = () => ({ width: 1200, height: 800, close: () => { window.closedBitmaps += 1; } });
+  window.createImageBitmap = async (file) => {
     window.decoded += 1;
-    return { width: 1200, height: 800, close: () => { window.closedBitmaps += 1; } };
+    if (!window.deferDecode) return bitmap();
+    return new Promise((resolve) => window.decodeJobs.push({ file, resolve: () => resolve(bitmap()) }));
   };
-  window.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {} });
+  window.HTMLCanvasElement.prototype.getContext = () => ({
+    drawImage() {}, save() {}, translate() {}, rotate() {}, restore() {},
+  });
   window.HTMLCanvasElement.prototype.toBlob = (callback, type) =>
     callback(new window.Blob(["normalized-jpeg"], { type }));
   window.HTMLElement.prototype.scrollIntoView = () => {};
@@ -161,8 +166,19 @@ async function setup(t) {
 
   const query = (selector) => document.querySelector(selector);
   const input = () => query('[role="combobox"]');
+  const keyAt = async (element, key, options = {}) => {
+    let event;
+    await window.act(async () => {
+      event = new window.KeyboardEvent("keydown", {
+        key, bubbles: true, cancelable: true, ...options,
+      });
+      element.dispatchEvent(event);
+    });
+    return event;
+  };
   return {
     window, document, query, input,
+    preview: () => query('[role="group"][aria-label="Photo preview and rotation"]'),
     text: () => document.body.textContent.replace(/\s+/g, " "),
     button: (name) => [...document.querySelectorAll("button")].find((button) =>
       button.textContent.trim() === name || button.getAttribute("aria-label") === name),
@@ -187,15 +203,10 @@ async function setup(t) {
         input().dispatchEvent(new window.Event("input", { bubbles: true }));
       });
     },
-    async key(key, options = {}) {
-      let event;
-      await window.act(async () => {
-        event = new window.KeyboardEvent("keydown", {
-          key, bubbles: true, cancelable: true, ...options,
-        });
-        input().dispatchEvent(event);
-      });
-      return event;
+    key: (key, options = {}) => keyAt(input(), key, options),
+    keyAt,
+    async finishDecode(index = window.decodeJobs.length - 1) {
+      await window.act(async () => window.decodeJobs[index].resolve());
     },
     async read(text, index = window.ocrCalls.length - 1) {
       await window.act(async () => window.ocrCalls[index].resolve(text));
@@ -362,4 +373,116 @@ test("OCR failure leaves manual assignment available", async (t) => {
   assert.equal(h.window.saves[0].key, "equipment:transducer-panel");
   await h.settleSave();
   assert.match(h.text(), /All photos reviewed/);
+});
+
+test("Q/E rotate the focused photo, preserve typing, and save the selected orientation", async (t) => {
+  const h = await setup(t);
+  await h.files(["first.png"]);
+  await h.fill("Terminal E");
+  assert.equal((await h.key("e")).defaultPrevented, false);
+  assert.equal((await h.key("q")).defaultPrevented, false);
+  assert.equal(h.window.ocrCalls.length, 1, "name-field letters do not rotate");
+  assert.equal((await h.key("Escape")).defaultPrevented, true);
+  assert.equal(h.document.activeElement, h.preview());
+  assert.ok(h.query("dialog"), "Escape from the name field does not close the queue");
+
+  await h.keyAt(h.preview(), "q");
+  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 3);
+  assert.equal(h.input().value, "Terminal E");
+  assert.equal(h.document.activeElement, h.preview());
+  await h.keyAt(h.preview(), "E");
+  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 0);
+  await h.keyAt(h.preview(), "Q");
+  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 3);
+
+  const reads = h.window.ocrCalls.length;
+  for (const options of [{ repeat: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }, { isComposing: true }])
+    await h.keyAt(h.preview(), "e", options);
+  assert.equal(h.window.ocrCalls.length, reads, "modified, repeated, and IME keys do not rotate");
+  assert.equal((await h.keyAt(h.preview(), "Tab")).defaultPrevented, true);
+  assert.equal(h.document.activeElement, h.input());
+  await h.key("Enter");
+  assert.equal(h.window.saves[0].key, "terminal:E");
+  assert.deepEqual([h.window.saves[0].width, h.window.saves[0].height], [800, 1200]);
+  await h.settleSave();
+});
+
+test("rotation retains a browsed target and rejects recognition from the previous orientation", async (t) => {
+  const h = await setup(t);
+  h.window.keepCancelledOcr.add("first.png");
+  await h.files(["first.png"]);
+  await h.key("ArrowDown");
+  await h.click(h.button("Rotate photo right (E)"));
+  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 1);
+  assert.match(h.query('[role="option"][aria-selected="true"]').textContent, /Control Box/);
+  await h.read("V-3511-Y", 1);
+  await h.read("V-3541", 0);
+  assert.match(h.query('[role="option"][aria-selected="true"]').textContent, /Control Box/);
+  assert.equal(h.input().value, "");
+  await h.key("Enter");
+  assert.equal(h.window.saves[0].key, "equipment:control-box");
+  assert.deepEqual([h.window.saves[0].width, h.window.saves[0].height], [800, 1200]);
+  await h.settleSave();
+});
+
+test("rotation invalidates old save data immediately and only the latest decode may become ready", async (t) => {
+  const h = await setup(t);
+  await h.files(["first.png"]);
+  await h.fill("V-3541");
+  h.window.deferDecode = true;
+  await h.window.act(async () => {
+    // The Enter handler still has the preceding render's photo in this batch.
+    h.preview().dispatchEvent(new h.window.KeyboardEvent("keydown", {
+      key: "e", bubbles: true, cancelable: true,
+    }));
+    h.input().dispatchEvent(new h.window.KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, cancelable: true,
+    }));
+  });
+  assert.equal(h.window.saves.length, 0, "the unrotated photo cannot slip into an upload");
+  assert.equal(h.button("Save & next").disabled, true);
+  await h.click(h.button("Rotate photo right (E)"));
+  assert.equal(h.window.decodeJobs.length, 2);
+  await h.finishDecode(1);
+  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 2);
+  const preview = h.query(".bulk-image-viewport img").src;
+  await h.finishDecode(0);
+  assert.equal(h.query(".bulk-image-viewport img").src, preview);
+  assert.equal(h.window.ocrCalls.length, 2, "the stale rotation never reaches OCR");
+  assert.equal(h.window.objectUrls.size, 1);
+  assert.equal(h.window.closedBitmaps, 3);
+  assert.equal(h.input().value, "V-3541");
+  await h.key("Enter");
+  assert.deepEqual([h.window.saves[0].width, h.window.saves[0].height], [1200, 800]);
+  await h.settleSave();
+});
+
+test("skipped photos keep their rotation, new photos start upright, and retries keep the rotated image", async (t) => {
+  const h = await setup(t);
+  await h.files(["first.png", "second.png"]);
+  await h.click(h.button("Rotate photo left (Q)"));
+  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 3);
+  await h.click(h.button("Skip photo"));
+  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 0);
+  await h.fill("V-3511");
+  await h.key("Enter");
+  assert.equal(h.window.saves[0].name, "second.jpg");
+  assert.deepEqual([h.window.saves[0].width, h.window.saves[0].height], [1200, 800]);
+  await h.settleSave();
+  await h.click(h.button("Review skipped photos"));
+  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 3);
+  await h.fill("V-3541");
+  await h.key("Enter");
+  assert.equal(h.button("Rotate photo left (Q)").disabled, true);
+  assert.equal(h.button("Rotate photo right (E)").disabled, true);
+  const reads = h.window.ocrCalls.length;
+  await h.keyAt(h.preview(), "e");
+  assert.equal(h.window.ocrCalls.length, reads);
+  await h.settleSave("Network interrupted");
+  assert.equal(h.input().value, "V-3541");
+  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 3);
+  await h.key("Enter");
+  assert.equal(h.window.saves[2].name, "first.jpg");
+  assert.deepEqual([h.window.saves[2].width, h.window.saves[2].height], [800, 1200]);
+  await h.settleSave();
 });

@@ -1,3 +1,5 @@
+import { drawRotatedImage, normalizeQuarterTurns, rotatedDimensions } from "./photo-orientation.js";
+
 const MAX_INPUT_BYTES = 20 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_EDGE = 1600;
@@ -98,19 +100,22 @@ function encodeJpeg(canvas, quality) {
   });
 }
 
-export async function normalizePhoto(fileOrBlob, name = "photo.jpg") {
+export async function normalizePhoto(fileOrBlob, name = "photo.jpg", { quarterTurns = 0 } = {}) {
   validatePhotoMetadata(fileOrBlob);
+  const turns = normalizeQuarterTurns(quarterTurns);
   const decoded = await decodeImage(fileOrBlob);
+  let canvas;
   try {
-    const { width, height } = fitPhotoDimensions(decoded.width, decoded.height);
-    const canvas = document.createElement("canvas");
+    const fitted = fitPhotoDimensions(decoded.width, decoded.height);
+    const { width, height } = rotatedDimensions(fitted.width, fitted.height, turns);
+    canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const context = canvas.getContext("2d");
     if (!context) {
       throw new Error("Photo processing is unavailable in this browser.");
     }
-    context.drawImage(decoded.image, 0, 0, width, height);
+    drawRotatedImage(context, decoded.image, fitted.width, fitted.height, turns);
 
     let blob;
     for (const quality of [0.86, 0.76, 0.64]) {
@@ -130,6 +135,7 @@ export async function normalizePhoto(fileOrBlob, name = "photo.jpg") {
     return { blob, width, height, name: `${baseName}.jpg` };
   } finally {
     decoded.cleanup();
+    if (canvas) { canvas.width = 0; canvas.height = 0; }
   }
 }
 

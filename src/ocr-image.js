@@ -1,4 +1,5 @@
 import { validatePhotoMetadata } from "./photos.js";
+import { drawRotatedImage, normalizeQuarterTurns, rotatedDimensions } from "./photo-orientation.js";
 
 // Keep small device tags legible without sending full camera-resolution images
 // through a long-lived WASM worker. The saved report photo is processed separately.
@@ -59,12 +60,14 @@ async function decodePhoto(blob) {
 }
 
 /** Prepare a lossless, upright OCR image. Always dispose it after recognition. */
-export async function prepareOcrImage(blob) {
+export async function prepareOcrImage(blob, { quarterTurns = 0 } = {}) {
   validatePhotoMetadata(blob);
+  const turns = normalizeQuarterTurns(quarterTurns);
   const decoded = await decodePhoto(blob);
   let canvas;
   try {
-    const dimensions = fitOcrDimensions(decoded.width, decoded.height);
+    const fitted = fitOcrDimensions(decoded.width, decoded.height);
+    const dimensions = rotatedDimensions(fitted.width, fitted.height, turns);
     canvas = document.createElement("canvas");
     canvas.width = dimensions.width;
     canvas.height = dimensions.height;
@@ -72,7 +75,7 @@ export async function prepareOcrImage(blob) {
     if (!context) throw new Error("Label recognition is unavailable in this browser.");
     context.fillStyle = "#fff";
     context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(decoded.image, 0, 0, canvas.width, canvas.height);
+    drawRotatedImage(context, decoded.image, fitted.width, fitted.height, turns);
     return {
       image: canvas,
       dispose: () => { canvas.width = 0; canvas.height = 0; },

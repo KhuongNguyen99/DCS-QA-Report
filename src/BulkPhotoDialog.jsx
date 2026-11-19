@@ -36,6 +36,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
   const dialogRef = useRef(null);
   const fileRef = useRef(null);
   const inputRef = useRef(null);
+  const imageRef = useRef(null);
   const nextId = useRef(0);
   const mounted = useRef(false);
   const savingRef = useRef(false);
@@ -47,6 +48,8 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
   const currentIndex = items.findIndex((item) => item.status === "pending");
   const current = currentIndex < 0 ? null : items[currentIndex];
   const currentId = current?.id ?? null;
+  const quarterTurns = current?.quarterTurns ?? 0;
+  const rotationVersion = current?.rotationVersion ?? 0;
   const currentIdRef = useRef(currentId);
   currentIdRef.current = currentId;
   const savedCount = items.filter((item) => item.status === "saved").length;
@@ -54,7 +57,8 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
   const pendingCount = items.length - savedCount - skippedCount;
   const query = draft.id === currentId ? draft.value : "";
   const active = draft.id === currentId ? draft.active : -1;
-  const currentReading = reading.id === currentId ? reading : EMPTY_READING;
+  const currentReading = reading.id === currentId && reading.rotationVersion === rotationVersion
+    ? reading : EMPTY_READING;
   const suggestion = getBulkSuggestion(currentReading.matches);
   const pinnedChoices = draft.id === currentId ? draft.choices : null;
   const choices = useMemo(
@@ -69,7 +73,8 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
     ? choices[active]
     : resolveBulkTarget(query, targets);
   const placeholderTarget = active >= 0 ? selected : suggestion;
-  const ready = prepared?.id === currentId ? prepared : null;
+  const ready = prepared?.id === currentId && prepared.rotationVersion === rotationVersion
+    && prepared.run === runRef.current ? prepared : null;
   const error = saveError?.id === currentId ? saveError.text : "";
   const preparationError = photoError?.id === currentId ? photoError.text : "";
 
@@ -82,7 +87,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
     sessionRef.current = createOcrSession((message) => {
       const run = readingRun.current;
       if (!mounted.current || !run || runRef.current !== run.number) return;
-      setReading((previous) => previous.id === run.id && previous.status === "reading"
+      setReading((previous) => previous.id === run.id && previous.rotationVersion === run.rotationVersion && previous.status === "reading"
         ? { ...previous, message: message.status === "recognizing text"
           ? `Reading label… ${Math.round((message.progress || 0) * 100)}%`
           : "Preparing label reader…" }
@@ -109,6 +114,14 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
   }, [pendingCount, saving]);
 
   useEffect(() => {
+    // Rotating an image preserves a name already typed or chosen for it.
+    setDraft({ id: currentId, value: "", active: -1 });
+    setZoomed(false);
+    composing.current = false;
+    if (currentId !== null) inputRef.current?.focus();
+  }, [currentId]);
+
+  useEffect(() => {
     const run = ++runRef.current;
     const session = sessionRef.current;
     let cancelled = false;
@@ -117,38 +130,34 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
     setPrepared(null);
     setPhotoError(null);
     setSaveError(null);
-    setDraft({ id: currentId, value: "", active: -1 });
-    setZoomed(false);
-    setReading({ ...EMPTY_READING, id: currentId });
-    composing.current = false;
+    setReading({ ...EMPTY_READING, id: currentId, rotationVersion });
     if (!current) return undefined;
-    inputRef.current?.focus();
 
     async function prepare() {
       let photo;
       try {
         // Decode only the current image. The rest remain lightweight File references.
-        photo = await normalizePhoto(current.file, current.name);
+        photo = await normalizePhoto(current.file, current.name, { quarterTurns });
         if (!isCurrent()) return;
         previewUrl = URL.createObjectURL(photo.blob);
-        setPrepared({ id: currentId, photo, url: previewUrl });
+        setPrepared({ id: currentId, rotationVersion, run, photo, url: previewUrl });
       } catch (cause) {
         if (isCurrent()) setPhotoError({ id: currentId, text: cause.message || "This photo could not be opened. Skip it or try again." });
         return;
       }
       if (!isCurrent()) return;
-      readingRun.current = { id: currentId, number: run };
-      setReading({ id: currentId, status: "reading", matches: [], message: "Reading label…" });
+      readingRun.current = { id: currentId, rotationVersion, number: run };
+      setReading({ id: currentId, rotationVersion, status: "reading", matches: [], message: "Reading label…" });
       try {
         // Read the original, before the evidence upload's JPEG downscaling.
-        const text = await session.recognize(current.file);
+        const text = await session.recognize(current.file, { quarterTurns });
         if (isCurrent()) {
-          setReading({ id: currentId, status: "done", matches: suggestBulkTargets(text, targets), message: "" });
+          setReading({ id: currentId, rotationVersion, status: "done", matches: suggestBulkTargets(text, targets), message: "" });
           // OCR never changes a name the inspector has typed or selected.
         }
       } catch (cause) {
         if (isCurrent() && cause?.name !== "AbortError") {
-          setReading({ id: currentId, status: "error", matches: [], message: "Label reading unavailable. Choose the name manually." });
+          setReading({ id: currentId, rotationVersion, status: "error", matches: [], message: "Label reading unavailable. Choose the name manually." });
         }
       } finally {
         if (readingRun.current?.number === run) readingRun.current = null;
@@ -163,8 +172,8 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
       }
       if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
-    // A queue item is immutable until it is saved/skipped. Target catalog is fixed.
-  }, [currentId, retry, targets]);
+    // Version also changes for rapid full turns back to the original orientation.
+  }, [currentId, quarterTurns, rotationVersion, retry, targets]);
 
   useEffect(() => {
     if (active >= 0) {
@@ -183,7 +192,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
     for (const file of Array.from(files || [])) {
       try {
         validatePhotoMetadata(file);
-        accepted.push({ id: ++nextId.current, file, name: file.name || "Photo", status: "pending" });
+        accepted.push({ id: ++nextId.current, file, name: file.name || "Photo", status: "pending", quarterTurns: 0, rotationVersion: 0 });
       } catch (cause) {
         failures.push({ name: file.name || "Photo", reason: cause.message });
       }
@@ -208,7 +217,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
       inputRef.current?.focus();
       return;
     }
-    if (!ready) return;
+    if (!ready || ready.run !== runRef.current) return;
     const id = currentId;
     const target = selected;
     savingRef.current = true;
@@ -243,6 +252,38 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
       : item));
   }
 
+  function rotatePhoto(direction) {
+    if (!current || savingRef.current) return;
+    // Invalidate the previous pixels synchronously, before a rapid Enter can save.
+    ++runRef.current;
+    if (readingRun.current) {
+      readingRun.current = null;
+      sessionRef.current?.cancel();
+    }
+    setItems((previous) => previous.map((item) => item.id === currentId
+      ? { ...item, quarterTurns: ((item.quarterTurns || 0) + direction + 4) % 4,
+          rotationVersion: (item.rotationVersion || 0) + 1 }
+      : item));
+    imageRef.current?.focus();
+  }
+
+  function handlePhotoKeys(event) {
+    if (event.defaultPrevented || event.isComposing || event.nativeEvent?.isComposing
+      || composing.current || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.target === imageRef.current && event.key === "Tab" && !event.shiftKey) {
+      event.preventDefault();
+      inputRef.current?.focus();
+      return;
+    }
+    // Single-letter shortcuts must not interfere with typing a device/terminal.
+    if (event.target?.closest?.("input, textarea, select, [contenteditable]")) return;
+    const key = event.key.toLowerCase();
+    if (current && (key === "q" || key === "e")) {
+      event.preventDefault();
+      if (!event.repeat) rotatePhoto(key === "q" ? -1 : 1);
+    }
+  }
+
   function close() {
     if (savingRef.current) return;
     if (pendingCount && !window.confirm(
@@ -254,7 +295,11 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
 
   function handleKeys(event) {
     if (event.isComposing || event.nativeEvent?.isComposing || composing.current || event.keyCode === 229) return;
-    if (event.key === "Tab" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && !query && placeholderTarget) {
+    if (event.key === "Escape" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      imageRef.current?.focus();
+    } else if (event.key === "Tab" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && !query && placeholderTarget) {
       event.preventDefault();
       choose(placeholderTarget);
     } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -282,7 +327,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
       : "You can choose a name while the photo loads.";
 
   return createPortal(
-    <dialog ref={dialogRef} className="modal bulk-photo-dialog" aria-labelledby="bulk-photo-title"
+    <dialog ref={dialogRef} className="modal bulk-photo-dialog" aria-labelledby="bulk-photo-title" onKeyDown={handlePhotoKeys}
       onCancel={(event) => { event.preventDefault(); close(); }}>
       <header className="modal-header">
         <div>
@@ -325,8 +370,10 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
           </div>
           <div className="bulk-review">
             <section className="bulk-image-panel" aria-label="Photo preview">
-              <div className={`bulk-image-viewport ${zoomed ? "is-zoomed" : ""}`}>
-                {ready ? <img src={ready.url} alt={`Review ${current.name}`} /> : <div className="bulk-image-loading">
+              <div ref={imageRef} className={`bulk-image-viewport ${zoomed ? "is-zoomed" : ""}`}
+                role="group" aria-label="Photo preview and rotation" aria-describedby="bulk-rotation-hint"
+                aria-keyshortcuts="Q E" tabIndex={0} onClick={() => imageRef.current?.focus()}>
+                {ready ? <img src={ready.url} alt={`Review ${current.name}, rotated ${quarterTurns * 90} degrees`} /> : <div className="bulk-image-loading">
                   <Icon name={preparationError ? "info" : "camera"} size={32} />
                   <p>{preparationError || "Preparing photo…"}</p>
                   {preparationError && <button type="button" className="button secondary" onClick={() => setRetry((value) => value + 1)}>Retry photo</button>}
@@ -337,6 +384,17 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
                 <button type="button" className="small-button" disabled={!ready} aria-pressed={zoomed} onClick={() => setZoomed((value) => !value)}>
                   <Icon name="search" size={14} />{zoomed ? "Fit photo" : "Zoom photo"}
                 </button>
+              </div>
+              <div className="bulk-rotation-controls">
+                <button type="button" className="small-button" aria-label="Rotate photo left (Q)" aria-keyshortcuts="Q"
+                  disabled={saving} onClick={() => rotatePhoto(-1)}>
+                  <Icon name="rotate-left" size={16} />Left <kbd>Q</kbd>
+                </button>
+                <button type="button" className="small-button" aria-label="Rotate photo right (E)" aria-keyshortcuts="E"
+                  disabled={saving} onClick={() => rotatePhoto(1)}>
+                  <Icon name="rotate-right" size={16} />Right <kbd>E</kbd>
+                </button>
+                <small id="bulk-rotation-hint">Click the photo to use Q / E. Tab returns to the name.</small>
               </div>
             </section>
             <section className="bulk-assignment" aria-label="Assign photo">
@@ -351,7 +409,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
                 onCompositionStart={() => { composing.current = true; }}
                 onCompositionEnd={() => { composing.current = false; }}
                 onKeyDown={handleKeys} />
-              <p id="bulk-keyboard-hint" className="bulk-keyboard-hint"><kbd>Tab</kbd> accept suggestion <span>·</span> <kbd>Enter</kbd> save & next</p>
+              <p id="bulk-keyboard-hint" className="bulk-keyboard-hint"><kbd>Tab</kbd> accept suggestion <span>·</span> <kbd>Enter</kbd> save & next <span>·</span> <kbd>Esc</kbd> focus photo</p>
               <p id="bulk-ocr-status" className="bulk-ocr-status" role="status">{ocrMessage}</p>
               <div className="bulk-target-options" id="bulk-target-options" role="listbox" aria-label="Matching devices and terminals">
                 {choices.map((target, index) => <button key={target.key} id={`bulk-target-${index}`} type="button" role="option" tabIndex={-1}
