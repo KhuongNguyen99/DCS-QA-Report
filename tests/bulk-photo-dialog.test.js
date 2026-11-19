@@ -375,30 +375,71 @@ test("OCR failure leaves manual assignment available", async (t) => {
   assert.match(h.text(), /All photos reviewed/);
 });
 
-test("Q/E rotate the focused photo, preserve typing, and save the selected orientation", async (t) => {
+test("Ctrl+< / Ctrl+> rotate without interrupting typing and save the selected orientation", async (t) => {
   const h = await setup(t);
   await h.files(["first.png"]);
   await h.fill("Terminal E");
-  assert.equal((await h.key("e")).defaultPrevented, false);
-  assert.equal((await h.key("q")).defaultPrevented, false);
-  assert.equal(h.window.ocrCalls.length, 1, "name-field letters do not rotate");
+  h.input().setSelectionRange(2, 7, "backward");
+  assert.equal(h.document.activeElement, h.input());
+  for (const [key, options] of [
+    ["e", {}], ["q", {}], ["Q", { ctrlKey: true }], ["E", { ctrlKey: true }],
+    ["<", {}], [">", {}],
+    [",", { ctrlKey: true, code: "Comma" }],
+    [".", { ctrlKey: true, code: "Period" }],
+    [">", { ctrlKey: true, metaKey: true }],
+    [">", { ctrlKey: true, altKey: true }],
+    [">", { ctrlKey: true, modifierAltGraph: true }],
+    [">", { ctrlKey: true, isComposing: true }],
+  ]) {
+    assert.equal((await h.key(key, options)).defaultPrevented, false, `${key}: ${JSON.stringify(options)}`);
+  }
+  await h.key(">", { ctrlKey: true, repeat: true });
+  assert.equal(h.window.ocrCalls.length, 1, "typing, other shortcuts, repeats, and IME do not rotate");
+
+  for (const [key, options, quarterTurns] of [
+    ["<", { ctrlKey: true }, 3],
+    [">", { ctrlKey: true }, 0],
+    [",", { ctrlKey: true, shiftKey: true, code: "Comma" }, 3],
+    [".", { ctrlKey: true, shiftKey: true, code: "Period" }, 0],
+  ]) {
+    assert.equal((await h.key(key, options)).defaultPrevented, true);
+    assert.equal(h.window.ocrCalls.at(-1).quarterTurns, quarterTurns);
+    assert.equal(h.input().value, "Terminal E");
+    assert.equal(h.document.activeElement, h.input(), "rotation keeps the name field focused");
+    assert.deepEqual(
+      [h.input().selectionStart, h.input().selectionEnd, h.input().selectionDirection],
+      [2, 7, "backward"],
+      "rotation preserves the caret and selection",
+    );
+  }
+
   assert.equal((await h.key("Escape")).defaultPrevented, true);
   assert.equal(h.document.activeElement, h.preview());
   assert.ok(h.query("dialog"), "Escape from the name field does not close the queue");
 
-  await h.keyAt(h.preview(), "q");
+  const reads = h.window.ocrCalls.length;
+  for (const key of ["q", "Q", "e", "E"]) {
+    assert.equal((await h.keyAt(h.preview(), key)).defaultPrevented, false);
+    assert.equal((await h.keyAt(h.preview(), key, { ctrlKey: true })).defaultPrevented, false);
+  }
+  assert.equal(h.window.ocrCalls.length, reads, "Q/E no longer rotate even when the photo is focused");
+  await h.keyAt(h.preview(), "<", { ctrlKey: true, shiftKey: true });
   assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 3);
   assert.equal(h.input().value, "Terminal E");
   assert.equal(h.document.activeElement, h.preview());
-  await h.keyAt(h.preview(), "E");
-  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 0);
-  await h.keyAt(h.preview(), "Q");
-  assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 3);
 
-  const reads = h.window.ocrCalls.length;
-  for (const options of [{ repeat: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }, { isComposing: true }])
-    await h.keyAt(h.preview(), "e", options);
-  assert.equal(h.window.ocrCalls.length, reads, "modified, repeated, and IME keys do not rotate");
+  for (const [label, key, quarterTurns] of [
+    ["Rotate photo right (Ctrl+>)", ">", 0],
+    ["Rotate photo left (Ctrl+<)", "<", 3],
+  ]) {
+    const button = h.button(label);
+    assert.equal(button.getAttribute("aria-keyshortcuts"), `Control+${key}`);
+    button.focus();
+    assert.equal((await h.keyAt(button, key, { ctrlKey: true, shiftKey: true })).defaultPrevented, true);
+    assert.equal(h.window.ocrCalls.at(-1).quarterTurns, quarterTurns);
+    assert.equal(h.document.activeElement, button, "keyboard rotation keeps the current button focused");
+  }
+  h.preview().focus();
   assert.equal((await h.keyAt(h.preview(), "Tab")).defaultPrevented, true);
   assert.equal(h.document.activeElement, h.input());
   await h.key("Enter");
@@ -412,7 +453,7 @@ test("rotation retains a browsed target and rejects recognition from the previou
   h.window.keepCancelledOcr.add("first.png");
   await h.files(["first.png"]);
   await h.key("ArrowDown");
-  await h.click(h.button("Rotate photo right (E)"));
+  await h.click(h.button("Rotate photo right (Ctrl+>)"));
   assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 1);
   assert.match(h.query('[role="option"][aria-selected="true"]').textContent, /Control Box/);
   await h.read("V-3511-Y", 1);
@@ -432,8 +473,8 @@ test("rotation invalidates old save data immediately and only the latest decode 
   h.window.deferDecode = true;
   await h.window.act(async () => {
     // The Enter handler still has the preceding render's photo in this batch.
-    h.preview().dispatchEvent(new h.window.KeyboardEvent("keydown", {
-      key: "e", bubbles: true, cancelable: true,
+    h.input().dispatchEvent(new h.window.KeyboardEvent("keydown", {
+      key: ">", ctrlKey: true, bubbles: true, cancelable: true,
     }));
     h.input().dispatchEvent(new h.window.KeyboardEvent("keydown", {
       key: "Enter", bubbles: true, cancelable: true,
@@ -441,7 +482,7 @@ test("rotation invalidates old save data immediately and only the latest decode 
   });
   assert.equal(h.window.saves.length, 0, "the unrotated photo cannot slip into an upload");
   assert.equal(h.button("Save & next").disabled, true);
-  await h.click(h.button("Rotate photo right (E)"));
+  await h.click(h.button("Rotate photo right (Ctrl+>)"));
   assert.equal(h.window.decodeJobs.length, 2);
   await h.finishDecode(1);
   assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 2);
@@ -460,7 +501,7 @@ test("rotation invalidates old save data immediately and only the latest decode 
 test("skipped photos keep their rotation, new photos start upright, and retries keep the rotated image", async (t) => {
   const h = await setup(t);
   await h.files(["first.png", "second.png"]);
-  await h.click(h.button("Rotate photo left (Q)"));
+  await h.click(h.button("Rotate photo left (Ctrl+<)"));
   assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 3);
   await h.click(h.button("Skip photo"));
   assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 0);
@@ -473,10 +514,10 @@ test("skipped photos keep their rotation, new photos start upright, and retries 
   assert.equal(h.window.ocrCalls.at(-1).quarterTurns, 3);
   await h.fill("V-3541");
   await h.key("Enter");
-  assert.equal(h.button("Rotate photo left (Q)").disabled, true);
-  assert.equal(h.button("Rotate photo right (E)").disabled, true);
+  assert.equal(h.button("Rotate photo left (Ctrl+<)").disabled, true);
+  assert.equal(h.button("Rotate photo right (Ctrl+>)").disabled, true);
   const reads = h.window.ocrCalls.length;
-  await h.keyAt(h.preview(), "e");
+  await h.keyAt(h.preview(), ">", { ctrlKey: true });
   assert.equal(h.window.ocrCalls.length, reads);
   await h.settleSave("Network interrupted");
   assert.equal(h.input().value, "V-3541");

@@ -252,7 +252,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
       : item));
   }
 
-  function rotatePhoto(direction) {
+  function rotatePhoto(direction, { focusPhoto = true } = {}) {
     if (!current || savingRef.current) return;
     // Invalidate the previous pixels synchronously, before a rapid Enter can save.
     ++runRef.current;
@@ -264,23 +264,32 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
       ? { ...item, quarterTurns: ((item.quarterTurns || 0) + direction + 4) % 4,
           rotationVersion: (item.rotationVersion || 0) + 1 }
       : item));
-    imageRef.current?.focus();
+    if (focusPhoto) imageRef.current?.focus();
   }
 
   function handlePhotoKeys(event) {
     if (event.defaultPrevented || event.isComposing || event.nativeEvent?.isComposing
-      || composing.current || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
-    if (event.target === imageRef.current && event.key === "Tab" && !event.shiftKey) {
+      || composing.current || event.keyCode === 229 || event.metaKey || event.altKey
+      || event.getModifierState?.("AltGraph")) return;
+    if (event.target === imageRef.current && event.key === "Tab" && !event.shiftKey && !event.ctrlKey) {
       event.preventDefault();
       inputRef.current?.focus();
       return;
     }
-    // Single-letter shortcuts must not interfere with typing a device/terminal.
-    if (event.target?.closest?.("input, textarea, select, [contenteditable]")) return;
-    const key = event.key.toLowerCase();
-    if (current && (key === "q" || key === "e")) {
+    if (!current || !event.ctrlKey) return;
+    // US keyboards produce < and > with Shift+Comma/Period. Some browsers
+    // report the unshifted key (or only its code) while Control is held.
+    let direction = 0;
+    if (event.key === "<") direction = -1;
+    else if (event.key === ">") direction = 1;
+    else if (event.shiftKey) {
+      if (event.key === "," || event.code === "Comma") direction = -1;
+      else if (event.key === "." || event.code === "Period") direction = 1;
+    }
+    if (direction) {
       event.preventDefault();
-      if (!event.repeat) rotatePhoto(key === "q" ? -1 : 1);
+      // Keep the inspector's cursor in the name field when rotating by keyboard.
+      if (!event.repeat) rotatePhoto(direction, { focusPhoto: false });
     }
   }
 
@@ -372,7 +381,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
             <section className="bulk-image-panel" aria-label="Photo preview">
               <div ref={imageRef} className={`bulk-image-viewport ${zoomed ? "is-zoomed" : ""}`}
                 role="group" aria-label="Photo preview and rotation" aria-describedby="bulk-rotation-hint"
-                aria-keyshortcuts="Q E" tabIndex={0} onClick={() => imageRef.current?.focus()}>
+                aria-keyshortcuts="Control+< Control+>" tabIndex={0} onClick={() => imageRef.current?.focus()}>
                 {ready ? <img src={ready.url} alt={`Review ${current.name}, rotated ${quarterTurns * 90} degrees`} /> : <div className="bulk-image-loading">
                   <Icon name={preparationError ? "info" : "camera"} size={32} />
                   <p>{preparationError || "Preparing photo…"}</p>
@@ -386,15 +395,15 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
                 </button>
               </div>
               <div className="bulk-rotation-controls">
-                <button type="button" className="small-button" aria-label="Rotate photo left (Q)" aria-keyshortcuts="Q"
+                <button type="button" className="small-button" aria-label="Rotate photo left (Ctrl+<)" aria-keyshortcuts="Control+<"
                   disabled={saving} onClick={() => rotatePhoto(-1)}>
-                  <Icon name="rotate-left" size={16} />Left <kbd>Q</kbd>
+                  <Icon name="rotate-left" size={16} />Left <kbd>{"Ctrl + <"}</kbd>
                 </button>
-                <button type="button" className="small-button" aria-label="Rotate photo right (E)" aria-keyshortcuts="E"
+                <button type="button" className="small-button" aria-label="Rotate photo right (Ctrl+>)" aria-keyshortcuts="Control+>"
                   disabled={saving} onClick={() => rotatePhoto(1)}>
-                  <Icon name="rotate-right" size={16} />Right <kbd>E</kbd>
+                  <Icon name="rotate-right" size={16} />Right <kbd>{"Ctrl + >"}</kbd>
                 </button>
-                <small id="bulk-rotation-hint">Click the photo to use Q / E. Tab returns to the name.</small>
+                <small id="bulk-rotation-hint">{"Ctrl + < / > rotates while typing a name. On a US keyboard, use Ctrl + Shift + , / ."}</small>
               </div>
             </section>
             <section className="bulk-assignment" aria-label="Assign photo">
@@ -402,6 +411,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
               <input ref={inputRef} id="bulk-target-name" type="text" role="combobox"
                 autoComplete="off" autoCapitalize="characters" spellCheck={false} maxLength={120}
                 aria-autocomplete="list" aria-expanded={choices.length > 0} aria-controls="bulk-target-options"
+                aria-keyshortcuts="Control+< Control+>"
                 aria-activedescendant={active >= 0 && choices[active] ? `bulk-target-${active}` : undefined}
                 aria-describedby="bulk-keyboard-hint bulk-ocr-status" aria-invalid={Boolean(error)}
                 value={query} placeholder={placeholderTarget?.name || "e.g. V-3541 or Terminal B"} disabled={saving}
@@ -409,7 +419,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
                 onCompositionStart={() => { composing.current = true; }}
                 onCompositionEnd={() => { composing.current = false; }}
                 onKeyDown={handleKeys} />
-              <p id="bulk-keyboard-hint" className="bulk-keyboard-hint"><kbd>Tab</kbd> accept suggestion <span>·</span> <kbd>Enter</kbd> save & next <span>·</span> <kbd>Esc</kbd> focus photo</p>
+              <p id="bulk-keyboard-hint" className="bulk-keyboard-hint"><kbd>Tab</kbd> accept suggestion <span>·</span> <kbd>Enter</kbd> save & next</p>
               <p id="bulk-ocr-status" className="bulk-ocr-status" role="status">{ocrMessage}</p>
               <div className="bulk-target-options" id="bulk-target-options" role="listbox" aria-label="Matching devices and terminals">
                 {choices.map((target, index) => <button key={target.key} id={`bulk-target-${index}`} type="button" role="option" tabIndex={-1}
