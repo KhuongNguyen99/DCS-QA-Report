@@ -56,7 +56,7 @@ test("equipment catalog and per-skid records are exact and independent", async (
   const b = await create("Equipment B");
   for (const report of [a, b]) {
     const snapshot = await state(report.id);
-    assert.equal(snapshot.project.revision, 3);
+    assert.equal(snapshot.project.revision, 1);
     assert.equal(snapshot.records.length, 39);
     for (const { key } of equipment) {
       const record = snapshot.records.find((row) => row.key === key);
@@ -68,42 +68,42 @@ test("equipment catalog and per-skid records are exact and independent", async (
   const control = "equipment:control-box";
   const solenoid = "equipment:solenoid-box";
   await assert.rejects(
-    db.query("select public.qa_set_complete($1,$2,true)", [a.id, control]),
+    db.query("select public.qa_set_complete($1,$2,true,1)", [a.id, control]),
     /at least one inspection photo/,
   );
-  await db.query("select public.qa_add_comment($1,$2,'Control box note')", [a.id, control]);
-  await db.query("select public.qa_set_quality($1,$2,'good')", [a.id, control]);
-  assert.equal((await state(a.id)).project.revision, 5);
+  await db.query("select public.qa_add_comment($1,$2,'Control box note',1)", [a.id, control]);
+  await db.query("select public.qa_set_quality($1,$2,'good',1)", [a.id, control]);
+  assert.equal((await state(a.id)).project.revision, 1);
   const addPhoto = async (key) => {
     const id = crypto.randomUUID();
     const path = `${inspector}/${id}.jpg`;
-    await db.query("select public.qa_prepare_photo($1,$2,$3,$4,'Evidence',100,100)", [a.id, id, key, path]);
+    await db.query("select public.qa_prepare_photo($1,$2,$3,$4,'Evidence',100,100,1)", [a.id, id, key, path]);
     await db.query("insert into storage.objects(bucket_id,name) values('qa-evidence',$1)", [path]);
-    await db.query("select public.qa_add_photo($1,$2)", [a.id, id]);
+    await db.query("select public.qa_add_photo($1,$2,1)", [a.id, id]);
     return id;
   };
   const controlPhoto = await addPhoto(control);
-  assert.equal((await state(a.id)).project.revision, 6);
-  await db.query("select public.qa_set_complete($1,$2,true)", [a.id, control]);
-  assert.equal((await state(a.id)).project.revision, 7);
+  assert.equal((await state(a.id)).project.revision, 1);
+  await db.query("select public.qa_set_complete($1,$2,true,1)", [a.id, control]);
+  assert.equal((await state(a.id)).project.revision, 1);
   assert.equal((await db.query("select public.qa_authorize_voice($1,$2) as ok", [a.id, control])).rows[0].ok, true);
-  assert.equal((await state(a.id)).project.revision, 7);
+  assert.equal((await state(a.id)).project.revision, 1);
   await assert.rejects(
     db.query("select public.qa_authorize_voice($1,'equipment:unknown')", [a.id]),
     /Unknown comment scope/,
   );
 
   await addPhoto(solenoid);
-  await db.query("select public.qa_set_complete($1,$2,true)", [a.id, solenoid]);
+  await db.query("select public.qa_set_complete($1,$2,true,1)", [a.id, solenoid]);
   const beforeDelete = await state(a.id);
   const terminalBefore = beforeDelete.records.find((row) => row.key === "terminal:A");
-  await db.query("select public.qa_delete_photo($1,$2)", [a.id, controlPhoto]);
+  await db.query("select public.qa_delete_photo($1,$2,1)", [a.id, controlPhoto]);
   const afterDelete = await state(a.id);
-  assert.equal(afterDelete.project.revision, beforeDelete.project.revision + 1);
+  assert.equal(afterDelete.project.revision, beforeDelete.project.revision);
   assert.equal(afterDelete.records.find((row) => row.key === control).complete, false);
   assert.equal(afterDelete.records.find((row) => row.key === solenoid).complete, true);
   assert.deepEqual(afterDelete.records.find((row) => row.key === "terminal:A"), terminalBefore);
-  assert.equal((await state(b.id)).project.revision, 3);
+  assert.equal((await state(b.id)).project.revision, 1);
   assert.equal((await state(b.id)).photos.length, 0);
   assert.equal((await state(b.id)).comments.length, 0);
 
@@ -112,6 +112,7 @@ test("equipment catalog and per-skid records are exact and independent", async (
     ["qa_set_quality", [a.id, "walkdown:general", "good"]],
     ["qa_prepare_photo", [a.id, crypto.randomUUID(), "walkdown:general", `${inspector}/${crypto.randomUUID()}.jpg`, "Note", 100, 100]],
   ]) {
+    args.push(1);
     const placeholders = args.map((_, i) => `$${i + 1}`).join(",");
     await assert.rejects(db.query(`select public.${rpc}(${placeholders})`, args), /Unknown inspection target/);
   }

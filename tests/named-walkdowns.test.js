@@ -293,7 +293,13 @@ test("named skid migration preserves legacy evidence, isolates reports, and clos
   await db.exec(equipmentMigration);
   await db.exec(schema);
   await user();
-  assert.deepEqual(await list(), afterEquipment);
+  const upgradedList = await list();
+  for (const prior of afterEquipment.walkdowns) {
+    const current = upgradedList.walkdowns.find((w) => w.id === prior.id);
+    for (const key of Object.keys(prior)) assert.deepEqual(current[key], prior[key]);
+    assert.equal(current.status, "draft");
+    assert.equal(current.contentVersion, 1);
+  }
   assert.deepEqual((await state(legacy)).photos, beforeEquipmentState.photos);
   await db.exec("reset role");
   await db.exec(verification);

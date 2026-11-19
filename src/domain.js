@@ -23,7 +23,7 @@ export function findManualDevices(text, devices) {
   );
 }
 
-/** Stable keys shared by device and terminal QA records. */
+/** Stable keys shared by device and terminal QC records. */
 export function recordKey(kind, id) {
   if (kind === "device") return `device:${id}`;
   if (kind === "terminal") return `terminal:${String(id).trim().toUpperCase()}`;

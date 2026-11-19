@@ -1,6 +1,12 @@
 -- Separate named skid reports. Preserves all existing evidence/comments/status
 -- under a stable legacy walkdown. Run once after the previous schema; rerunnable.
 begin;
+do $$ begin
+  if exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'qa_walkdowns' and column_name = 'status') then
+    raise exception 'QC closeout revisions are installed. Use the current schema.sql instead of this older migration.';
+  end if;
+end; $$;
+
 
 create table if not exists public.qa_walkdowns (
   id uuid primary key default gen_random_uuid(),

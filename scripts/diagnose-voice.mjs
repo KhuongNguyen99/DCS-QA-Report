@@ -1,4 +1,4 @@
-// Manual service check with synthetic audio only. Never prints credentials or QA audio.
+// Manual service check with synthetic audio only. Never prints credentials or QC audio.
 import { createVoiceSdkClient } from "../supabase/functions/transcribe-comment/sdk-client.js";
 import { readFile } from "node:fs/promises";
 

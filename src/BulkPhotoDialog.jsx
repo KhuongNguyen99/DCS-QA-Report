@@ -20,7 +20,7 @@ const targetDetail = (target) =>
       : "Equipment evidence";
 
 /** Review a local queue; only a confirmed name sends a photo to the report. */
-export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose }) {
+export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose, readOnly = false }) {
   const [items, setItems] = useState([]);
   const [rejected, setRejected] = useState([]);
   const [prepared, setPrepared] = useState(null);
@@ -40,6 +40,8 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
   const nextId = useRef(0);
   const mounted = useRef(false);
   const savingRef = useRef(false);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
   const composing = useRef(false);
   const sessionRef = useRef(null);
   const runRef = useRef(0);
@@ -209,7 +211,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
   }
 
   async function saveAndNext() {
-    if (!current || savingRef.current || composing.current) return;
+    if (!current || readOnlyRef.current || savingRef.current || composing.current) return;
     if (!selected) {
       setSaveError({ id: currentId, text: suggestion && !query
         ? "Press Tab to accept the suggested name, or choose another name."
@@ -351,6 +353,9 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
         onDragOver={(event) => { event.preventDefault(); if (!saving) setDragging(true); }}
         onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDragging(false); }}
         onDrop={(event) => { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }}>
+        {readOnly && <p className="inline-notice" role="status">
+          This revision is closed. Close this queue and start a new revision to continue.
+        </p>}
         <div className={`bulk-file-picker ${dragging ? "is-dragging" : ""} ${items.length ? "has-photos" : ""}`}>
           {!items.length && <>
             <span className="bulk-upload-icon"><Icon name="upload" size={30} /></span>
@@ -433,7 +438,7 @@ export default function BulkPhotoDialog({ targets, skidName, onPhoto, onClose })
               <small className="bulk-selection-hint">Type a full name, click a match, or use ↑ ↓ to choose.</small>
               {error && <p className="field-error" role="alert">{error}</p>}
               <div className="bulk-save-actions">
-                <button type="button" className="button primary" onClick={saveAndNext} disabled={saving || !ready || !selected}>
+                <button type="button" className="button primary" onClick={saveAndNext} disabled={readOnly || saving || !ready || !selected}>
                   <Icon name="check" size={18} />{saving ? "Saving photo…" : "Save & next"}
                 </button>
                 <button type="button" className="button secondary" onClick={skip} disabled={saving}>Skip photo</button>

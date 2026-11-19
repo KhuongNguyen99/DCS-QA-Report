@@ -14,19 +14,19 @@ Use a dedicated Supabase project. In its SQL Editor, run the entire [`schema.sql
 
 
 
-To upgrade an existing named-walkdown deployment, run [`equipment-inspections.sql`](./equipment-inspections.sql), then `VERIFY.sql`. The migration adds three empty equipment records to every existing skid and advances each affected report revision once. Rerunning it makes no further changes. It preserves all previous records, evidence, comments, quality, and completion. The [manual GitHub workflow](../.github/workflows/migrate-equipment.yml) can apply the same migration through the QA-Report environment and run a read-only catalog check; it does not run on push.
+To upgrade an existing named-walkdown deployment, install [`equipment-inspections.sql`](./equipment-inspections.sql) if the equipment catalog is not already present, then run [`qc-revisions.sql`](./qc-revisions.sql) followed by `VERIFY.sql`. The revision migration preserves all inspection data and current revision numbers, leaves existing reports as editable drafts, and adds approval, closeout, immutable revision history, and comment removal. No existing report is approved automatically. Rerunning the migration preserves closed revisions. The current `schema.sql` includes the same changes for new installations.
 
-The workflow's `SUPABASE_ACCESS_TOKEN` needs **Database: Read-write** on this project. A token limited to Edge Functions/Secrets cannot apply this migration. Replace the GitHub environment secret with a newly scoped token if Supabase returns `403` with `database_read` missing; existing token scopes cannot be edited. See [Supabase token permissions](https://supabase.com/docs/guides/platform/personal-access-tokens).
+For database deployment through GitHub Actions, `SUPABASE_ACCESS_TOKEN` needs **Database: Read-write** on this project. A token limited to Edge Functions/Secrets cannot apply this migration. Replace the GitHub environment secret with a newly scoped token if Supabase returns `403` with `database_read` missing; existing token scopes cannot be edited. See [Supabase token permissions](https://supabase.com/docs/guides/platform/personal-access-tokens).
 
-To upgrade the older single-report deployment, run [`named-walkdowns.sql`](./named-walkdowns.sql), then `equipment-inspections.sql`, then `VERIFY.sql`. The first migration atomically moves all existing inspection data into **Unassigned skid**, preserving IDs, photo paths, timestamps, status, and its previous revision. An inspector must manually rename that skid before adding evidence, comments, quality, completion, or voice drafts. New skids require unique names of 1–120 characters and start with 39 empty inspection rows at report revision 3 after the equipment migration. Names are unique without regard to case; IDs remain stable after renaming.
-
-
-
-The named-walkdowns migration revokes every old unscoped RPC overload. Deploy the updated frontend and voice function with these migrations; stale browser tabs must refresh. After this upgrade, use the current main schema or equipment-inspections migration for maintenance. The older `report-revisions.sql`, `walkdown-comments.sql`, and `voice-rate-limit.sql` stop with an error if named skids already exist, preventing accidental reintroduction of unscoped access.
+To upgrade the older single-report deployment, run [`named-walkdowns.sql`](./named-walkdowns.sql), then `equipment-inspections.sql`, then `qc-revisions.sql`, then `VERIFY.sql`. The first migration atomically moves all existing inspection data into **Unassigned skid**, preserving IDs, photo paths, timestamps, status, and its previous revision. An inspector must manually rename that skid before adding evidence, comments, quality, completion, or voice drafts. New skids require unique names of 1–120 characters and start with 39 empty inspection rows at report revision 1 after the revision migration. Names are unique without regard to case; IDs remain stable after renaming.
 
 
 
-Check the verification output: 28 catalog devices, 8 terminals, 3 equipment targets with NULL terminals, 39 records **per walkdown**, revisions at least 3, five revision triggers, four realtime tables, private bucket, enabled admin, RLS enabled, and all browser write/anonymous access columns false. A fresh installation has no walkdowns until an inspector creates one. Current `qa_*` functions must have an empty `search_path`; old unscoped overloads must show no authenticated execute privilege. Review unexpected Storage policies: permissive policies are combined, so a broad older policy can bypass this project's restrictions.
+The named-walkdowns migration revokes every old unscoped RPC overload. Deploy the updated frontend and voice function with these migrations; stale browser tabs must refresh. After this upgrade, use the current main schema or `qc-revisions.sql` for maintenance. Do not rerun earlier migrations after installing revision closeout. The older `report-revisions.sql`, `walkdown-comments.sql`, and `voice-rate-limit.sql` stop with an error if named skids already exist, preventing accidental reintroduction of unscoped access.
+
+
+
+Check the verification output: 28 catalog devices, 8 terminals, 3 equipment targets with NULL terminals, 39 records **per walkdown**, positive revision numbers, draft/closed status, preserved closed snapshots, a private evidence bucket, enabled admin, RLS enabled, and all browser write/anonymous access columns false. A fresh installation has no walkdowns until an inspector creates one. Current `qa_*` functions must have an empty `search_path`; old unscoped overloads must show no authenticated execute privilege. Review unexpected Storage policies: permissive policies are combined, so a broad older policy can bypass this project's restrictions.
 
 
 
@@ -154,7 +154,7 @@ Sign in with two allowlisted accounts on separate devices. Use a test inspection
 
 
 
-Run `npm test` for adapter and executable PostgreSQL-compatible PGlite migration tests. These use minimal Auth/Storage stubs to verify preservation of legacy evidence, two-skid isolation, independent revisions, unnamed/invalid write rejection, old RPC privilege revocation, nonmember access denial, completion dependencies, deletion reopening, and safe schema reruns. That local check does not replace hosted Auth, SMTP, Storage upload, Realtime, or two-device verification.
+Run `npm test` for adapter and executable PostgreSQL-compatible PGlite migration tests. These use minimal Auth/Storage stubs to verify preservation of legacy evidence, two-skid isolation, independent revisions, immutable approval snapshots, locked-write rejection, stale-revision rejection, comment removal permissions, unnamed/invalid write rejection, old RPC privilege revocation, nonmember access denial, completion dependencies, deletion reopening, and safe schema reruns. That local check does not replace hosted Auth, SMTP, Storage upload, Realtime, or two-device verification.
 
 
 
@@ -162,19 +162,21 @@ Run `npm test` for adapter and executable PostgreSQL-compatible PGlite migration
 
 
 
-- Each named skid report starts at revision 3. Renaming it advances only that report’s revision; saving the same name does not. Saving a comment, finalized photo, photo removal, completion/reopen, or quality assessment advances it once per database transaction. A photo removal that also reopens its device and terminal advances once. Pending or canceled uploads, drafts, OCR, voice processing, refreshes, and exporting an unchanged report do not advance it. The source schedule/reference PDF remains revision 3.
+- New skid reports start at revision 1; existing reports retain their revision number during the upgrade. Changes within an editable draft do not advance its number. **Approve & close** saves an immutable snapshot with approval metadata and locks all report edits. **New revision** advances the number once and carries the current content into an editable draft. Earlier approved revisions remain exportable. The source schedule/reference PDF remains revision 3.
 
-- Comments are append-only. Corrections are new comments, preserving author and server timestamp.
+- A comment’s author or the administrator can remove it while the report is a draft. Removal preserves the database audit record and does not alter comments captured in an approved revision. Closed revisions cannot be edited.
 
-- Each equipment item, device, and terminal has one shared Quality value: Good, Bad, or unrated. Selecting one excludes the other; clearing it returns to unrated. The latest change, including a clear, records the inspector and server timestamp. Quality changes preserve evidence completion.
+- Each equipment item, device, and terminal has one shared Quality value: Passed, Failed, or unrated. The stored values remain `good`, `bad`, or `null` for compatibility. Selecting one excludes the other; clearing it returns to unrated. The latest change, including a clear, records the inspector and server timestamp. Quality changes preserve evidence completion.
 
 - Any active inspector can add evidence/comments and complete or reopen an item. Only the photographer or administrator can remove a photo.
 
 - Uploads reserve metadata before sending bytes, then finalize after the server finds the private object. Pending uploads never count as evidence.
 
-- Removing a saved photo reopens its record and, for field devices, its parent terminal before Storage deletion. Equipment remains independent of terminal completion. If cleanup fails, the app reports the failure; retry removal by the same photo ID or ask the administrator to remove the tombstoned file in Storage.
+- Removing a saved photo from a draft reopens its record and, for field devices, its parent terminal. Objects used by an approved revision remain in private Storage; only unreferenced objects are eligible for deletion. Equipment remains independent of terminal completion. If cleanup fails, the app reports the failure; retry removal by the same photo ID or ask the administrator to remove the tombstoned file in Storage.
 
 - Completion and evidence changes are serialized by a database transaction lock for that skid. Different skids can be edited independently. Terminal completion checks the server's canonical device catalog.
+
+- Approval checks the revision and content version being reviewed. New revisions and writes reject stale revision numbers, and the database serializes changes with approval so a closed snapshot cannot change. Only closed snapshots can be exported.
 
 - Realtime sends refresh notifications; periodic and focus/reconnect refreshes recover missed notifications. Concurrent comments/photos append instead of overwriting another inspector's work.
 
@@ -200,5 +202,5 @@ order by created_at;
 
 
 
-Do not delete active evidence objects directly in the dashboard. Use the app removal action so completion is reopened. Storage deletes done with administrative credentials bypass the application's policies; [`VERIFY.sql`](./VERIFY.sql) detects completed records whose evidence is missing. Never delete rows directly from `storage.objects`; use the Storage UI/API for physical object cleanup.
+Do not delete active evidence or objects referenced by an approved revision directly in the dashboard. Use the app removal action so completion is reopened. Storage deletes done with administrative credentials bypass the application's policies; [`VERIFY.sql`](./VERIFY.sql) detects completed records whose evidence is missing. Never delete rows directly from `storage.objects`; use the Storage UI/API for physical object cleanup.
 

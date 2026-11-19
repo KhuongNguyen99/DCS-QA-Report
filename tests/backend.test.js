@@ -24,6 +24,9 @@ function fixture(overrides = {}) {
     project: {
       title: "450k Skid x7 - DCS",
       revision: 17,
+      status: "draft",
+      contentVersion: 9,
+      closedAt: null,
       scheduleRevision: 3,
       walkdownId,
       skidName: "Skid A",
@@ -104,6 +107,8 @@ function fixture(overrides = {}) {
       calls.push([name, args]);
       if (overrides.rpcErrors?.[name])
         return { data: null, error: overrides.rpcErrors[name] };
+      if (Object.hasOwn(overrides.rpcResults || {}, name))
+        return { data: overrides.rpcResults[name], error: null };
       return {
         data:
           name === "qa_list_walkdowns"
@@ -140,7 +145,7 @@ function fixture(overrides = {}) {
     },
   };
   const workspace = createBackend(config, { clientFactory: () => client });
-  const backend = workspace.forWalkdown(walkdownId);
+  const backend = workspace.forWalkdown(walkdownId, 17);
   return { workspace, backend, calls, photo, state, listing, walkdown };
 }
 
@@ -217,12 +222,83 @@ test("loadState returns one scoped shared snapshot", async () => {
   assert.deepEqual(calls, [["qa_load_state", { p_walkdown_id: walkdownId }]]);
 });
 
+test("write scopes stay pinned to their revision while unbound scopes can only read", async () => {
+  const { workspace, backend, state, calls } = fixture();
+  const reader = workspace.forWalkdown(walkdownId);
+  assert.equal(reader.expectedRevision, null);
+  for (const write of [
+    () => reader.addComment("walkdown:general", "Note"),
+    () => reader.deleteComment(photoId),
+    () => reader.setQuality("terminal:A", "good"),
+    () => reader.setComplete("terminal:A", false),
+    () => reader.addPhoto("terminal:A", sample),
+    () => reader.deletePhoto(photoId),
+    () => reader.approveRevision(9),
+    () => reader.newRevision(),
+    () => workspace.renameWalkdown(walkdownId, "Renamed skid"),
+  ]) await assert.rejects(write, /current revision/);
+  assert.deepEqual(calls, [], "missing revision cannot send writes or upload bytes");
+  for (const revision of [null, 0, -1, 1.5, "17", Number.MAX_SAFE_INTEGER + 1])
+    assert.throws(() => reader.forRevision(revision), /current revision/);
+  const next = reader.forRevision(18);
+  assert.equal(Object.isFrozen(next), true);
+  assert.equal(next.walkdownId, walkdownId);
+  state.project.revision = 18;
+  await backend.loadState();
+  await backend.addComment("walkdown:general", "Original draft request");
+  await next.addComment("walkdown:general", "New draft request");
+  assert.equal(backend.expectedRevision, 17, "refresh must not rebind an outstanding editor");
+  assert.equal(calls.at(-2)[1].p_expected_revision, 17);
+  assert.equal(calls.at(-1)[1].p_expected_revision, 18);
+});
+
+test("closing, reopening, and loading revisions use authoritative versioned RPCs", async () => {
+  const closed = { project: { walkdownId, revision: 17, status: "closed", contentVersion: 9,
+    closedAt: "2026-11-19T20:00:00Z", closedBy: userId, closedByName: "Inspector" } };
+  const next = { project: { ...closed.project, revision: 18, status: "draft", closedAt: null } };
+  const revisions = [closed.project];
+  const { backend, calls } = fixture({ rpcResults: {
+    qa_approve_revision: closed, qa_new_revision: next,
+    qa_list_revisions: revisions, qa_load_revision: closed,
+  } });
+  assert.equal(await backend.approveRevision(9), closed);
+  assert.equal(await backend.listRevisions(), revisions);
+  assert.equal(await backend.loadRevision(17), closed);
+  assert.equal(await backend.newRevision(), next);
+  assert.deepEqual(calls, [
+    ["qa_approve_revision", { p_walkdown_id: walkdownId, p_expected_revision: 17, p_expected_version: 9 }],
+    ["qa_list_revisions", { p_walkdown_id: walkdownId }],
+    ["qa_load_revision", { p_walkdown_id: walkdownId, p_revision: 17 }],
+    ["qa_new_revision", { p_walkdown_id: walkdownId, p_expected_revision: 17 }],
+  ]);
+  calls.length = 0;
+  for (const version of [null, -1, 1.5, "9", Number.MAX_SAFE_INTEGER + 1])
+    await assert.rejects(backend.approveRevision(version), /Refresh the report/);
+  await assert.rejects(backend.loadRevision(0), /current revision/);
+  assert.deepEqual(calls, []);
+  const stale = fixture({ rpcErrors: { qa_approve_revision: { message: "Report changed. Refresh before approving." } } });
+  await assert.rejects(stale.backend.approveRevision(8), /Report changed.*Refresh/);
+});
+
+test("comment removal is scoped to the draft revision and surfaces server permission errors", async () => {
+  const { backend, calls } = fixture();
+  await backend.deleteComment(photoId);
+  assert.deepEqual(calls, [["qa_delete_comment", {
+    p_walkdown_id: walkdownId, p_id: photoId, p_expected_revision: 17,
+  }]]);
+  for (const id of [undefined, "", "comment-1", "../comment"])
+    await assert.rejects(backend.deleteComment(id), /existing comment/);
+  assert.equal(calls.length, 1);
+  const forbidden = fixture({ rpcErrors: { qa_delete_comment: { message: "Only its author or an administrator can remove this comment." } } });
+  await assert.rejects(forbidden.backend.deleteComment(photoId), /author or an administrator/);
+});
+
 test("workspace lists, creates and renames named skids before selecting an immutable scope", async () => {
   const { workspace, calls, listing, walkdown } = fixture();
   assert.equal(await workspace.listWalkdowns(), listing);
   assert.equal(await workspace.createWalkdown(" Skid A "), walkdown);
   assert.equal(
-    await workspace.renameWalkdown(walkdownId, " Skid B "),
+    await workspace.renameWalkdown(walkdownId, " Skid B ", 17),
     walkdown,
   );
   assert.deepEqual(calls, [
@@ -230,12 +306,12 @@ test("workspace lists, creates and renames named skids before selecting an immut
     ["qa_create_walkdown", { p_skid_name: "Skid A" }],
     [
       "qa_rename_walkdown",
-      { p_walkdown_id: walkdownId, p_skid_name: "Skid B" },
+      { p_walkdown_id: walkdownId, p_skid_name: "Skid B", p_expected_revision: 17 },
     ],
   ]);
   assert.equal(workspace.loadState, undefined);
-  const a = workspace.forWalkdown(walkdownId);
-  const b = workspace.forWalkdown(otherWalkdownId);
+  const a = workspace.forWalkdown(walkdownId, 17);
+  const b = workspace.forWalkdown(otherWalkdownId, 17);
   assert.equal(Object.isFrozen(a), true);
   assert.equal(a.walkdownId, walkdownId);
   await b.setQuality("device:V-3541", "bad");
@@ -257,7 +333,7 @@ test("invalid or reserved skid names and missing IDs fail before requests", asyn
   ]) {
     await assert.rejects(workspace.createWalkdown(name), /skid name/);
     await assert.rejects(
-      workspace.renameWalkdown(walkdownId, name),
+      workspace.renameWalkdown(walkdownId, name, 17),
       /skid name/,
     );
   }
@@ -280,6 +356,8 @@ test("photo upload reserves first, uploads without overwrite, then finalizes ser
   assert.equal(calls[1][1].p_record_key, "device:V-3541");
   assert.equal(calls[1][1].p_walkdown_id, walkdownId);
   assert.equal(calls[3][1].p_walkdown_id, walkdownId);
+  assert.equal(calls[1][1].p_expected_revision, 17);
+  assert.equal(calls[3][1].p_expected_revision, 17);
   assert.equal(result.walkdownId, walkdownId);
   assert.match(calls[1][1].p_path, new RegExp(`^${userId}/[0-9a-f-]+\\.jpg$`));
   assert.equal(calls[2][1], calls[1][1].p_path);
@@ -389,6 +467,7 @@ test("comment and completion input is validated before sending authoritative RPC
       "qa_add_comment",
       {
         p_walkdown_id: walkdownId,
+        p_expected_revision: 17,
         p_record_key: "device:V-3571#2",
         p_text: "Check tightness",
       },
@@ -397,6 +476,7 @@ test("comment and completion input is validated before sending authoritative RPC
       "qa_set_complete",
       {
         p_walkdown_id: walkdownId,
+        p_expected_revision: 17,
         p_record_key: "terminal:A",
         p_complete: false,
       },
@@ -449,6 +529,16 @@ test("private photo URLs are cached briefly and removal reopens the record befor
   assert.equal(calls.at(-1)[0], "signUrl");
 });
 
+test("photo removal preserves files referenced by closed revisions", async () => {
+  const { backend, calls, photo } = fixture({ rpcResults: { qa_delete_photo: null } });
+  await backend.getPhotoUrl(photo);
+  await backend.deletePhoto(photo.id);
+  await backend.getPhotoUrl(photo);
+  assert.deepEqual(calls.map((call) => call[0]), ["signUrl", "qa_delete_photo"]);
+  assert.equal(calls[1][1].p_expected_revision, 17);
+  assert.equal(calls.some((call) => call[0] === "remove"), false);
+});
+
 test("whole-walkdown scope accepts comments but cannot become a photo, quality, or completion target", async () => {
   const { backend, calls } = fixture();
   await backend.addComment("walkdown:general", " Overall walkdown note ");
@@ -474,6 +564,7 @@ test("whole-walkdown scope accepts comments but cannot become a photo, quality, 
       "qa_add_comment",
       {
         p_walkdown_id: walkdownId,
+        p_expected_revision: 17,
         p_record_key: "walkdown:general",
         p_text: "Overall walkdown note",
       },
@@ -483,10 +574,10 @@ test("whole-walkdown scope accepts comments but cannot become a photo, quality, 
 
 test("quality accepts a single good, bad, or null value and rejects invalid input", async () => {
   const { backend, calls } = fixture();
-  for (const value of ["Good", "", true, undefined, ["good", "bad"]]) {
+  for (const value of ["Passed", "Failed", "", true, undefined, ["good", "bad"]]) {
     await assert.rejects(
       backend.setQuality("device:V-3541", value),
-      /Good, Bad, or unrated/,
+      /Passed, Failed, or unrated/,
     );
   }
   await assert.rejects(
@@ -501,6 +592,7 @@ test("quality accepts a single good, bad, or null value and rejects invalid inpu
       "qa_set_quality",
       {
         p_walkdown_id: walkdownId,
+        p_expected_revision: 17,
         p_record_key: "device:V-3541",
         p_quality: "good",
       },
@@ -509,6 +601,7 @@ test("quality accepts a single good, bad, or null value and rejects invalid inpu
       "qa_set_quality",
       {
         p_walkdown_id: walkdownId,
+        p_expected_revision: 17,
         p_record_key: "device:V-3541",
         p_quality: "bad",
       },
@@ -517,6 +610,7 @@ test("quality accepts a single good, bad, or null value and rejects invalid inpu
       "qa_set_quality",
       {
         p_walkdown_id: walkdownId,
+        p_expected_revision: 17,
         p_record_key: "device:V-3541",
         p_quality: null,
       },
@@ -525,6 +619,7 @@ test("quality accepts a single good, bad, or null value and rejects invalid inpu
       "qa_set_quality",
       {
         p_walkdown_id: walkdownId,
+        p_expected_revision: 17,
         p_record_key: "terminal:A",
         p_quality: "bad",
       },

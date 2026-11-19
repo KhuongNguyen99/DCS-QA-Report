@@ -40,4 +40,4 @@ Run `node --test tests/voice*.test.js` for mocked browser capture/request and se
 
 If the gateway returns 401 before the handler, first check that the request carries a current user JWT and the correct project API key. Do not disable JWT checks as a generic fix. The handler's `getUser()` and allowlist checks must always remain in place. [Supabase Edge Function authentication headers](https://supabase.com/docs/guides/functions/auth-headers).
 
-The **Diagnose voice service** workflow sends only the included six-second synthetic speech fixture through the deployed SDK adapter and real Audio Isolation/Scribe APIs. It runs manually and uses ElevenLabs credits. It never uploads QA evidence or comments.
+The **Diagnose voice service** workflow sends only the included six-second synthetic speech fixture through the deployed SDK adapter and real Audio Isolation/Scribe APIs. It runs manually and uses ElevenLabs credits. It never uploads QC evidence or comments.

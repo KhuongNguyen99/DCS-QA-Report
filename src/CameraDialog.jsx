@@ -59,6 +59,7 @@ export default function CameraDialog({
   terminal = null,
   quality,
   qualityDisabled,
+  readOnly = false,
   onQuality,
   onMatch,
   onManualEntry,
@@ -95,11 +96,27 @@ export default function CameraDialog({
   const busyRef = useRef(false);
   const savingRef = useRef(false);
   const previewRef = useRef(null);
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+
+  useEffect(() => {
+    if (!readOnly) return;
+    // A revision can close on another inspector's device during capture/OCR.
+    // Keep an existing preview available, but cancel work that could choose a
+    // target or deliver evidence after this camera's editing scope is locked.
+    runRef.current += 1;
+    captureRef.current += 1;
+    capturePendingRef.current = false;
+    busyRef.current = false;
+    ocrRef.current?.cancel();
+    setBusy(false);
+    setOcrProgress("");
+  }, [readOnly]);
 
   useEffect(() => {
     mountedRef.current = true;
     ocrRef.current = createOcrSession((message) => {
-      if (mountedRef.current) {
+      if (mountedRef.current && !readOnlyRef.current) {
         const percentage = Number.isFinite(message.progress)
           ? ` ${Math.round(message.progress * 100)}%`
           : "";
@@ -226,7 +243,7 @@ export default function CameraDialog({
   }
 
   async function readLabel(blob) {
-    if (!mountedRef.current || busyRef.current) return;
+    if (!mountedRef.current || readOnlyRef.current || busyRef.current) return;
     const run = ++runRef.current;
     busyRef.current = true;
     setBusy(true);
@@ -236,9 +253,9 @@ export default function CameraDialog({
     setOcrProgress("Preparing image…");
     try {
       const image = await normalizePhoto(blob, "label.jpg");
-      if (runRef.current !== run || !mountedRef.current) return;
+      if (runRef.current !== run || !mountedRef.current || readOnlyRef.current) return;
       const text = await ocrRef.current.recognize(image.blob);
-      if (runRef.current !== run || !mountedRef.current) return;
+      if (runRef.current !== run || !mountedRef.current || readOnlyRef.current) return;
       const found = matchDeviceLabels(text, devices, terminal);
       if (!found.length) {
         setScanError(
@@ -274,6 +291,7 @@ export default function CameraDialog({
   }
 
   function selectMatch(item) {
+    if (!mountedRef.current || readOnlyRef.current) return;
     setRecognized(item.deviceId);
     setMatches([]);
     setScanError("");
@@ -293,7 +311,7 @@ export default function CameraDialog({
   }
 
   async function captureLabel() {
-    if (capturePendingRef.current || busyRef.current) return;
+    if (readOnlyRef.current || capturePendingRef.current || busyRef.current) return;
     const capture = ++captureRef.current;
     capturePendingRef.current = true;
     setBusy(true);
@@ -301,7 +319,7 @@ export default function CameraDialog({
     setScanError("");
     try {
       const frame = await captureVideoFrame(videoRef.current);
-      if (mountedRef.current && captureRef.current === capture)
+      if (mountedRef.current && !readOnlyRef.current && captureRef.current === capture)
         await readLabel(frame);
     } catch (error) {
       if (mountedRef.current && captureRef.current === capture) {
@@ -319,9 +337,10 @@ export default function CameraDialog({
   }
 
   async function capturePhoto() {
+    if (readOnlyRef.current || savingRef.current) return;
     try {
       const frame = await captureVideoFrame(videoRef.current);
-      if (mountedRef.current)
+      if (mountedRef.current && !readOnlyRef.current)
         showPreview(frame, `${target?.key || "evidence"}.jpg`);
     } catch (error) {
       if (mountedRef.current)
@@ -338,7 +357,7 @@ export default function CameraDialog({
   function onPhotoFile(event) {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (!file) return;
+    if (!file || readOnlyRef.current) return;
     try {
       showPreview(file, file.name);
     } catch (error) {
@@ -347,13 +366,13 @@ export default function CameraDialog({
   }
 
   async function savePhoto() {
-    if (!preview || savingRef.current || !target) return;
+    if (!preview || readOnlyRef.current || savingRef.current || !target) return;
     savingRef.current = true;
     setSaving(true);
     setPhotoError("");
     try {
       const photo = await normalizePhoto(preview.blob, preview.name);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || readOnlyRef.current) return;
       await onPhoto(photo);
       if (!mountedRef.current) return;
       clearPreview();
@@ -406,6 +425,7 @@ export default function CameraDialog({
         </header>
 
         <div className="camera-body">
+          {readOnly && <p className="camera-error" role="status">This report revision is locked or has changed. Your photo preview is kept here. Close the camera and open the current draft to continue.</p>}
           {target && target.kind !== "equipment" && (
             <nav className="camera-tabs" aria-label="Camera task">
               <button
@@ -416,7 +436,7 @@ export default function CameraDialog({
                   setRecognized("");
                   clearPreview();
                 }}
-                disabled={saving}
+                disabled={saving || readOnly}
               >
                 Change device
               </button>
@@ -436,8 +456,8 @@ export default function CameraDialog({
                 key={target.key}
                 name={target.title}
                 value={quality}
-                disabled={qualityDisabled || saving}
-                onChange={onQuality}
+                disabled={qualityDisabled || saving || readOnly}
+                onChange={(value) => { if (!readOnlyRef.current) return onQuality(value); }}
               />
             </section>
           )}
@@ -484,18 +504,19 @@ export default function CameraDialog({
                   type="button"
                   className="camera-primary"
                   onClick={captureLabel}
-                  disabled={!cameraReady || busy}
+                  disabled={!cameraReady || busy || readOnly}
                 >
                   Read label
                 </button>
                 <button
                   type="button"
                   onClick={() => scanInputRef.current?.click()}
-                  disabled={busy}
+                  disabled={busy || readOnly}
                 >
                   Choose label photo
                 </button>
-                <button type="button" onClick={onManualEntry}>
+                <button type="button" disabled={readOnly}
+                  onClick={() => { if (!readOnlyRef.current) onManualEntry(); }}>
                   Enter device name
                 </button>
                 {busy && (
@@ -509,6 +530,7 @@ export default function CameraDialog({
                   type="file"
                   accept="image/*"
                   onChange={onScanFile}
+                  disabled={readOnly}
                   aria-label="Choose label photo"
                 />
               </div>
@@ -531,6 +553,7 @@ export default function CameraDialog({
                         type="button"
                         key={item.deviceId}
                         onClick={() => selectMatch(item)}
+                        disabled={readOnly}
                       >
                         <strong>{item.deviceId}</strong>
                         <span>
@@ -552,14 +575,14 @@ export default function CameraDialog({
                   type="button"
                   className="camera-primary"
                   onClick={capturePhoto}
-                  disabled={!cameraReady || saving}
+                  disabled={!cameraReady || saving || readOnly}
                 >
                   Take photo
                 </button>
                 <button
                   type="button"
                   onClick={() => photoInputRef.current?.click()}
-                  disabled={saving}
+                  disabled={saving || readOnly}
                 >
                   Choose photo
                 </button>
@@ -569,6 +592,7 @@ export default function CameraDialog({
                   type="file"
                   accept="image/*"
                   onChange={onPhotoFile}
+                  disabled={readOnly}
                   aria-label="Choose evidence photo"
                 />
               </div>
@@ -580,14 +604,14 @@ export default function CameraDialog({
                       type="button"
                       className="camera-primary"
                       onClick={savePhoto}
-                      disabled={saving}
+                      disabled={saving || readOnly}
                     >
                       {saving ? "Saving photo…" : "Save photo"}
                     </button>
                     <button
                       type="button"
                       onClick={clearPreview}
-                      disabled={saving}
+                      disabled={saving || readOnly}
                     >
                       Retake
                     </button>

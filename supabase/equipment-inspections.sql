@@ -1,6 +1,12 @@
 -- Add three independent equipment inspections to an existing named-walkdown
 -- deployment. Run once in the Supabase SQL Editor; reruns are safe.
 begin;
+do $$ begin
+  if exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'qa_walkdowns' and column_name = 'status') then
+    raise exception 'QC closeout revisions are installed. Use the current schema.sql instead of this older migration.';
+  end if;
+end; $$;
+
 
 do $$
 begin

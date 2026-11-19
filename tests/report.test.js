@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { inflateSync } from "node:zlib";
 import {
   createInspectionPdf,
+  approvedReportDate,
   fitImageInBox,
   printableText,
   qualityFor,
@@ -28,7 +29,11 @@ const tinyPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAE0lEQVR4nGP88OMPAwMDEwMYAAAizgLoOA4+wgAAAABJRU5ErkJggg==",
   "base64",
 );
-const GENERATED_AT = new Date("2026-11-16T16:00:00Z");
+const CLOSED_AT = new Date("2026-11-16T16:00:00Z");
+function closedProject(overrides = {}) {
+  return { ...schedule.project, status: "closed", closedAt: CLOSED_AT.toISOString(),
+    closedBy: "inspector-1", closedByName: "QC Inspector", ...overrides };
+}
 
 async function pdfContent(blob) {
   const bytes = Buffer.from(await blob.arrayBuffer());
@@ -88,7 +93,7 @@ async function pdfContent(blob) {
   return { raw, text: pages.join("\n"), pages, streams };
 }
 
-async function compactReport(state) {
+async function compactReport(state, reportSchedule = schedule) {
   const originalFetch = globalThis.fetch;
   const fetched = [];
   globalThis.fetch = async (url) => {
@@ -104,11 +109,10 @@ async function compactReport(state) {
   };
   try {
     const blob = await createInspectionPdf({
-      schedule,
-      state: { project: { ...schedule.project, skidName: "Skid 01" },
+      schedule: reportSchedule,
+      state: { project: { ...closedProject(), skidName: "Skid 01" },
         records: [], photos: [], comments: [], ...state },
       backend: { getPhotoUrl: async (photo) => `/private/${photo.id}` },
-      generatedAt: GENERATED_AT,
     });
     return { ...await pdfContent(blob), fetched };
   } finally {
@@ -137,7 +141,7 @@ function detailPagesFor(pages, streams, name) {
 function assertPlainDetail(text, name, quality) {
   assert.equal(text.split("\n")[2], name);
   if (quality) assert.ok(text.split("\n").includes(quality), text);
-  else assert.doesNotMatch(text, /\b(?:Good|Bad|Unrated)\b/);
+  else assert.doesNotMatch(text, /\b(?:Passed|Failed|Unrated)\b/);
   assert.doesNotMatch(text, /\b(?:Complete|Completed|In progress|Not started|Unrated)\b/);
   assert.doesNotMatch(text, /Quality:|Cable pairs:|Evidence photos|Captured |\(continued\)|\(cont\.\)/);
   assert.doesNotMatch(text, /Inspector A|evidence-[^\s]+\.png|Nov 15, 2026|photo\s*\|\s*\d+ comment/i);
@@ -162,7 +166,7 @@ for (const count of [1, 2, 3, 4, 6]) {
       assert.equal(details.length, 1, pages.join("\n---\n"));
       const { text, stream } = details[0];
       assert.ok(text.includes(`Verified ${keys[index]}`));
-      assertPlainDetail(text, names[index], "Good");
+      assertPlainDetail(text, names[index], "Passed");
       assert.match(text, /Comments/);
       for (const photo of photos.filter((photo) => photo.recordKey === keys[index]))
         assert.ok(!text.includes(photo.name), photo.name);
@@ -200,7 +204,7 @@ test("equipment photos and comments fit on one plain page for each scheduled ite
     assert.equal(detailPages.length, 1, equipment[index].name);
     const { text, stream } = detailPages[0];
     assert.match(text, new RegExp(`Verified ${keys[index]}`));
-    assertPlainDetail(text, equipment[index].name, index === 1 ? "Bad" : "Good");
+    assertPlainDetail(text, equipment[index].name, index === 1 ? "Failed" : "Passed");
     assert.match(text, /Comments/);
     for (const photo of photos.filter((item) => item.recordKey === keys[index]))
       assert.ok(!text.includes(photo.name), photo.name);
@@ -235,8 +239,8 @@ test("inspection overview lists all 39 targets with only names and rated quality
   assert.doesNotMatch(pages[1], /complete|progress|evidence|photo|Generated|Inspector|Quality:/i);
   const summary = pages.filter((page) => page.includes("Inspection overview")).join("\n");
   assert.ok(summary);
-  assert.match(summary, /Control Box\nGood/);
-  assert.match(summary, /Solenoid Box\nBad/);
+  assert.match(summary, /Control Box\nPassed/);
+  assert.match(summary, /Solenoid Box\nFailed/);
   assert.ok(summary.split("\n").includes("Transducer Panel"));
   assert.doesNotMatch(summary, /\b(?:Complete|In progress|Not started|Unrated)\b|Quality:|Cable pairs|photo|comment|coverage/i);
   for (const group of schedule.groups) assert.ok(summary.includes(`Terminal ${group.id}`), group.id);
@@ -258,7 +262,7 @@ test("equipment overflow repeats its heading and retains every photo and comment
   });
   const details = detailPagesFor(pages, streams, "Control Box");
   assert.ok(details.length >= 2);
-  details.forEach(({ text: pageText }) => assertPlainDetail(pageText, "Control Box", "Good"));
+  details.forEach(({ text: pageText }) => assertPlainDetail(pageText, "Control Box", "Passed"));
   for (const photo of photos) assert.ok(!text.includes(photo.name), photo.name);
   const normalized = details.map(({ text: pageText }) => pageText).join("\n").replace(/\s+/g, "");
   for (const line of note.split("\n"))
@@ -281,7 +285,7 @@ test("many photos and long notes continue with their target name and lose no evi
   assert.equal(fetched.filter((path) => path.startsWith("/private/")).length, 13);
   const details = detailPagesFor(pages, streams, schedule.devices[0].name);
   assert.ok(details.length >= 2);
-  details.forEach(({ text: pageText }) => assertPlainDetail(pageText, schedule.devices[0].name, "Bad"));
+  details.forEach(({ text: pageText }) => assertPlainDetail(pageText, schedule.devices[0].name, "Failed"));
   for (const photo of photos) assert.ok(!text.includes(photo.name), photo.name);
   const normalized = details.map(({ text: pageText }) => pageText).join("\n").replace(/\s+/g, "");
   for (const line of note.split("\n")) assert.ok(normalized.includes(line.replace(/\s+/g, "")), line);
@@ -315,8 +319,8 @@ test("quality labels are independent of completion and explicit when unrated", (
       { key: "device:V-3571#1", complete: true, quality: "good" },
     ],
   };
-  assert.equal(qualityFor("terminal:A", state), "Bad");
-  assert.equal(qualityFor("device:V-3571#1", state), "Good");
+  assert.equal(qualityFor("terminal:A", state), "Failed");
+  assert.equal(qualityFor("device:V-3571#1", state), "Passed");
   assert.equal(qualityFor("terminal:B", state), "Unrated");
 });
 
@@ -335,10 +339,10 @@ test("full report paginates plain comments, includes private photos, and dates e
     createdBy: "inspector-1",
   }));
   const state = {
-    project: { ...schedule.project, revision: 17, skidName: "Pump House A" },
+    project: { ...closedProject(), revision: 17, skidName: "Pump House A" },
     inspector: {
       id: "inspector-1",
-      name: "QA Inspector",
+      name: "QC Inspector",
       email: "qa@example.com",
     },
     records: [
@@ -362,7 +366,7 @@ test("full report paginates plain comments, includes private photos, and dates e
         recordKey: `device:${schedule.devices[0].id}`,
         text: "Observed cable routing and terminal labeling. ".repeat(90),
         createdAt: "2026-11-15T14:30:00Z",
-        authorName: "QA Inspector",
+        authorName: "QC Inspector",
       },
       {
         id: "long-2",
@@ -371,14 +375,14 @@ test("full report paginates plain comments, includes private photos, and dates e
           75,
         ),
         createdAt: "2026-11-15T14:45:00Z",
-        authorName: "QA Inspector",
+        authorName: "QC Inspector",
       },
       {
         id: "terminal",
         recordKey: `terminal:${schedule.groups[0].id}`,
         text: "Terminal inspected; photograph pending.",
         createdAt: "2026-11-15T14:30:00Z",
-        authorName: "QA Inspector",
+        authorName: "QC Inspector",
       },
     ],
   };
@@ -404,7 +408,6 @@ test("full report paginates plain comments, includes private photos, and dates e
       schedule,
       state,
       backend: { getPhotoUrl: async (photo) => `/private/${photo.id}` },
-      generatedAt: GENERATED_AT,
       onProgress: (update) => progress.push(update),
     });
     const { raw, text, pages: pageTexts, streams } = await pdfContent(blob);
@@ -422,19 +425,19 @@ test("full report paginates plain comments, includes private photos, and dates e
     assert.equal((text.match(/Jeevy Fabrication/g) || []).length, pages);
     assert.match(text, /450k Skid x7 - DCS/); // Page header.
     assert.match(text, /450k skid x7 - DCS/); // Cover title.
-    assert.match(raw, /450k skid x7 - DCS - QA Report - Pump House A/); // Full subtitle in PDF metadata.
+    assert.match(raw, /450k skid x7 - DCS - QC Report - Pump House A/); // Full subtitle in PDF metadata.
     assert.match(raw, /\/CreationDate\s*\(D:20261116/);
-    assert.doesNotMatch(raw, /\/Author\s*\((?:QA Inspector|qa@example\.com|inspector-1)\)/);
+    assert.doesNotMatch(raw, /\/Author\s*\((?:QC Inspector|qa@example\.com|inspector-1)\)/);
     assert.equal((text.match(/Revision 17/g) || []).length, pages + 1);
-    assert.match(pageTexts[0], /QA Report - Pump House A/);
+    assert.match(pageTexts[0], /QC Report - Pump House A/);
     assert.match(pageTexts[0], /November 16, 2026/);
     assert.equal(pageTexts.length, pages);
     pageTexts.forEach((pageText, index) => {
       assert.match(pageText, /Revision 17 \| Skid: Pump House A/);
-      assert.match(pageText, /Inspected date: Nov 16, 2026/);
+      assert.match(pageText, /Approved date: Nov 16, 2026/);
       assert.match(pageText, new RegExp(`Page ${index + 1} of ${pages}`));
     });
-    assert.doesNotMatch(text, /QA Inspector|qa@example\.com|inspector-1|evidence-[123]\.png|Captured |Nov 15, 2026/);
+    assert.doesNotMatch(text, /QC Inspector|qa@example\.com|inspector-1|evidence-[123]\.png|Captured |Nov 15, 2026/);
     assert.equal(streams.reduce((sum, stream) => sum + photoPlacements(stream).length, 0), 5);
     for (let page = 1; page <= pages; page += 1) {
       assert.match(text, new RegExp(`Page ${page} of ${pages}`));
@@ -471,8 +474,8 @@ test("general walkdown notes retain non-Latin text and paginate without changing
     const blob = await createInspectionPdf({
       schedule,
       state: {
-        project: { ...schedule.project, skidName: "Проверка A" },
-        inspector: { id: "inspector-1", name: "QA Inspector" },
+        project: { ...closedProject(), skidName: "Проверка A" },
+        inspector: { id: "inspector-1", name: "QC Inspector" },
         records: [],
         photos: [],
         comments: [
@@ -493,7 +496,6 @@ test("general walkdown notes retain non-Latin text and paginate without changing
         ],
       },
       backend: null,
-      generatedAt: GENERATED_AT,
     });
     const { raw, pages } = await pdfContent(blob);
     assert.ok((raw.match(/\/Type\s*\/Page\b/g) || []).length >= 5);
@@ -522,7 +524,7 @@ test("report refuses to omit evidence assigned outside the schedule", async () =
         createInspectionPdf({
           schedule,
           state: {
-            project: { skidName: "Pump House A" },
+            project: closedProject({ skidName: "Pump House A" }),
             records: [],
             comments: [],
             photos: [{ id: "orphan", recordKey: "device:UNKNOWN" }],
@@ -536,7 +538,7 @@ test("report refuses to omit evidence assigned outside the schedule", async () =
         createInspectionPdf({
           schedule,
           state: {
-            project: { skidName: "Pump House A" },
+            project: closedProject({ skidName: "Pump House A" }),
             records: [],
             comments: [],
             photos: [{ id: "orphan-equipment", recordKey: "equipment:UNKNOWN" }],
@@ -550,7 +552,7 @@ test("report refuses to omit evidence assigned outside the schedule", async () =
         createInspectionPdf({
           schedule,
           state: {
-            project: { skidName: "Pump House A" },
+            project: closedProject({ skidName: "Pump House A" }),
             records: [],
             photos: [],
             comments: [
@@ -583,7 +585,7 @@ test("report requires a named skid before loading assets", async () => {
           createInspectionPdf({
             schedule,
             state: {
-              project: { ...schedule.project, skidName },
+              project: { ...closedProject(), skidName },
               records: [],
               photos: [],
               comments: [],
@@ -606,7 +608,7 @@ test("report rejects evidence or backend data from another skid before loading a
     throw new Error("Assets should not be fetched");
   };
   const state = {
-    project: { ...schedule.project, skidName: "Pump House A", walkdownId: "skid-a" },
+    project: { ...closedProject(), skidName: "Pump House A", walkdownId: "skid-a" },
     records: [],
     photos: [],
     comments: [],
@@ -658,17 +660,101 @@ test("report rejects evidence or backend data from another skid before loading a
   }
 });
 
-test("invalid document creation dates fail before fetching report assets", async () => {
+test("draft or invalid approval metadata prevents export before fetching report assets", async () => {
   const originalFetch = globalThis.fetch;
   let fetched = false;
   globalThis.fetch = async () => { fetched = true; throw new Error("Unexpected fetch"); };
   try {
-    for (const generatedAt of [null, "2026-11-17", new Date("invalid")]) {
+    for (const closedAt of [null, "2026-11-17", new Date("invalid"), "invalid", "2026-13-30T00:00:00Z"]) {
       await assert.rejects(() => createInspectionPdf({
         schedule,
-        state: { project: { ...schedule.project, skidName: "Skid A" }, records: [], photos: [], comments: [] },
-        generatedAt,
-      }), /creation date is invalid/);
+        state: { project: closedProject({ skidName: "Skid A", closedAt }), records: [], photos: [], comments: [] },
+      }), /approval date is invalid/);
+    }
+    for (const overrides of [
+      { status: "draft" }, { status: undefined }, { revision: undefined },
+      { revision: null }, { revision: 0 }, { revision: 1.5 }, { revision: "3" },
+    ]) {
+      await assert.rejects(() => createInspectionPdf({
+        schedule,
+        state: { project: closedProject({ skidName: "Skid A", ...overrides }), records: [], photos: [], comments: [] },
+      }), /Approve and close this revision/);
+    }
+    assert.equal(fetched, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("closed revision exports retain their UTC approval date and revision across time zones", async () => {
+  const project = closedProject({
+    skidName: "Skid Date Test", revision: 1, closedAt: "2026-11-17T00:30:00+05:30",
+  });
+  assert.equal(approvedReportDate({ project }).toISOString(), "2026-11-16T19:00:00.000Z");
+  const previousZone = process.env.TZ;
+  try {
+    process.env.TZ = "Pacific/Kiritimati";
+    const { raw, pages } = await compactReport({ project });
+    assert.match(raw, /\/CreationDate\s*\(D:20261116190000\+00'00'\)/);
+    assert.match(pages[0], /November 16, 2026/);
+    assert.match(pages[0], /QC Report - Skid Date Test/);
+    pages.forEach((page) => {
+      assert.match(page, /Revision 1 \| Skid: Skid Date Test/);
+      assert.match(page, /Approved date: Nov 16, 2026/);
+      assert.doesNotMatch(page, /\bQA\b|Good\/Bad/);
+    });
+  } finally {
+    if (previousZone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousZone;
+  }
+});
+
+test("closed revision PDF names and coverage come from its frozen catalog", async () => {
+  const catalog = [
+    { key: "equipment:control-box", kind: "equipment", terminal: null, label: "Original control cabinet" },
+    { key: "terminal:A", kind: "terminal", terminal: "A", label: "Original terminal A" },
+    { key: "device:LEGACY-9", kind: "device", terminal: "A", label: "Original valve 9" },
+  ];
+  const state = {
+    catalog,
+    photos: evidencePhotos("device:LEGACY-9", 1),
+    records: [{ key: "device:LEGACY-9", quality: "bad" }],
+    comments: [{ recordKey: "device:LEGACY-9", text: "Closed revision's original evidence." }],
+  };
+  const changedSchedule = structuredClone(schedule);
+  changedSchedule.equipment[0].name = "Renamed control cabinet";
+  changedSchedule.devices = [];
+  for (const currentSchedule of [changedSchedule, null]) {
+    const { pages, text } = await compactReport(state, currentSchedule);
+    const overview = pages.filter((page) => page.includes("Inspection overview")).join("\n");
+    assert.match(overview, /Original control cabinet[\s\S]*Original terminal A[\s\S]*Original valve 9/);
+    assert.match(overview, /Original valve 9\nFailed/);
+    assert.match(text, /Closed revision's original evidence\./);
+    assert.doesNotMatch(text, /Renamed control cabinet|Solenoid Box|Transducer Panel/);
+  }
+});
+
+test("invalid frozen catalogs and evidence outside the closed catalog fail before asset loading", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetched = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error("Unexpected fetch"); };
+  const target = { key: "terminal:A", kind: "terminal", terminal: "A", label: "Terminal A" };
+  const state = { project: closedProject({ skidName: "Skid A" }), records: [], photos: [], comments: [] };
+  try {
+    for (const catalog of [null, [], {}, [null], [{ ...target, key: " " }],
+      [{ ...target, label: " " }], [target, { ...target, label: "Second label" }],
+      [target, { ...target, key: "terminal:B" }]]) {
+      await assert.rejects(() => createInspectionPdf({ schedule, state: { ...state, catalog } }), /catalog/);
+    }
+    for (const extra of [
+      { photos: [{ recordKey: "terminal:B" }] },
+      { comments: [{ recordKey: "terminal:B", text: "Other target" }] },
+      { records: [{ key: "terminal:B", quality: "bad" }] },
+    ]) {
+      await assert.rejects(() => createInspectionPdf({ schedule,
+        state: { ...state, catalog: [target], ...extra },
+        backend: { getPhotoUrl: async () => "/photo" },
+      }), /not assigned to a scheduled target/);
     }
     assert.equal(fetched, false);
   } finally {
@@ -698,7 +784,7 @@ test("a 120-character skid name stays complete in a wrapped footer on every page
     const blob = await createInspectionPdf({
       schedule,
       state: {
-        project: { ...schedule.project, skidName },
+        project: { ...closedProject(), skidName },
         records: [],
         photos: [],
         comments: [],
@@ -706,12 +792,12 @@ test("a 120-character skid name stays complete in a wrapped footer on every page
     });
     const { pages } = await pdfContent(blob);
     assert.ok(pages.length > 1);
-    assert.match(pages[0].replace(/\n/g, ""), new RegExp(`QA Report - ${skidName}`));
+    assert.match(pages[0].replace(/\n/g, ""), new RegExp(`QC Report - ${skidName}`));
     pages.forEach((pageText, index) => {
       const footer = pageText
         .split("Revision 3 | Skid: ")[1]
         .split(`Page ${index + 1} of ${pages.length}`)[0]
-        .replace(/Inspected date: [^\n]+/g, "")
+        .replace(/Approved date: [^\n]+/g, "")
         .replace(/\n/g, "");
       assert.equal(footer, skidName);
     });

@@ -1,4 +1,4 @@
-name: Deploy QA website
+name: Deploy QC website
 
 on:
   push:
@@ -29,8 +29,22 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
-  deploy:
+  migrate:
     needs: build
+    runs-on: ubuntu-latest
+    environment: QA-Report
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Apply and verify QC revision migration
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: node scripts/migrate-qc-revisions.mjs
+  deploy:
+    needs: [build, migrate]
     runs-on: ubuntu-latest
     permissions:
       pages: write

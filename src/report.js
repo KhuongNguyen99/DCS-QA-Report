@@ -63,13 +63,13 @@ export function fitImageInBox(imageWidth, imageHeight, boxWidth, boxHeight) {
 
 export function qualityFor(key, state) {
   const quality = state.records.find((record) => record.key === key)?.quality;
-  return quality === "good" ? "Good" : quality === "bad" ? "Bad" : "Unrated";
+  return quality === "good" ? "Passed" : quality === "bad" ? "Failed" : "Unrated";
 }
 
 function qualityColor(quality) {
-  return quality === "Good"
+  return quality === "Passed"
     ? COLOR.green
-    : quality === "Bad"
+    : quality === "Failed"
       ? COLOR.red
       : COLOR.gray;
 }
@@ -97,9 +97,9 @@ function newPage(doc, project, section) {
   return 61;
 }
 
-function drawFooters(doc, project, generatedAt) {
-  const inspectedDate = generatedAt.toLocaleDateString("en-US", {
-    month: "short", day: "numeric", year: "numeric",
+function drawFooters(doc, project, closedAt) {
+  const approvedDate = closedAt.toLocaleDateString("en-US", {
+    month: "short", day: "numeric", year: "numeric", timeZone: "UTC",
   });
   const count = doc.getNumberOfPages();
   for (let page = 1; page <= count; page += 1) {
@@ -114,7 +114,7 @@ function drawFooters(doc, project, generatedAt) {
     const lines = doc.splitTextToSize(footer, availableWidth);
     if (lines.length > 2)
       throw new Error("Skid name is too long to fit in the report footer.");
-    doc.text(`Inspected date: ${inspectedDate}`, PAGE.margin, 599 - lines.length * 11);
+    doc.text(`Approved date: ${approvedDate}`, PAGE.margin, 599 - lines.length * 11);
     lines.forEach((line, index) =>
       doc.text(line, PAGE.margin, 599 - (lines.length - index - 1) * 11),
     );
@@ -185,22 +185,23 @@ async function fetchFont(url, required) {
   return bytesToBase64(bytes);
 }
 
-function drawCover(doc, project, generatedAt, logoImage) {
+function drawCover(doc, project, closedAt, logoImage) {
   drawPageHeader(doc, project, "Cover");
   doc.addImage(logoImage, "PNG", PAGE.margin, 39.6, 223.2, 74.88);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(0, 0, 0);
   doc.setFontSize(15.1);
   doc.text(
-    generatedAt.toLocaleDateString("en-US", {
+    closedAt.toLocaleDateString("en-US", {
       month: "long",
       day: "numeric",
       year: "numeric",
+      timeZone: "UTC",
     }),
     PAGE.margin,
     239,
   );
-  const subtitle = `QA Report - ${printableText(project.skidName)}`;
+  const subtitle = `QC Report - ${printableText(project.skidName)}`;
   let size = 36;
   let lines;
   let subtitleEnd;
@@ -242,8 +243,7 @@ function drawOverview(doc, project, layoutImage) {
   );
 }
 
-function drawSummary(doc, schedule, state, project) {
-  const targets = inspectionTargets(schedule);
+function drawSummary(doc, targets, state, project) {
   const rows = Math.floor((PAGE.bottom - 103) / 22);
   const gap = 24;
   const width = (PAGE.width - PAGE.margin * 2 - gap) / 2;
@@ -255,14 +255,14 @@ function drawSummary(doc, schedule, state, project) {
       const x = PAGE.margin + column * (width + gap);
       setText(doc, COLOR.muted, 9);
       doc.text("Item", x + 7, 88);
-      doc.text("Good/Bad", x + width - 7, 88, { align: "right" });
+      doc.text("Passed/Failed", x + width - 7, 88, { align: "right" });
       doc.setDrawColor(...COLOR.line);
       doc.line(x, 98, x + width, 98);
       targets.slice(offset + column * rows, offset + (column + 1) * rows)
         .forEach((target, index) => {
           const rowY = 103 + index * 22;
           setText(doc, COLOR.ink, 9, "bold");
-          doc.text(printableText(target.name), x + 7, rowY + 14);
+          doc.text(printableText(target.label), x + 7, rowY + 14);
           const quality = qualityFor(target.key, state);
           if (quality !== "Unrated") {
             setText(doc, qualityColor(quality), 12, "bold");
@@ -432,21 +432,48 @@ async function drawRecord(
   return photos.length;
 }
 
-/** Builds a full inspection snapshot. The caller handles download or sharing. */
+/** The approved date belongs to the stored revision, never to the export time. */
+export function approvedReportDate(state) {
+  const project = state?.project;
+  if (project?.status !== "closed" || !Number.isSafeInteger(project.revision) || project.revision < 1)
+    throw new Error("Approve and close this revision before exporting the QC report.");
+  const value = project.closedAt;
+  const closedAt = typeof value === "string" && /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    ? new Date(value) : null;
+  if (!closedAt || !Number.isFinite(closedAt.getTime()))
+    throw new Error("The revision approval date is invalid. Reload the closed revision before exporting.");
+  return closedAt;
+}
+
+function reportEntries(state, schedule) {
+  if (Object.hasOwn(state, "catalog")) {
+    if (!Array.isArray(state.catalog) || !state.catalog.length)
+      throw new Error("The closed revision's inspection catalog is incomplete. Reload the revision before exporting.");
+    const keys = new Set();
+    const labels = new Set();
+    return state.catalog.map((item) => {
+      if (!item || typeof item.key !== "string" || !item.key.trim()
+        || typeof item.label !== "string" || !item.label.trim()
+        || keys.has(item.key.trim()) || labels.has(item.label.trim())) {
+        throw new Error("The closed revision's inspection catalog contains missing or duplicate items. Reload the revision before exporting.");
+      }
+      keys.add(item.key.trim());
+      labels.add(item.label.trim());
+      return { key: item.key.trim(), label: item.label.trim() };
+    });
+  }
+  if (!schedule?.project || !Array.isArray(schedule.groups) || !Array.isArray(schedule.devices))
+    throw new Error("The inspection schedule is incomplete.");
+  return inspectionTargets(schedule).map((target) => ({ key: target.key, label: target.name }));
+}
+
+/** Builds an approved inspection snapshot. The caller handles download or sharing. */
 export async function createInspectionPdf({
   schedule,
   state,
   backend,
-  generatedAt = new Date(),
   onProgress = () => {},
 }) {
-  if (
-    !schedule?.project ||
-    !Array.isArray(schedule.groups) ||
-    !Array.isArray(schedule.devices)
-  ) {
-    throw new Error("The inspection schedule is incomplete.");
-  }
   if (
     !state ||
     !Array.isArray(state.records) ||
@@ -455,8 +482,6 @@ export async function createInspectionPdf({
   ) {
     throw new Error("Shared inspection data is incomplete.");
   }
-  if (!(generatedAt instanceof Date) || !Number.isFinite(generatedAt.getTime()))
-    throw new Error("The report creation date is invalid.");
   const walkdownId = state.project?.walkdownId;
   if (walkdownId && backend?.walkdownId && backend.walkdownId !== walkdownId)
     throw new Error("The selected skid does not match the loaded report data.");
@@ -474,14 +499,13 @@ export async function createInspectionPdf({
     typeof state.project?.skidName !== "string" ||
     !state.project.skidName.trim()
   ) {
-    throw new Error("Name this skid before exporting its QA report.");
+    throw new Error("Name this skid before exporting its QC report.");
   }
-  const entries = inspectionTargets(schedule).map((target) => ({
-    key: target.key,
-    label: target.name,
-  }));
+  const closedAt = approvedReportDate(state);
+  const entries = reportEntries(state, schedule);
   const validKeys = new Set(entries.map((entry) => entry.key));
   const orphan =
+    state.records.find((item) => !validKeys.has(item.key)) ||
     state.photos.find((item) => !validKeys.has(item.recordKey)) ||
     state.comments.find(
       (item) =>
@@ -493,7 +517,7 @@ export async function createInspectionPdf({
     );
   const project = {
     title: REPORT_TITLE,
-    revision: state.project?.revision ?? schedule.project.revision,
+    revision: state.project.revision,
     skidName: state.project.skidName.trim().replace(/\s+/g, " "),
   };
   const totalPhotos = state.photos.length;
@@ -516,17 +540,19 @@ export async function createInspectionPdf({
   doc.addFileToVFS("NotoSans-Bold.ttf", boldFont);
   doc.addFont("NotoSans-Bold.ttf", "NotoSans", "bold");
   doc._reportBoldFont = true;
-  doc.setCreationDate(generatedAt);
+  // A UTC PDF date remains stable even when two inspectors export in different zones.
+  const pdfDate = `D:${closedAt.toISOString().replace(/[-:T]/g, "").slice(0, 14)}+00'00'`;
+  doc.setCreationDate(pdfDate);
   doc.setProperties({
-    title: `${COVER_TITLE} - QA Report - ${project.skidName}`,
+    title: `${COVER_TITLE} - QC Report - ${project.skidName}`,
     subject: `Revision ${project.revision} inspection evidence for ${project.skidName}`,
     author: "Jeevy Fabrication",
-    creator: "Jeevy DCS QA Report",
+    creator: "Jeevy DCS QC Report",
   });
-  drawCover(doc, project, generatedAt, logo);
+  drawCover(doc, project, closedAt, logo);
   drawOverview(doc, project, layout);
   drawGeneralComments(doc, state, project);
-  drawSummary(doc, schedule, state, project);
+  drawSummary(doc, entries, state, project);
   let completed = 0;
   for (const entry of entries) {
     if (recordStatus(entry.key, state) === "not-started") continue;
@@ -539,7 +565,7 @@ export async function createInspectionPdf({
       `${totalPhotos - completed} evidence photo(s) are not assigned to scheduled targets. Refresh the inspection and try again.`,
     );
   }
-  drawFooters(doc, project, generatedAt);
+  drawFooters(doc, project, closedAt);
   onProgress("Report ready");
   return doc.output("blob");
 }

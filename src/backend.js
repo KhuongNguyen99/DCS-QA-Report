@@ -49,6 +49,22 @@ function validateWalkdownId(value) {
   return value.toLowerCase();
 }
 
+function validateRevision(value) {
+  if (!Number.isSafeInteger(value) || value < 1)
+    throw new Error("Refresh the report and select its current revision before making changes.");
+  return value;
+}
+
+function validateEvidenceId(value, kind) {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  ) {
+    throw new Error(`Select an existing ${kind} to remove.`);
+  }
+  return value;
+}
+
 function validateSkidName(value) {
   const name = typeof value === "string" ? value.trim() : "";
   if (
@@ -242,12 +258,13 @@ export function createBackend(
         "Could not create the skid walkdown",
       );
     },
-    async renameWalkdown(id, name) {
+    async renameWalkdown(id, name, expectedRevision) {
       return requestRpc(
         "qa_rename_walkdown",
         {
           p_walkdown_id: validateWalkdownId(id),
           p_skid_name: validateSkidName(name),
+          p_expected_revision: validateRevision(expectedRevision),
         },
         "Could not rename the skid walkdown",
       );
@@ -258,15 +275,39 @@ export function createBackend(
     },
   };
 
-  function forWalkdown(id) {
+  function forWalkdown(id, expectedRevision = null) {
     const walkdownId = validateWalkdownId(id);
+    if (expectedRevision !== null) validateRevision(expectedRevision);
     const rpc = (name, args, action) =>
       requestRpc(name, { ...args, p_walkdown_id: walkdownId }, action);
+    const writeRpc = (name, args, action) => rpc(name, {
+      ...args, p_expected_revision: validateRevision(expectedRevision),
+    }, action);
     return Object.freeze({
       walkdownId,
+      expectedRevision,
       getSession,
+      forRevision(revision) {
+        return forWalkdown(walkdownId, validateRevision(revision));
+      },
       async loadState() {
         return rpc("qa_load_state", {}, "Could not load this skid inspection");
+      },
+      async listRevisions() {
+        return rpc("qa_list_revisions", {}, "Could not load closed revisions");
+      },
+      async loadRevision(revision) {
+        return rpc("qa_load_revision", { p_revision: validateRevision(revision) },
+          "Could not load the closed revision");
+      },
+      async approveRevision(contentVersion) {
+        if (!Number.isSafeInteger(contentVersion) || contentVersion < 0)
+          throw new Error("Refresh the report before approving and closing it.");
+        return writeRpc("qa_approve_revision", { p_expected_version: contentVersion },
+          "Could not approve and close this revision");
+      },
+      async newRevision() {
+        return writeRpc("qa_new_revision", {}, "Could not open a new revision");
       },
 
       async addPhoto(
@@ -297,6 +338,7 @@ export function createBackend(
         ) {
           throw new Error("The photo has invalid image dimensions.");
         }
+        validateRevision(expectedRevision);
         const session = await getSession();
         if (!session?.user?.id)
           throw new Error("Sign in before adding evidence.");
@@ -305,7 +347,7 @@ export function createBackend(
         const storage = client.storage.from(BUCKET);
         // Reserve evidence before upload. Storage policies deny deleting a reserved
         // or ready photo until the checked cancellation/removal RPC allows it.
-        await rpc(
+        await writeRpc(
           "qa_prepare_photo",
           {
             p_id: id,
@@ -338,6 +380,7 @@ export function createBackend(
         const { data, error } = await client.rpc("qa_add_photo", {
           p_walkdown_id: walkdownId,
           p_id: id,
+          p_expected_revision: expectedRevision,
         });
         if (error) {
           // Recover a lost RPC response without deleting an already registered photo.
@@ -369,18 +412,24 @@ export function createBackend(
         const comment = String(text ?? "").trim();
         if (!comment || comment.length > 4000)
           throw new Error("Write a comment between 1 and 4,000 characters.");
-        return rpc(
+        return writeRpc(
           "qa_add_comment",
           { p_record_key: recordKey, p_text: comment },
           "Could not add the comment",
         );
       },
 
+      async deleteComment(commentId) {
+        return writeRpc("qa_delete_comment", {
+          p_id: validateEvidenceId(commentId, "comment"),
+        }, "Could not remove the comment");
+      },
+
       async setComplete(recordKey, complete) {
         validateRecordKey(recordKey);
         if (typeof complete !== "boolean")
           throw new Error("Completion must be true or false.");
-        return rpc(
+        return writeRpc(
           "qa_set_complete",
           { p_record_key: recordKey, p_complete: complete },
           "Could not update completion",
@@ -390,9 +439,9 @@ export function createBackend(
       async setQuality(recordKey, quality) {
         validateRecordKey(recordKey);
         if (quality !== null && quality !== "good" && quality !== "bad") {
-          throw new Error("Quality must be Good, Bad, or unrated.");
+          throw new Error("Quality must be Passed, Failed, or unrated.");
         }
-        return rpc(
+        return writeRpc(
           "qa_set_quality",
           { p_record_key: recordKey, p_quality: quality },
           "Could not update quality",
@@ -400,20 +449,18 @@ export function createBackend(
       },
 
       async deletePhoto(photoId) {
-        if (
-          typeof photoId !== "string" ||
-          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-            photoId,
-          )
-        ) {
-          throw new Error("Select an existing photo to remove.");
-        }
+        validateEvidenceId(photoId, "photo");
         // Reopen inspection first. Storage RLS forbids deleting active evidence directly.
-        const path = await rpc(
+        const path = await writeRpc(
           "qa_delete_photo",
           { p_id: photoId },
           "Could not remove the photo",
         );
+        // Closed revisions retain their original evidence even after a later
+        // draft removes the photo. The server protects these storage objects.
+        if (path === null) return;
+        if (typeof path !== "string" || !path)
+          throw new Error("The photo was removed, but its storage cleanup response was invalid.");
         signedUrls.delete(path);
         const { error } = await client.storage.from(BUCKET).remove([path]);
         fail(

@@ -179,7 +179,7 @@ test("prefixes, extra digits, and unrelated label noise cannot become false matc
   assert.deepEqual(ids("DP-3500#1"), ["DP-3500#1"]);
 });
 
-test("terminal filtering and QA record keys use canonical identities", () => {
+test("terminal filtering and QC record keys use canonical identities", () => {
   assert.equal(groupDevices(devices, " b ").length, 5);
   assert.deepEqual(ids("V-3541\nV-3511", "B"), ["V-3541"]);
   assert.deepEqual(ids("V-3541\nV-3511", "C"), ["V-3511"]);

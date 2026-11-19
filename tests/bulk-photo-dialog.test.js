@@ -61,6 +61,8 @@ before(async () => {
         const targets = inspectionTargets(schedule);
         function Harness() {
           const [open, setOpen] = useState(true);
+          const [readOnly, setReadOnly] = useState(false);
+          window.setReadOnly = setReadOnly;
           function onPhoto(key, photo) {
             return new Promise((resolve, reject) => {
               window.saves.push({
@@ -71,7 +73,7 @@ before(async () => {
           }
           return open
             ? <BulkPhotoDialog targets={targets} skidName="Test skid"
-                onPhoto={onPhoto} onClose={() => setOpen(false)} />
+                onPhoto={onPhoto} onClose={() => setOpen(false)} readOnly={readOnly} />
             : <p>Bulk upload closed.</p>;
         }
         window.act = React.act;
@@ -526,4 +528,24 @@ test("skipped photos keep their rotation, new photos start upright, and retries 
   assert.equal(h.window.saves[2].name, "first.jpg");
   assert.deepEqual([h.window.saves[2].width, h.window.saves[2].height], [800, 1200]);
   await h.settleSave();
+});
+
+test("remote closeout blocks bulk saves while retaining the local queue for review", async (t) => {
+  const h = await setup(t);
+  await h.files(["first.png", "second.png"]);
+  await h.fill("V-3541");
+  const preview = h.query(".bulk-image-viewport img").src;
+  await h.window.act(async () => h.window.setReadOnly(true));
+  assert.match(h.text(), /This revision is closed/);
+  assert.equal(h.button("Save & next").disabled, true);
+  await h.key("Enter");
+  assert.equal(h.window.saves.length, 0);
+  assert.equal(h.input().value, "V-3541");
+  assert.equal(h.query(".bulk-image-viewport img").src, preview);
+  assert.match(h.text(), /0 saved · 2 remaining/);
+  await h.click(h.button("Skip photo"));
+  assert.match(h.text(), /Photo 2 of 2/);
+  await h.click(h.button("Close bulk upload"));
+  assert.equal(h.query("dialog"), null);
+  assert.equal(h.window.objectUrls.size, 0);
 });

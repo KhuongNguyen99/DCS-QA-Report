@@ -24,12 +24,13 @@ import Icon from "./Icons.jsx";
 import OverviewTable from "./OverviewTable.jsx";
 import CommentPanel from "./CommentPanel.jsx";
 import QualityControl from "./QualityControl.jsx";
+import RevisionPanel from "./RevisionPanel.jsx";
 
 const EMPTY = { records: [], photos: [], comments: [], inspector: null };
 const TARGETS = inspectionTargets(schedule);
 const TITLES = {
   layout: "Conduit layout",
-  devices: "QA overview",
+  devices: "QC overview",
   report: "Inspection report",
   workspace: "Shared workspace",
 };
@@ -133,6 +134,7 @@ function App() {
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
   const [skidDialog, setSkidDialog] = useState(null);
+  const skidEditScope = useRef(null);
   const [pending, setPending] = useState(0);
   const [session, setSession] = useState(null);
   const [checking, setChecking] = useState(true);
@@ -178,7 +180,21 @@ function App() {
   const switchBlocked = Boolean(
     pending || reporting || camera || record || manualEntry || bulkUpload,
   );
-  const reportRevision = state.project?.revision ?? schedule.project.revision;
+  const reportRevision = state.project?.revision ?? selectedSkid?.revision ?? 1;
+  const revisionStatus = state.project?.status;
+  const editable = connected && revisionStatus === "draft";
+  const writeBackend = useMemo(
+    () => backend && Number.isSafeInteger(reportRevision) && reportRevision > 0
+      ? backend.forRevision(reportRevision) : null,
+    [backend, reportRevision],
+  );
+  const activeEditor = useRef(null);
+  activeEditor.current = editable ? writeBackend : null;
+  const transitionRef = useRef(false);
+  const exportingRef = useRef(false);
+  const draftPrefix = `${selectedId}:${reportRevision}:`;
+  const hasDraftComments = Object.entries(drafts)
+    .some(([key, value]) => key.startsWith(draftPrefix) && value.trim());
   const totals = inspectionProgress(schedule.devices, schedule.groups, state, schedule.equipment);
   const completedTargets = totals.devices + totals.terminals + totals.equipment;
 
@@ -226,6 +242,8 @@ function App() {
                   ...item,
                   skidName: loaded.project.skidName,
                   revision: loaded.project.revision,
+                  status: loaded.project.status,
+                  contentVersion: loaded.project.contentVersion,
                   nameRequired: loaded.project.nameRequired,
                   updatedAt: loaded.project.updatedAt,
                 }
@@ -364,21 +382,29 @@ function App() {
     setGroup(null);
   }
   function draftFor(key) {
-    return drafts[`${selectedId}:${key}`] || "";
+    return drafts[`${draftPrefix}${key}`] || "";
   }
   function updateDraft(key, value) {
-    const scopedKey = `${selectedId}:${key}`;
+    const scopedKey = `${draftPrefix}${key}`;
     setDrafts((previous) => ({
       ...previous,
       [scopedKey]:
         typeof value === "function" ? value(previous[scopedKey] || "") : value,
     }));
   }
+  function openSkidDialog(mode) {
+    skidEditScope.current = { mode, id: selectedId, revision: reportRevision };
+    setSkidDialog(mode);
+  }
   async function saveSkid(name) {
+    const scope = skidEditScope.current;
+    if (!scope) throw new Error("Reopen the skid name dialog and try again.");
+    if (scope.mode !== "new" && (scope.id !== selectedIdRef.current || scope.revision !== reportRevision))
+      throw new Error("This report revision changed. Close this dialog and review the current report before renaming it.");
     const saved =
-      skidDialog === "new"
+      scope.mode === "new"
         ? await workspaceBackend.createWalkdown(name)
-        : await workspaceBackend.renameWalkdown(selectedId, name);
+        : await workspaceBackend.renameWalkdown(scope.id, name, scope.revision);
     await loadWorkspace();
     if (saved.id !== selectedId) chooseSkid(saved.id);
     setSkidDialog(null);
@@ -407,13 +433,18 @@ function App() {
       throw new Error(
         "Choose a named skid report before adding inspection evidence.",
       );
+    if (!editable || activeEditor.current !== writeBackend)
+      throw new Error("This revision is closed or has changed. Open Report and start a new revision to continue editing.");
     setPending((count) => count + 1);
     try {
-      await operation();
-      await refresh();
+      const result = await operation();
+      // A committed save stays successful even if its following refresh fails.
+      await refresh().catch(() => setError("Your change was saved, but the report could not refresh. Reconnect and refresh to see the latest evidence."));
       setNotice(message);
+      return result;
     } catch (e) {
       setError(e.message);
+      refresh().catch(() => {});
       throw e;
     } finally {
       setPending((count) => count - 1);
@@ -428,11 +459,18 @@ function App() {
   }
   function scan(terminal = null) {
     if (!readyToDocument()) return;
-    setCamera({ target: null, terminal });
+    openCamera(null, terminal);
+  }
+  function openCamera(target, terminal) {
+    setCamera({ target, terminal, backend: writeBackend, revision: reportRevision });
   }
   function readyToDocument() {
-    if (connected) return true;
+    if (editable) return true;
     if (!signedIn) setAuthOpen(true);
+    else if (connected) {
+      setError("This revision is locked. Open Report and choose New revision to continue editing.");
+      navigate("report");
+    }
     else setError("Create or name a skid report before documenting devices.");
     return false;
   }
@@ -447,19 +485,19 @@ function App() {
     setCamera(null);
     setRecord(null);
     setManualEntry(false);
-    setBulkUpload({ backend, walkdownId: selectedId, skidName: state.project.skidName });
+    setBulkUpload({ backend: writeBackend, walkdownId: selectedId, skidName: state.project.skidName, revision: reportRevision });
   }
   async function saveBulkPhoto(key, photo) {
     const scope = bulkUpload;
-    if (!scope || activeBackend.current !== scope.backend || selectedIdRef.current !== scope.walkdownId)
-      throw new Error("This skid report is no longer active. Reopen bulk upload for the correct skid.");
+    if (!scope || activeEditor.current !== scope.backend || selectedIdRef.current !== scope.walkdownId)
+      throw new Error("This report revision is closed or no longer active. Start a new revision before uploading more evidence.");
     setPending((count) => count + 1);
     try {
       const saved = await scope.backend.addPhoto(key, photo);
-      if (activeBackend.current === scope.backend) {
+      if (activeEditor.current === scope.backend) {
         // A failed refresh must not turn a successful save into a retry/duplicate.
         refresh().catch(() => {
-          if (activeBackend.current === scope.backend)
+          if (activeEditor.current === scope.backend)
             setError("Your photo was saved, but the report could not refresh. Reconnect and refresh to see the latest evidence.");
         });
       }
@@ -473,24 +511,54 @@ function App() {
     if (!device || !readyToDocument()) return;
     const target = openRecord("device", deviceId);
     setManualEntry(false);
-    setCamera({ target, terminal: device.terminal });
+    openCamera(target, device.terminal);
   }
-  async function exportReport() {
-    if (!connected) return;
+  async function changeRevision(action, review) {
+    if (!connected || transitionRef.current || pending || reporting) return;
+    if (review.walkdownId && review.walkdownId !== selectedId)
+      throw new Error("Select the report you reviewed before approving.");
+    if (action === "approve" && hasDraftComments)
+      throw new Error("Post or clear your draft comments before approving this revision.");
+    const scope = backend.forRevision(review.revision);
+    transitionRef.current = true;
+    setPending((count) => count + 1);
+    setError("");
+    try {
+      const saved = action === "approve"
+        ? await scope.approveRevision(review.contentVersion)
+        : await scope.newRevision();
+      if (activeBackend.current === backend && selectedIdRef.current === backend.walkdownId) {
+        ++request.current;
+        setState(saved);
+        setLoading(false);
+        setLastSync(new Date());
+        setNotice(action === "approve"
+          ? `Revision ${saved.project.revision} approved and closed`
+          : `Revision ${saved.project.revision} is ready for editing`);
+        loadWorkspace().catch(() => {});
+      }
+    } catch (e) {
+      setError(e.message);
+      refresh().catch(() => {});
+      throw e;
+    } finally {
+      transitionRef.current = false;
+      setPending((count) => count - 1);
+    }
+  }
+  async function exportReport(revision = reportRevision) {
+    if (!connected || exportingRef.current) return;
+    exportingRef.current = true;
     setReporting("Preparing your report…");
     setError("");
     try {
-      const current = await refresh();
-      if (!current)
-        throw new Error("Connect to the shared workspace before exporting.");
-      const snapshot = structuredClone(current);
-      const generatedAt = new Date();
-      const { createInspectionPdf } = await import("./report.js");
+      const snapshot = await backend.loadRevision(revision);
+      const { createInspectionPdf, approvedReportDate } = await import("./report.js");
+      const generatedAt = approvedReportDate(snapshot);
       const blob = await createInspectionPdf({
         schedule,
         state: snapshot,
         backend,
-        generatedAt,
         onProgress: setReporting,
       });
       const url = URL.createObjectURL(blob);
@@ -499,13 +567,14 @@ function App() {
       const skidFilename = snapshot.project.skidName
         .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
         .replace(/[. ]+$/g, "");
-      anchor.download = `450k-Skid-x7-${skidFilename}-DCS-QA-Report-Rev${snapshot.project.revision}-${generatedAt.toLocaleDateString("en-CA")}.pdf`;
+      anchor.download = `450k-Skid-x7-${skidFilename}-DCS-QC-Report-Rev${snapshot.project.revision}-${generatedAt.toISOString().slice(0, 10)}.pdf`;
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 60000);
-      setNotice("PDF report exported with the current shared evidence.");
+      setNotice(`Approved revision ${snapshot.project.revision} exported`);
     } catch (e) {
       setError(e.message);
     } finally {
+      exportingRef.current = false;
       setReporting("");
     }
   }
@@ -520,22 +589,22 @@ function App() {
             navigate("layout");
           }}
           className="brand"
-          aria-label="Jeevy QA home"
+          aria-label="Jeevy QC home"
         >
           <img src={asset("jeevy-logo.png")} alt="Jeevy Fabrication" />
-          <span>FIELD QA</span>
+          <span>FIELD QC</span>
         </a>
         <div className="project-tag">
           <span className="eyebrow">CURRENT SKID REPORT</span>
           <strong>{selectedSkid?.skidName || "450k Skid x7"}</strong>
           <span>
-            {connected ? `QA Revision ${reportRevision}` : "DCS · Field QA"}
+            {connected ? `QC Revision ${reportRevision}` : "DCS · Field QC"}
           </span>
         </div>
         <nav aria-label="Main navigation">
           {[
             ["layout", "layout", "Conduit layout"],
-            ["devices", "device", "QA overview"],
+            ["devices", "device", "QC overview"],
             ["report", "report", "Report"],
             ["workspace", "settings", "Workspace"],
           ].map(([id, icon, label]) => (
@@ -590,7 +659,7 @@ function App() {
       <div className="workspace-shell">
         <header className="topbar">
           <div className="breadcrumbs">
-            <span>QUALITY ASSURANCE</span>
+            <span>QUALITY CONTROL</span>
             <i>/</i>
             <span>450K SKID X7</span>
           </div>
@@ -640,7 +709,7 @@ function App() {
               </h1>
             </div>
             <div className="heading-actions">
-              {["layout", "devices"].includes(view) && (
+              {["layout", "devices"].includes(view) && (!connected || editable) && (
                 <>
                   <button
                     className="button primary"
@@ -658,7 +727,7 @@ function App() {
                   </button>
                 </>
               )}
-              {["layout", "devices", "report"].includes(view) && (
+              {["layout", "devices", "report"].includes(view) && (!connected || editable) && (
                 <button className="button secondary" onClick={startBulkUpload}>
                   <Icon name="upload" />
                   Bulk upload photos
@@ -667,8 +736,8 @@ function App() {
               {view === "report" && (
                 <button
                   className="button primary"
-                  disabled={!connected || Boolean(reporting)}
-                  onClick={exportReport}
+                  disabled={!connected || revisionStatus !== "closed" || pending > 0 || Boolean(reporting)}
+                  onClick={() => exportReport()}
                 >
                   <Icon name="download" />
                   {reporting ? "Exporting…" : "Export PDF"}
@@ -748,20 +817,28 @@ function App() {
               <div className="skid-picker-actions">
                 <button
                   className="small-button"
-                  disabled={!selectedSkid || switchBlocked || loading}
-                  onClick={() => setSkidDialog("rename")}
+                  disabled={!selectedSkid || switchBlocked || loading || (!selectedSkid.nameRequired && !editable)}
+                  onClick={() => openSkidDialog("rename")}
                 >
                   Rename skid
                 </button>
                 <button
                   className="small-button green"
                   disabled={switchBlocked || loading}
-                  onClick={() => setSkidDialog("new")}
+                  onClick={() => openSkidDialog("new")}
                 >
                   New skid report
                 </button>
               </div>
             </section>
+          )}
+
+          {connected && revisionStatus === "closed" && view !== "report" && view !== "workspace" && (
+            <div className="message revision-locked-notice">
+              <Icon name="check" />
+              <div><strong>Revision {reportRevision} is approved and closed</strong><p>Open Report to export this revision or start a new one.</p></div>
+              <button className="small-button" onClick={() => navigate("report")}>Open report</button>
+            </div>
           )}
 
           {signedIn && !connected && view !== "workspace" && (
@@ -771,7 +848,7 @@ function App() {
                 {loading
                   ? "Loading skid report…"
                   : selectedSkid?.nameRequired
-                    ? "Name this skid before starting QA"
+                    ? "Name this skid before starting QC"
                     : selectedSkid
                       ? "Load this skid report to continue"
                       : "Create a report for your skid"}
@@ -789,7 +866,7 @@ function App() {
                   onClick={() =>
                     selectedSkid && !selectedSkid.nameRequired
                       ? refresh().catch(() => {})
-                      : setSkidDialog(
+                      : openSkidDialog(
                           selectedSkid?.nameRequired ? "rename" : "new",
                         )
                   }
@@ -948,7 +1025,7 @@ function App() {
                 </div>
                 <div className="general-comments-content">
                   <CommentPanel
-                    key={`${selectedId}:walkdown:general`}
+                    key={`${selectedId}:${reportRevision}:walkdown:general`}
                     recordKey="walkdown:general"
                     title="Team observations"
                     comments={commentsFor("walkdown:general", state)}
@@ -956,13 +1033,16 @@ function App() {
                     onDraft={(value) => updateDraft("walkdown:general", value)}
                     onPost={(text) =>
                       mutate(
-                        () => backend.addComment("walkdown:general", text),
+                        () => writeBackend.addComment("walkdown:general", text),
                         "Walkdown comment added",
                       )
                     }
                     connected={connected}
+                    inspector={inspector}
+                    readOnly={!editable}
+                    onDelete={(id) => mutate(() => writeBackend.deleteComment(id), "Comment removed")}
                     config={config}
-                    backend={backend}
+                    backend={writeBackend}
                   />
                 </div>
               </section>
@@ -1015,12 +1095,13 @@ function App() {
                     group={group}
                     state={state}
                     connected={connected}
+                    readOnly={!editable}
                     pending={pending > 0}
                     onInspect={() => openRecord("terminal", group)}
                     onComplete={() =>
                       mutate(
                         () =>
-                          backend.setComplete(
+                          writeBackend.setComplete(
                             recordKey("terminal", group),
                             true,
                           ),
@@ -1070,15 +1151,15 @@ function App() {
               schedule={schedule}
               state={state}
               connected={connected}
+              readOnly={!editable}
               pending={pending > 0}
               onOpen={openRecord}
               onStart={(kind, id) => {
                 const target = openRecord(kind, id);
-                if (connected) setCamera({ target, terminal: target.terminal });
-                else setAuthOpen(true);
+                if (readyToDocument()) openCamera(target, target.terminal);
               }}
               onQuality={(key, value) =>
-                mutate(() => backend.setQuality(key, value), "Quality saved")
+                mutate(() => writeBackend.setQuality(key, value), "Quality saved")
               }
             />
           )}
@@ -1095,7 +1176,7 @@ function App() {
                   </span>
                   <h2>
                     {selectedSkid?.skidName
-                      ? `${selectedSkid.skidName} — QA Report`
+                      ? `${selectedSkid.skidName} — QC Report`
                       : "Your inspection, in one report"}
                   </h2>
                 </div>
@@ -1105,6 +1186,22 @@ function App() {
                     : "Partial inspection"}
                 </span>
               </section>
+              {connected && (
+                <RevisionPanel
+                  key={`${selectedId}:${reportRevision}`}
+                  project={state.project}
+                  revisions={state.revisions || []}
+                  photoCount={state.photos.length}
+                  commentCount={state.comments.length}
+                  completedCount={completedTargets}
+                  targetCount={TARGETS.length}
+                  pending={pending > 0 || Boolean(reporting)}
+                  hasDraftComments={hasDraftComments}
+                  onApprove={(review) => changeRevision("approve", review)}
+                  onNewRevision={(revision) => changeRevision("new", { revision })}
+                  onExport={exportReport}
+                />
+              )}
               <section className="stats-strip report-stats">
                 <Stat
                   value={connected ? `${totals.devices}/${schedule.devices.length}` : "—"}
@@ -1186,7 +1283,7 @@ function App() {
                 </div>
                 <div className="general-comments-content">
                   <CommentPanel
-                    key={`${selectedId}:walkdown:general`}
+                    key={`${selectedId}:${reportRevision}:walkdown:general`}
                     recordKey="walkdown:general"
                     title="Team observations"
                     comments={commentsFor("walkdown:general", state)}
@@ -1194,13 +1291,16 @@ function App() {
                     onDraft={(value) => updateDraft("walkdown:general", value)}
                     onPost={(text) =>
                       mutate(
-                        () => backend.addComment("walkdown:general", text),
+                        () => writeBackend.addComment("walkdown:general", text),
                         "Walkdown comment added",
                       )
                     }
                     connected={connected}
+                    inspector={inspector}
+                    readOnly={!editable}
+                    onDelete={(id) => mutate(() => writeBackend.deleteComment(id), "Comment removed")}
                     config={config}
-                    backend={backend}
+                    backend={writeBackend}
                   />
                 </div>
               </section>
@@ -1227,7 +1327,7 @@ function App() {
             />
           )}
           <footer className="app-footer">
-            <span>Jeevy Fabrication · DCS Field QA</span>
+            <span>Jeevy Fabrication · DCS Field QC</span>
             <span>
               {connected ? "Private shared workspace" : "Project preview"}
               <i>·</i>Revision {reportRevision}
@@ -1264,7 +1364,7 @@ function App() {
           onClose={() => setSkidDialog(null)}
         />
       )}
-      {manualEntry && connected && (
+      {manualEntry && editable && (
         <Modal
           title="Enter device name"
           onClose={() => setManualEntry(false)}
@@ -1282,6 +1382,7 @@ function App() {
           key={bulkUpload.walkdownId}
           targets={TARGETS}
           skidName={bulkUpload.skidName}
+          readOnly={!editable || bulkUpload.revision !== reportRevision}
           onPhoto={saveBulkPhoto}
           onClose={() => setBulkUpload(null)}
         />
@@ -1293,45 +1394,44 @@ function App() {
           className="record-dialog"
         >
           <RecordPanel
-            key={`${selectedId}:${record.key}`}
+            key={`${selectedId}:${reportRevision}:${record.key}`}
             target={record}
             config={config}
             draft={draftFor(record.key)}
             onDraft={(value) => updateDraft(record.key, value)}
             state={state}
             connected={connected}
+            readOnly={!editable}
             qualityDisabled={pending > 0}
             onQuality={(value) =>
               mutate(
-                () => backend.setQuality(record.key, value),
+                () => writeBackend.setQuality(record.key, value),
                 "Quality saved",
               )
             }
-            backend={backend}
+            backend={writeBackend || backend}
             onCamera={() => {
-              if (!connected) {
-                setAuthOpen(true);
-                return;
-              }
-              setCamera({ target: record, terminal: record.terminal });
+              if (!readyToDocument()) return;
+              openCamera(record, record.terminal);
             }}
             onPhoto={(photo) =>
-              mutate(() => backend.addPhoto(record.key, photo))
+              mutate(() => writeBackend.addPhoto(record.key, photo))
             }
             onComment={(text) =>
               mutate(
-                () => backend.addComment(record.key, text),
+                () => writeBackend.addComment(record.key, text),
                 "Comment added",
               )
             }
+            onDeleteComment={(id) => mutate(() => writeBackend.deleteComment(id), "Comment removed")}
             onComplete={(complete) =>
               mutate(
-                () => backend.setComplete(record.key, complete),
-                complete ? "QA marked complete" : "QA reopened",
+                () => writeBackend.setComplete(record.key, complete),
+                complete ? "QC marked complete" : "QC reopened",
               )
             }
             onDelete={(photo) =>
-              mutate(() => backend.deletePhoto(photo.id), "Photo removed")
+              mutate(() => writeBackend.deletePhoto(photo.id), "Photo removed")
             }
             onSignIn={() => setAuthOpen(true)}
           />
@@ -1347,20 +1447,27 @@ function App() {
             state.records.find((item) => item.key === camera.target?.key)
               ?.quality ?? null
           }
-          qualityDisabled={!connected || pending > 0}
-          onQuality={(value) =>
-            mutate(
-              () => backend.setQuality(camera.target.key, value),
+          qualityDisabled={!editable || pending > 0}
+          readOnly={!editable || camera.backend !== writeBackend}
+          onQuality={(value) => {
+            if (activeEditor.current !== camera.backend)
+              throw new Error("This camera belongs to a closed or earlier revision. Reopen it from the current draft.");
+            return mutate(
+              () => camera.backend.setQuality(camera.target.key, value),
               "Quality saved",
-            )
-          }
+            );
+          }}
           onClose={() => setCamera(null)}
-          onMatch={startDeviceEvidence}
+          onMatch={(id) => {
+            if (activeEditor.current === camera.backend) startDeviceEvidence(id);
+          }}
           onManualEntry={enterDeviceName}
           onPhoto={(photo) => {
             if (!camera.target)
               throw new Error("Choose a device before saving evidence.");
-            return mutate(() => backend.addPhoto(camera.target.key, photo));
+            if (activeEditor.current !== camera.backend)
+              throw new Error("This camera belongs to a closed or earlier revision. Reopen it from the current draft.");
+            return mutate(() => camera.backend.addPhoto(camera.target.key, photo));
           }}
         />
       )}
@@ -1372,6 +1479,7 @@ function TerminalActions({
   group,
   state,
   connected,
+  readOnly = false,
   pending,
   onInspect,
   onComplete,
@@ -1381,7 +1489,7 @@ function TerminalActions({
   const savingRef = useRef(false);
   const progress = terminalProgress(group, schedule.devices, state);
   const ready =
-    connected &&
+    connected && !readOnly &&
     progress.total > 0 &&
     progress.complete === progress.total &&
     progress.terminalPhotos > 0;
@@ -1757,12 +1865,14 @@ function RecordPanel({
   onDraft,
   state,
   connected,
+  readOnly = false,
   qualityDisabled,
   onQuality,
   backend,
   onCamera,
   onPhoto,
   onComment,
+  onDeleteComment,
   onComplete,
   onDelete,
   onSignIn,
@@ -1777,11 +1887,12 @@ function RecordPanel({
     target.kind !== "terminal" ||
     terminalProgress(target.terminal, schedule.devices, state).complete ===
       groupDevices(schedule.devices, target.terminal).length;
-  const canComplete = connected && photos.length > 0 && devicesReady;
+  const canComplete = connected && !readOnly && photos.length > 0 && devicesReady;
   useEffect(() => {
     setError("");
   }, [target.key]);
   async function action(name, operation) {
+    if (readOnly) return false;
     setBusy(name);
     setError("");
     try {
@@ -1829,6 +1940,9 @@ function RecordPanel({
           </button>
         </div>
       )}
+      {connected && readOnly && (
+        <div className="inline-notice">This revision is locked. Start a new revision from Report to change evidence or results.</div>
+      )}
       <section className="record-quality">
         <h3>Quality</h3>
         <QualityControl
@@ -1837,7 +1951,7 @@ function RecordPanel({
             state.records.find((item) => item.key === target.key)?.quality ??
             null
           }
-          disabled={!connected || qualityDisabled || Boolean(busy)}
+          disabled={!connected || readOnly || qualityDisabled || Boolean(busy)}
           onChange={onQuality}
         />
       </section>
@@ -1848,7 +1962,7 @@ function RecordPanel({
         <div>
           <button
             className="small-button"
-            disabled={!connected || Boolean(busy)}
+            disabled={!connected || readOnly || Boolean(busy)}
             onClick={() => input.current.click()}
           >
             <Icon name="upload" size={16} />
@@ -1856,7 +1970,7 @@ function RecordPanel({
           </button>
           <button
             className="small-button green"
-            disabled={!connected || Boolean(busy)}
+            disabled={!connected || readOnly || Boolean(busy)}
             onClick={onCamera}
           >
             <Icon name="camera" size={16} />
@@ -1882,6 +1996,7 @@ function RecordPanel({
               onDelete={onDelete}
               canDelete={
                 connected &&
+                !readOnly &&
                 (state.inspector.isAdmin ||
                   state.inspector.id === photo.createdBy)
               }
@@ -1896,7 +2011,7 @@ function RecordPanel({
           <strong>No photos</strong>
           <button
             className="button secondary"
-            disabled={!connected}
+            disabled={!connected || readOnly}
             onClick={onCamera}
           >
             <Icon name="camera" size={17} />
@@ -1919,6 +2034,9 @@ function RecordPanel({
         onDraft={onDraft}
         onPost={onComment}
         connected={connected}
+        inspector={state.inspector}
+        readOnly={readOnly}
+        onDelete={onDeleteComment}
         config={config}
         backend={backend}
       />
@@ -1932,12 +2050,12 @@ function RecordPanel({
         <div>
           <strong>
             {status === "complete"
-              ? "QA completed"
+              ? "QC completed"
               : target.kind === "terminal"
                 ? "Complete this terminal group"
                 : target.kind === "equipment"
-                  ? "Finish equipment QA"
-                  : "Finish device QA"}
+                  ? "Finish equipment QC"
+                  : "Finish device QC"}
           </strong>
           {status !== "complete" && (!photos.length || !devicesReady) && (
             <p>
@@ -1951,6 +2069,7 @@ function RecordPanel({
           className={`button ${status === "complete" ? "secondary" : "primary"}`}
           disabled={
             !connected ||
+            readOnly ||
             Boolean(busy) ||
             (status !== "complete" && !canComplete)
           }
@@ -1962,7 +2081,7 @@ function RecordPanel({
           {busy === "complete"
             ? "Saving…"
             : status === "complete"
-              ? "Reopen QA"
+              ? "Reopen QC"
               : "Mark complete"}
         </button>
       </div>

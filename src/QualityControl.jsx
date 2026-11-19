@@ -30,12 +30,12 @@ export default function QualityControl({
           <label key={choice} className={`quality-choice ${choice}`}>
             <input
               type="checkbox"
-              aria-label={`${choice === "good" ? "Good" : "Bad"} quality for ${name}`}
+              aria-label={`${choice === "good" ? "Passed" : "Failed"} quality for ${name}`}
               checked={value === choice}
               disabled={disabled || saving}
               onChange={() => choose(choice)}
             />
-            {choice === "good" ? "Good" : "Bad"}
+            {choice === "good" ? "Passed" : "Failed"}
           </label>
         ))}
       </div>

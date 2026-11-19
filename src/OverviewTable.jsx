@@ -17,6 +17,7 @@ export default function OverviewTable({
   onStart,
   onQuality,
   pending = false,
+  readOnly = false,
 }) {
   const [search, setSearch] = useState("");
   const [terminal, setTerminal] = useState("");
@@ -89,7 +90,7 @@ export default function OverviewTable({
           {shown.length} of {targets.length} items
         </span>
         <span>
-          QA Revision {state.project?.revision ?? schedule.project.revision}
+          QC Revision {state.project?.revision ?? schedule.project.revision}
         </span>
       </div>
       <section className="card">
@@ -97,7 +98,7 @@ export default function OverviewTable({
           <table className="overview-table">
             <caption className="sr-only">
               All equipment, devices, and terminal groups with shared documentation,
-              quality, and QA progress
+              quality, and QC progress
             </caption>
             <thead>
               <tr>
@@ -108,7 +109,7 @@ export default function OverviewTable({
                 <th scope="col">Photos</th>
                 <th scope="col">Comments</th>
                 <th scope="col">Quality</th>
-                <th scope="col">QA review</th>
+                <th scope="col">QC review</th>
                 <th scope="col">Action</th>
               </tr>
             </thead>
@@ -189,7 +190,7 @@ export default function OverviewTable({
                       <QualityControl
                         name={item.name}
                         value={connected ? record?.quality : null}
-                        disabled={!connected || pending}
+                        disabled={!connected || readOnly || pending}
                         onChange={(value) => onQuality(item.key, value)}
                       />
                     </td>
@@ -213,14 +214,14 @@ export default function OverviewTable({
                     </td>
                     <td>
                       <button
-                        className={`small-button start-button ${documented ? "" : "green"}`}
+                        className={`small-button start-button ${documented || readOnly ? "" : "green"}`}
                         onClick={() =>
-                          documented
+                          documented || readOnly
                             ? onOpen(item.kind, item.id)
                             : onStart(item.kind, item.id)
                         }
                       >
-                        {documented ? (
+                        {documented || readOnly ? (
                           <>
                             <Icon name="arrow" size={13} />
                             Open record
