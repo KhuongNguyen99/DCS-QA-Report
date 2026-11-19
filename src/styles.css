@@ -415,7 +415,7 @@ main {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
-  flex-shrink: 0;
+  flex-shrink: 1;
   max-width: 100%;
 }
 

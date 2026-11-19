@@ -23,6 +23,19 @@ The QA PDF matches the landscape wiring document's cover, header, and footer, wi
 
 Photos, comments, quality, and completion are shared across signed-in devices. OCR runs locally using the bundled Tesseract English model. Failed saves show an error and retain the capture for retry; a network connection is required to save shared evidence.
 
+## Bulk photo review
+
+Use **Bulk upload photos** on the layout, QA overview, or report screen after selecting a named skid report. Choose all your photos in one file selection, or drop a batch into the dialog. The queue shows one image at a time, including its filename and a zoom control.
+
+1. Review the photo and type its device, terminal, or equipment name. The same inspection catalog is used throughout; typing `B` also selects **Terminal B**. Click a search result or use the arrow keys to choose a match.
+2. If a label can be read, the closest supported match appears as an empty field's **placeholder**. Press **Tab** to fill it in, then **Enter** to save. A placeholder alone is never saved.
+3. **Enter** or **Save & next** uploads the photo to that item's evidence and automatically opens the next photo with a fresh name field. The selected skid stays fixed for the entire queue.
+4. Use **Skip photo** for images you want to handle later. At the end, **Review skipped photos** returns them to the queue; the completion screen distinguishes saved photos from skipped ones.
+
+The name field remains usable while OCR runs, and late OCR results cannot replace a typed or chosen name. Similar tags, suffixes such as `-Y` and `#2`, and ambiguous labels require review. Photos without a readable label can always be assigned manually. JPEG, PNG, WebP, and browser-decodable HEIC/HEIF images are supported, up to 20 MB each. Unsupported or damaged images do not block the rest of a batch.
+
+OCR runs on the device using the existing self-hosted Tesseract worker and English model, without a cloud OCR account or API key. It reads the original image with bounded resolution, uses sparse-label segmentation, and makes one alternate pass when no catalog label is found. Only the current photo is decoded; queued files are processed sequentially, and saved files and previews are released. Shared evidence uses the existing photo compression and upload workflow. Failed saves retain the photo and chosen name for retry; a failed report refresh after a successful upload does not upload the photo twice. Unfinished queues stay in the open dialog, so finish or explicitly discard them before closing the page.
+
 ## Voice comments
 
 The microphone tool records between 5 and 90 seconds. After you review the recording, the private voice function sends it to ElevenLabs Audio Isolation, then Scribe v2. The transcript fills the editable comment draft; it is never posted automatically. Audio is not retained by this app.
@@ -56,7 +69,7 @@ npm run preview
 
 The build copies the OCR worker, WASM cores, and English language data into `public/ocr`. These generated files and `node_modules` are ignored by Git. The relative Vite base works at the repository's GitHub Pages subpath.
 
-Automated tests cover schedule integrity, conservative label matching, shared data calls, quality, completion prerequisites, photo handling, microphone cleanup, voice validation/order, and PDF coverage/pagination. Browser checks additionally exercise real OCR, mobile layout, capture, comments, shared updates, and PDF downloads. Physical phone cameras, noisy field audio, and actual two-inspector use should be checked on site.
+Automated tests cover schedule integrity, conservative label matching, the bulk review queue and keyboard controls, OCR cancellation and cleanup, shared data calls, quality, completion prerequisites, photo handling, microphone cleanup, voice validation/order, and PDF coverage/pagination. Browser checks additionally exercise real OCR, mobile layout, capture, comments, shared updates, and PDF downloads. Physical phone cameras, noisy field audio, and actual two-inspector use should be checked on site.
 
 ## Update the cable schedule
 

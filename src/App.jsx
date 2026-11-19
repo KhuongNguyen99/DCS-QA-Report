@@ -19,6 +19,7 @@ import {
 } from "./inspection.js";
 import { normalizePhoto } from "./photos.js";
 import CameraDialog from "./CameraDialog.jsx";
+import BulkPhotoDialog from "./BulkPhotoDialog.jsx";
 import Icon from "./Icons.jsx";
 import OverviewTable from "./OverviewTable.jsx";
 import CommentPanel from "./CommentPanel.jsx";
@@ -143,6 +144,7 @@ function App() {
   const [drafts, setDrafts] = useState({});
   const [camera, setCamera] = useState(null);
   const [manualEntry, setManualEntry] = useState(false);
+  const [bulkUpload, setBulkUpload] = useState(null);
   const [search, setSearch] = useState("");
   const [filterGroup, setFilterGroup] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
@@ -174,7 +176,7 @@ function App() {
     !state.project?.nameRequired,
   );
   const switchBlocked = Boolean(
-    pending || reporting || camera || record || manualEntry,
+    pending || reporting || camera || record || manualEntry || bulkUpload,
   );
   const reportRevision = state.project?.revision ?? schedule.project.revision;
   const totals = inspectionProgress(schedule.devices, schedule.groups, state, schedule.equipment);
@@ -198,6 +200,7 @@ function App() {
       setState(EMPTY);
       setRecord(null);
       setCamera(null);
+      setBulkUpload(null);
     }
     rememberSkid(config, next);
     return loaded;
@@ -254,6 +257,7 @@ function App() {
     setSession(null);
     setRecord(null);
     setCamera(null);
+    setBulkUpload(null);
     setDrafts({});
     if (!workspaceBackend) {
       setChecking(false);
@@ -283,6 +287,7 @@ function App() {
     ++request.current;
     setState(EMPTY);
     setManualEntry(false);
+    setBulkUpload(null);
     if (signedIn && backend) refresh().catch(() => {});
   }, [backend, signedIn, refresh]);
 
@@ -301,6 +306,7 @@ function App() {
           setState(EMPTY);
           setRecord(null);
           setCamera(null);
+          setBulkUpload(null);
           setDrafts({});
           return;
         }
@@ -353,6 +359,7 @@ function App() {
     setState(EMPTY);
     setRecord(null);
     setCamera(null);
+    setBulkUpload(null);
     setError("");
     setGroup(null);
   }
@@ -388,6 +395,7 @@ function App() {
       setState(EMPTY);
       setRecord(null);
       setCamera(null);
+      setBulkUpload(null);
       setDrafts({});
       setNotice("Signed out. Shared evidence is retained.");
     } catch (e) {
@@ -433,6 +441,32 @@ function App() {
     setCamera(null);
     setRecord(null);
     setManualEntry(true);
+  }
+  function startBulkUpload() {
+    if (!readyToDocument()) return;
+    setCamera(null);
+    setRecord(null);
+    setManualEntry(false);
+    setBulkUpload({ backend, walkdownId: selectedId, skidName: state.project.skidName });
+  }
+  async function saveBulkPhoto(key, photo) {
+    const scope = bulkUpload;
+    if (!scope || activeBackend.current !== scope.backend || selectedIdRef.current !== scope.walkdownId)
+      throw new Error("This skid report is no longer active. Reopen bulk upload for the correct skid.");
+    setPending((count) => count + 1);
+    try {
+      const saved = await scope.backend.addPhoto(key, photo);
+      if (activeBackend.current === scope.backend) {
+        // A failed refresh must not turn a successful save into a retry/duplicate.
+        refresh().catch(() => {
+          if (activeBackend.current === scope.backend)
+            setError("Your photo was saved, but the report could not refresh. Reconnect and refresh to see the latest evidence.");
+        });
+      }
+      return saved;
+    } finally {
+      setPending((count) => count - 1);
+    }
   }
   function startDeviceEvidence(deviceId) {
     const device = schedule.devices.find((item) => item.id === deviceId);
@@ -623,6 +657,12 @@ function App() {
                     Enter device name
                   </button>
                 </>
+              )}
+              {["layout", "devices", "report"].includes(view) && (
+                <button className="button secondary" onClick={startBulkUpload}>
+                  <Icon name="upload" />
+                  Bulk upload photos
+                </button>
               )}
               {view === "report" && (
                 <button
@@ -1236,6 +1276,15 @@ function App() {
             onSelect={startDeviceEvidence}
           />
         </Modal>
+      )}
+      {bulkUpload && connected && (
+        <BulkPhotoDialog
+          key={bulkUpload.walkdownId}
+          targets={TARGETS}
+          skidName={bulkUpload.skidName}
+          onPhoto={saveBulkPhoto}
+          onClose={() => setBulkUpload(null)}
+        />
       )}
       {record && !camera && !manualEntry && (
         <Modal
