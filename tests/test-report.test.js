@@ -208,11 +208,9 @@ test("test PDF rejects drafts, incomplete approval data, wrong skid, and missing
 test("approved test PDF preserves evidence and run context while fitting each graph's time axis", async () => {
   await withFonts(async (requested) => {
     const state = closedState();
-    const legacyNote = "synthetic-log.csv, line 10: duplicate I/O event retained; no observations were removed.";
-    state.testRuns[0].warnings.push(legacyNote);
     const savedState = structuredClone(state);
     const result = await pdfContent(await createTestReportPdf({ state }));
-    assert.deepEqual(state, savedState, "Clarifying a legacy import note must not change approved evidence");
+    assert.deepEqual(state, savedState, "The export leaves approved evidence intact");
     assert.doesNotMatch(result.text, /Overall test run comment|Device comment/, "legacy runs do not invent engineer comments");
     assert.deepEqual(requested.sort(), ["NotoSans-Bold.ttf", "NotoSans-Regular.ttf", "jeevy-logo-black.png"]);
     assert.match(result.pages[0], /450k skid x7 - DCS\nTest Result - Skid Example\nRevision 2/);
@@ -221,14 +219,9 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
       "Siemens PRONETA Basic", "Version entered by tester", "RTD-EXAMPLE", "VALVE-EXAMPLE", "Recorded wiring result: Failed (source: Error)",
       "Recorded wiring result: Passed", "0 (encoded selection)", "Celsius", "7FFFH", "synthetic-log.csv, row 3",
-      "Module diagnostic setting", "Unused-channel setting", "Not applicable", "Synthetic warning retained for review.", "Unrecognized synthetic event"])
+      "Module diagnostic setting", "Unused-channel setting", "Not applicable"])
       assert.ok(result.text.includes(text), `Missing report text: ${text}`);
-    const reportText = result.text.replace(/\s+/g, " ");
-    assert.ok(reportText.includes(legacyNote), "The original archived warning stays in the report");
-    assert.match(reportText, /This does not establish a duplicate physical event; multiple changes can share a timestamp\./);
-    assert.match(reportText, /All observations were retained\./);
-    assert.ok(reportText.indexOf("Earlier import notes use") < reportText.indexOf(legacyNote), "Clarification precedes the original notes");
-    assert.ok(result.text.replace(/\s/g, "").includes("ab".repeat(32)));
+    assert.doesNotMatch(result.text, /Sources and import\s+notes|SHA-256|Synthetic warning retained for review|Unrecognized synthetic event/);
     assert.ok(result.streams.slice(1).every(stream => photoPlacements(stream).length === 0), "charts remain vector shapes");
     assert.match(result.raw, /D:20261120113000\+00'00'/, "PDF metadata uses approval time, not export time");
     assert.doesNotMatch(result.text, /\(source: OK\)/i);
@@ -322,21 +315,19 @@ test("export captures the approved payload before asynchronous font loading", as
   } finally { globalThis.fetch = original; }
 });
 
-test("long selected parameters and notes paginate completely above the footer", async () => {
+test("long selected parameters paginate completely above the footer", async () => {
   await withFonts(async () => {
     const state = closedState();
     const parameters = Array.from({ length: 65 }, (_, index) => ({ name: `Parameter-${index + 1}`, value: `Selected-${index + 1}`, group: "Synthetic group" }));
     const longValue = Array.from({ length: 160 }, (_, index) => `Long-value-piece-${index + 1}`).join(" ");
     parameters.push({ name: "Oversized selected value", value: longValue });
     state.testRuns[0].devices[0].channels[0].parameters = parameters;
-    state.testRuns[0].warnings.push(Array.from({ length: 70 }, (_, index) => `Import-note-line-${index + 1}`).join("\n"));
     const result = await pdfContent(await createTestReportPdf({ state }));
     for (let index = 1; index <= 65; index++) {
       assert.ok(result.text.includes(`Parameter-${index}`));
       assert.ok(result.text.includes(`Selected-${index}`));
     }
     for (let index = 1; index <= 160; index++) assert.ok(result.text.includes(`Long-value-piece-${index}`));
-    for (let index = 1; index <= 70; index++) assert.ok(result.text.includes(`Import-note-line-${index}`));
     assert.ok(result.pages.some((page) => page.includes("(continued)")));
     for (const page of result.blocks) for (const block of page) {
       if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;

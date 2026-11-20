@@ -2,7 +2,6 @@ import { jsPDF } from "jspdf";
 import { revisionNumber } from "./domain.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
 import { buildTestChart, formatSourceTime, isTestTimeRange } from "./test-chart.js";
-import { importNoteClarification } from "./proneta-notes.js";
 
 const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 548 };
 const WIDTH = PAGE.width - PAGE.margin * 2;
@@ -530,31 +529,6 @@ function runAppendices(writer, run) {
         { compact: true });
       }
     }
-  }
-  if (!run.sources?.length && !run.warnings?.length && !run.unparsedEvents?.length) return;
-  writer.page(`${run.name || "Test run"} - Sources and import notes`);
-  writer.table([
-    { label: "File / type", width: 210 }, { label: "Station / bytes", width: 160 },
-    { label: "SHA-256", width: WIDTH - 370 },
-  ], (run.sources || []).map((source) => [
-    `${source.name}\n${source.kind}`, `${stationName(run, source.stationId)}\n${source.size ?? "Unknown"} bytes`,
-    source.sha256 || "Not recorded",
-  ]));
-  if (run.warnings?.length) {
-    writer.heading("Import notes");
-    const clarification = importNoteClarification(run.warnings);
-    if (clarification) writer.paragraph(clarification, { size: 8.5 });
-    run.warnings.forEach((warning) => writer.paragraph(warning, { size: 8.5 }));
-  }
-  if (run.unparsedEvents?.length) {
-    writer.heading("Events retained without a parsed value");
-    writer.table([
-      { label: "Source time / station", width: 155 }, { label: "Description / reason", width: 345 },
-      { label: "Source", width: WIDTH - 500 },
-    ], run.unparsedEvents.map((event) => [
-      `${event.time || "Unknown time"}\n${stationName(run, event.stationId)} | Slot ${event.slot ?? "?"}`,
-      `${event.description || ""}\n${event.reason || "No parsed value"}`, sourceLabel(run, event),
-    ]));
   }
 }
 
