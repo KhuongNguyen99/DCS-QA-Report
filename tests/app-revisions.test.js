@@ -31,10 +31,10 @@ before(async () => {
         window.pdfExports.push(JSON.parse(JSON.stringify(state)));
         return new Blob(['test-pdf'], { type: 'application/pdf' });
       }`,
-    'test-report': `export async function createTestReportPdf({ state, runId, backend }) {
+    'test-report': `export async function createTestReportPdf({ state, runId, backend, timeRanges }) {
       if (state.project.status !== 'closed') throw new Error('Only closed revisions can export.');
       if (typeof backend?.getPhotoUrl !== 'function') throw new Error('Private setup image access must be supplied.');
-      window.testPdfExports.push({ state: JSON.parse(JSON.stringify(state)), runId });
+      window.testPdfExports.push({ state: JSON.parse(JSON.stringify(state)), runId, timeRanges: JSON.parse(JSON.stringify(timeRanges || {})) });
       return new Blob(['test-run-pdf'], { type: 'application/pdf' });
     }`,
     VoiceComment: `export default function VoiceComment({ disabled }) {
@@ -610,4 +610,40 @@ test("App preserves a test draft but blocks saving it after another inspector cl
   await h.click(h.button("Save test run"));
   assert.equal(h.server.calls.at(-1).kind, "saveTestRun");
   assert.equal(h.server.calls.at(-1).revision, 8);
+});
+
+test("App exports the current device view range on approved reports even when browser storage fails", async t => {
+  const h = await setup(t);
+  const start = Date.UTC(2026, 10, 19, 12);
+  const run = { ...testRun(), clock: { basis: 'source-local', timeZone: 'Source clock', startMs: start, endMs: start + 60_000 },
+    devices: [{ id: 'valve', name: 'VALVE', status: 'Passed', channels: [{ id: 'output', symbolicName: 'Output', status: 'Passed', parameters: [],
+      series: [{ id: 'state', name: 'Output state', kind: 'digital', points: [{ timeMs: start + 20_000, value: 1, valid: true }] }] }] }] };
+  h.server.state.testRuns = [run];
+  await h.notify();
+  await h.nav('Report');
+  await h.click(h.button('Approve & close'));
+  await h.click(h.button('Confirm approval & close'));
+  const approved = copy(h.server.state);
+  await h.nav('Test reports');
+  const range = async (from, to) => {
+    await h.fill(h.document.querySelector('input[name="rangeStart"]'), new Date(start + from).toISOString().slice(0, 23));
+    await h.fill(h.document.querySelector('input[name="rangeEnd"]'), new Date(start + to).toISOString().slice(0, 23));
+    await h.click(h.button('Apply time range'));
+  };
+  await range(10_000, 40_000);
+  assert.equal(h.document.querySelector('.test-comment textarea'), null);
+  assert.equal(h.button('Save test run'), undefined);
+  await h.click(h.button('Export test PDF'));
+  assert.deepEqual(copy(h.window.testPdfExports.at(-1).timeRanges), { [run.id]: { valve: { startMs: start + 10_000, endMs: start + 40_000 } } });
+  h.window.Storage.prototype.setItem = () => { throw new Error('Quota exceeded'); };
+  h.window.Storage.prototype.removeItem = () => { throw new Error('Storage blocked'); };
+  await range(20_000, 30_000);
+  assert.match(h.document.querySelector('.test-time-axis').textContent, /could not be saved locally/);
+  await h.click(h.button('Export test PDF'));
+  assert.deepEqual(copy(h.window.testPdfExports.at(-1).timeRanges), { [run.id]: { valve: { startMs: start + 20_000, endMs: start + 30_000 } } });
+  await h.click(h.button('Reset to auto'));
+  await h.click(h.button('Export test PDF'));
+  assert.deepEqual(copy(h.window.testPdfExports.at(-1).timeRanges), {}, 'an in-memory reset overrides a cache entry that could not be cleared');
+  assert.equal(h.server.calls.filter(call => call.kind === 'saveTestRun').length, 0);
+  assert.deepEqual(h.server.state, approved, 'view changes and PDF exports cannot alter approved evidence');
 });

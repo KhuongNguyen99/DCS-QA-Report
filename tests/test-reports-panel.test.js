@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { testCommentDraftScope, testCommentDraftKey } from "../src/test-comment-drafts.js";
+import { testTimeRangeScope, readTestTimeRanges } from "../src/test-time-ranges.js";
 
 let directory;
 let bundle;
@@ -599,4 +600,125 @@ test("malformed and blocked browser storage cannot erase in-memory comments or t
   assert.equal(quota.query('[aria-label="Overall test run comment"] textarea').value, "Quota-safe in memory");
   await quota.click(quota.button("Discard changes"));
   assert.equal(quota.window.dirty.at(-1), false);
+});
+
+const rangeInput = offset => new Date(startMs + offset).toISOString().slice(0, 23);
+async function applyRange(h, start, end) {
+  await h.fill(h.field("Start time"), rangeInput(start));
+  await h.fill(h.field("End time"), rangeInput(end));
+  await h.click(h.button("Apply time range"));
+}
+
+test("one manual device range aligns every graph without changing comments or creating a report edit", async t => {
+  const run = savedRun({ comment: "Keep overall note" });
+  run.devices[0].comment = "Keep device note";
+  const second = structuredClone(run.devices[0]); second.id = "second"; second.name = "SECOND";
+  run.devices.push(second);
+  const [current, feedback] = run.devices[0].channels.map(channel => channel.series[0]);
+  Object.assign(current, { name: "V-3511-POS", kind: "analog", unit: "mA",
+    points: [0, 40_000].map((offset, index) => ({ ...current.points[0], timeMs: startMs + offset, value: index ? 20 : 4 })) });
+  feedback.points = [20_000, 40_000, 80_000].map((offset, index) => ({ ...feedback.points[0], timeMs: startMs + offset, value: index % 2 }));
+  const before = structuredClone(run);
+  const h = await setup(t, { runs: [run] });
+  await applyRange(h, 10_000, 60_000);
+  assert.equal(h.field('Start time').valueAsNumber, startMs + 10_000);
+  assert.equal(h.field('End time').valueAsNumber, startMs + 60_000);
+  const plots = h.document.querySelectorAll('svg[data-time-start]');
+  assert.equal(plots.length, 2);
+  for (const plot of plots) {
+    assert.equal(plot.dataset.timeStart, String(startMs + 10_000));
+    assert.equal(plot.dataset.timeEnd, String(startMs + 60_000));
+  }
+  assert.equal(plots[0].querySelector('circle').getAttribute('cx'), plots[1].querySelectorAll('circle')[1].getAttribute('cx'));
+  assert.match(h.text(), /1 of 2 recorded change values shown/);
+  assert.match(h.text(), /2 of 3 recorded change values shown/);
+  assert.equal(h.query('.test-import-form'), null);
+  assert.equal(h.window.calls.length, 0);
+  assert.equal(h.window.dirty.at(-1), false);
+  assert.deepEqual(run, before);
+  await h.click(h.button('SECONDPassed'));
+  assert.notEqual(h.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
+  await h.click(h.button('VALVE-EXAMPLEPassed'));
+  assert.equal(h.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
+  const stored = h.stored();
+  await h.unmount();
+  const reopened = await setup(t, { runs: [run] }, { stored });
+  assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
+  assert.equal(reopened.field('Start time').valueAsNumber, startMs + 10_000, 'source-clock coordinates are not shifted by the browser timezone');
+  await applyRange(reopened, 70_000, 60_000);
+  assert.match(reopened.text(), /Choose a start before the end/);
+  assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
+  await reopened.click(reopened.button('Reset to auto'));
+  assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs));
+  assert.deepEqual(reopened.stored(), {});
+  assert.equal(reopened.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea').value, before.devices[0].comment);
+});
+
+test("manual time ranges and pending comment drafts recover independently", async t => {
+  const run = savedRun();
+  const h = await setup(t, { runs: [run] });
+  await h.fill(h.query('[aria-label="Overall test run comment"] textarea'), 'Pending overall review');
+  await h.fill(h.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea'), 'Pending device review');
+  const comments = h.stored();
+  await applyRange(h, 10_000, 60_000);
+  const stored = h.stored();
+  assert.equal(Object.keys(stored).length, 2);
+  for (const [key, value] of Object.entries(comments)) assert.equal(stored[key], value);
+  await h.unmount();
+  const reopened = await setup(t, { runs: [run] }, { stored });
+  assert.equal(reopened.query('[aria-label="Overall test run comment"] textarea').value, 'Pending overall review');
+  assert.equal(reopened.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea').value, 'Pending device review');
+  assert.equal(reopened.query('svg[data-time-start]').dataset.timeEnd, String(startMs + 60_000));
+  await reopened.click(reopened.button('Reset to auto'));
+  assert.deepEqual(reopened.stored(), comments, 'resetting the view cannot discard pending report comments');
+  assert.equal(reopened.window.dirty.at(-1), true);
+  assert.equal(reopened.window.calls.length, 0);
+});
+
+test("time ranges remain local and available on approved reports with identity and revision isolation", async t => {
+  const run = savedRun();
+  const h = await setup(t, { runs: [run], readOnly: true, project: { ...project, status: 'closed' } });
+  assert.equal(h.query('.test-comment textarea'), null);
+  await applyRange(h, 10_000, 60_000);
+  assert.equal(h.window.calls.length, 0);
+  const stored = h.stored();
+  for (const props of [
+    { storageScope: 'https://other.supabase.co' },
+    { inspector: { id: 'other-inspector', isAdmin: true } },
+    { project: { ...project, walkdownId: 'other-skid' } },
+    { project: { ...project, revision: 5 } },
+    { runs: [{ ...run, id: 'other-run' }] },
+  ]) {
+    const isolated = await setup(t, { runs: [run], ...props }, { stored });
+    assert.notEqual(isolated.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
+    assert.deepEqual(isolated.stored(), stored);
+  }
+  const scope = testTimeRangeScope('https://example.supabase.co', 'inspector-1', project.walkdownId, project.revision);
+  const originalStorage = globalThis.localStorage;
+  globalThis.localStorage = { getItem: key => stored[key] || null };
+  try {
+    assert.deepEqual(readTestTimeRanges(scope, [run]), { [run.id]: { valve: { startMs: startMs + 10_000, endMs: startMs + 60_000 } } });
+  } finally {
+    if (originalStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = originalStorage;
+  }
+});
+
+test("invalid or blocked time-range storage leaves graphs usable and source evidence unchanged", async t => {
+  const run = savedRun();
+  const h = await setup(t, { runs: [run] });
+  await applyRange(h, 10_000, 60_000);
+  const stored = h.stored(), key = Object.keys(stored)[0];
+  const malformed = await setup(t, { runs: [run] }, { stored: { [key]: '{invalid' } });
+  assert.match(malformed.text(), /saved time range could not be read/);
+  assert.equal(malformed.query('svg[data-time-start]').dataset.timeStart, String(startMs));
+  const stale = await setup(t, { runs: [{ ...run, clock: { ...run.clock, startMs: startMs + 80_000, endMs: startMs + 90_000 },
+    devices: [{ ...run.devices[0], channels: [] }] }] }, { stored });
+  assert.match(stale.text(), /saved time range no longer matches this run/);
+  const blocked = await setup(t, { runs: [run] }, { storageBlocked: true });
+  await applyRange(blocked, 10_000, 60_000);
+  assert.match(blocked.text(), /could not be saved locally/);
+  assert.equal(blocked.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
+  assert.equal(blocked.window.calls.length, 0);
+  await blocked.click(blocked.button('Reset to auto'));
+  assert.equal(blocked.query('svg[data-time-start]').dataset.timeStart, String(startMs));
 });

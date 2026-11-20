@@ -3,8 +3,9 @@ import Icon from "./Icons.jsx";
 import TestSetupPhotos from "./TestSetupPhotos.jsx";
 import { parsePronetaFiles } from "./proneta-parser.js";
 import { importNoteClarification } from "./proneta-notes.js";
-import { buildTestChart, formatSourceTime, formatTestValue } from "./test-chart.js";
+import { buildTestChart, isTestTimeRange, formatSourceTime, formatTestValue } from "./test-chart.js";
 import { testCommentDraftScope, readTestCommentDrafts, writeTestCommentDraft, removeTestCommentDraft } from "./test-comment-drafts.js";
+import { testTimeRangeScope, readDeviceTimeRange, saveDeviceTimeRange, resetDeviceTimeRange } from "./test-time-ranges.js";
 import "./test-reports.css";
 
 const statusClass = (status) => status === "Passed" ? "passed" : status === "Failed" ? "failed" : "untested";
@@ -30,9 +31,44 @@ function TestComment({ title, label = title, value, onChange, disabled }) {
   </section>;
 }
 
-export function TestSeriesChart({ series, clock }) {
+function DeviceTimeAxis({ clock, timeRange, onChange, warning }) {
+  const inputTime = value => {
+    const date = new Date(value);
+    return Number.isFinite(value) && Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 23) : "";
+  };
+  const [start, setStart] = useState(() => inputTime(timeRange?.startMs ?? clock?.startMs));
+  const [end, setEnd] = useState(() => inputTime(timeRange?.endMs ?? clock?.endMs));
+  const [error, setError] = useState("");
+  if (!Number.isFinite(clock?.startMs) || !Number.isFinite(clock?.endMs) || clock.endMs <= clock.startMs) return null;
+  return <form className="test-time-axis" aria-label="Device time axis" onSubmit={event => {
+    event.preventDefault();
+    const range = { startMs: event.currentTarget.elements.rangeStart.valueAsNumber,
+      endMs: event.currentTarget.elements.rangeEnd.valueAsNumber };
+    if (!isTestTimeRange(range, clock)) {
+      setError("Choose a start before the end, within the recorded run time span."); return;
+    }
+    setStart(inputTime(range.startMs)); setEnd(inputTime(range.endMs)); setError(""); onChange(range);
+  }}>
+    <div className="test-time-axis-heading"><strong>Device time axis</strong><span>{timeRange ? "Manual" : "Automatic"}</span></div>
+    <div className="test-time-axis-fields">
+      <label>Start time<input name="rangeStart" type="datetime-local" step="0.001" required
+        min={inputTime(clock.startMs)} max={inputTime(clock.endMs)} value={start} onChange={event => setStart(event.target.value)} /></label>
+      <label>End time<input name="rangeEnd" type="datetime-local" step="0.001" required
+        min={inputTime(clock.startMs)} max={inputTime(clock.endMs)} value={end} onChange={event => setEnd(event.target.value)} /></label>
+      <button className="small-button" type="submit">Apply time range</button>
+      <button className="small-button" type="button" onClick={() => {
+        setStart(inputTime(clock.startMs)); setEnd(inputTime(clock.endMs)); setError(""); onChange(null);
+      }}>Reset to auto</button>
+    </div>
+    <p>Applies to all graphs for this device and its PDF. Times use {clock.basis === "absolute" ? "UTC" : "the recorded source clock"}.</p>
+    {error && <p className="field-error" role="alert">{error}</p>}
+    {warning && <p className="field-error" role="alert">{warning}</p>}
+  </form>;
+}
+
+export function TestSeriesChart({ series, clock, timeRange = null }) {
   let chart;
-  try { chart = buildTestChart(series, clock); }
+  try { chart = buildTestChart(series, clock, { timeRange }); }
   catch (e) { return <p className="field-error">{e.message}</p>; }
   const { plot } = chart;
   const graphClock = { ...clock, startMs: chart.domain.startMs, endMs: chart.domain.endMs };
@@ -67,7 +103,7 @@ export function TestSeriesChart({ series, clock }) {
             </path>)}
         </svg>
       </div>
-      <p>{chart.observedCount} recorded change values{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. The time axis automatically fits this series{clock.basis === "absolute" ? " in UTC" : ""}.</p>
+      <p>{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "The time axis automatically fits this series."}{clock.basis === "absolute" && " Times are UTC."}</p>
       <details className="test-events"><summary>View recorded events ({series.points.length})</summary>
         <div className="test-table-scroll"><table>
           <thead><tr><th>Source time</th><th>Previous</th><th>Recorded value</th><th>Source row</th></tr></thead>
@@ -100,12 +136,26 @@ function Parameters({ parameters = [], title = "Set parameters" }) {
   </details>;
 }
 
-export function TestRunDetail({ run, onCommentChange, commentsDisabled = false }) {
+export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDisabled = false,
+  timeRangeScope = null, rangeOverrides = {}, onTimeRangeChange }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
+  const [localRanges, setLocalRanges] = useState({});
   const devices = run.devices || [];
   const shown = useMemo(() => devices.filter(device => `${device.name} ${device.status}`.toLowerCase().includes(search.toLowerCase())), [devices, search]);
   const device = shown.find(item => item.id === selected) || shown[0];
+  const viewKey = JSON.stringify([timeRangeScope, runId, device?.id, run.clock?.startMs, run.clock?.endMs]);
+  const storedRange = useMemo(() => readDeviceTimeRange(timeRangeScope, runId, device?.id, run.clock),
+    [timeRangeScope, runId, device?.id, run.clock?.startMs, run.clock?.endMs]);
+  const override = rangeOverrides[device?.id];
+  const chosenRange = localRanges[viewKey] || (Object.hasOwn(rangeOverrides, device?.id)
+    && (override === null || isTestTimeRange(override, run.clock)) ? { range: override, error: "" } : storedRange);
+  function changeTimeRange(range) {
+    const error = range ? saveDeviceTimeRange(timeRangeScope, runId, device.id, run.clock, range)
+      : resetDeviceTimeRange(timeRangeScope, runId, device.id);
+    setLocalRanges(previous => ({ ...previous, [viewKey]: { range, error } }));
+    onTimeRangeChange?.(timeRangeScope, runId, device.id, range);
+  }
   const counts = devices.reduce((result, item) => ({ ...result, [item.status]: (result[item.status] || 0) + 1 }), {});
   const noteClarification = importNoteClarification(run.warnings);
   return <div className="test-run-detail">
@@ -134,6 +184,8 @@ export function TestRunDetail({ run, onCommentChange, commentsDisabled = false }
       <section className="test-device-content" aria-label="Device test results">
         {device ? <>
           <div className="test-device-heading"><h3>{device.name}</h3><TestStatus status={device.status} /></div>
+          <DeviceTimeAxis key={viewKey} clock={run.clock} timeRange={chosenRange.range}
+            onChange={changeTimeRange} warning={chosenRange.error} />
           {(device.channels || []).map(channel => {
             const station = run.stations?.find(item => item.id === channel.stationId);
             const module = station?.modules?.find(item => item.slot === channel.slot);
@@ -145,7 +197,7 @@ export function TestRunDetail({ run, onCommentChange, commentsDisabled = false }
               <p className="test-source-result">Recorded wiring status: <strong>{channel.rawStatus || "Not recorded"}</strong>{channel.comment ? ` · ${channel.comment}` : ""}</p>
               {!channel.series?.some(series => series.points?.length) && <p className="test-muted">No signal changes were recorded for this channel in the supplied logs.</p>}
               {(channel.series || []).filter(series => series.points?.length).map((series, index) =>
-                <TestSeriesChart key={series.id || index} series={series} clock={run.clock} />)}
+                <TestSeriesChart key={series.id || index} series={series} clock={run.clock} timeRange={chosenRange.range} />)}
               <Parameters parameters={channel.parameters} />
               {module?.parameters?.length > 0 && <Parameters parameters={module.parameters} title="Shared module parameters" />}
             </section>;
@@ -184,7 +236,8 @@ export default function TestReportsPanel(props) {
 function ScopedTestReportsPanel({
   project, runs = [], inspector, readOnly = false, pending = false, exportProgress = "",
   onSave, onDelete, onExport, onReview, onDirtyChange,
-  getPhotoUrl, onAddSetupPhoto, onUpdateSetupPhoto, onRemoveSetupPhoto, cacheScope,
+  getPhotoUrl, onAddSetupPhoto, onUpdateSetupPhoto, onRemoveSetupPhoto, cacheScope, storageScope,
+  timeRangeChanges = {}, onTimeRangeChange,
 }) {
   function recover(records) {
     const cached = records.find(item => item.revision === project.revision) || records[0];
@@ -337,6 +390,8 @@ function ScopedTestReportsPanel({
       comment: Object.hasOwn(draft.deviceComments, device.id) ? draft.deviceComments[device.id] : device.comment ?? "" })),
     clock: { ...draft.data.clock, timeZone: draft.timeZone } } : null) : selectedRun;
   const canComment = draft ? !readOnly && !stale : selectedRun && canEdit(selectedRun);
+  const rangeScope = testTimeRangeScope(storageScope, inspector?.id, draft?.walkdownId || project.walkdownId, draft?.revision || project.revision);
+  const previewRunId = preview?.id || draft?.id;
   return <section className="test-reports" aria-label="I/O test reports">
     <div className="card test-intro">
       <div><span className="eyebrow">SOFTWARE TEST EVIDENCE</span><h2>I/O test reports</h2>
@@ -403,7 +458,8 @@ function ScopedTestReportsPanel({
       onRemovePhoto={onRemoveSetupPhoto} onDirtyChange={setSetupDirty} />}
     {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${project.revision}`}</span></header>
       <TestRunDetail key={preview.id || draft?.id} run={preview} onCommentChange={canComment ? changeComment : undefined}
-        commentsDisabled={blocked || setupDirty} /></section>}
+        commentsDisabled={blocked || setupDirty} runId={previewRunId} timeRangeScope={rangeScope}
+        rangeOverrides={timeRangeChanges[rangeScope]?.[previewRunId]} onTimeRangeChange={onTimeRangeChange} /></section>}
     {!preview && !draft && <div className="card test-empty"><Icon name="report" size={36} /><h3>No test runs in this revision</h3><p>{readOnly ? "Start a new revision to import a test run." : "Import the files for your test, review the devices and parameters, then save the run."}</p></div>}
   </section>;
 }

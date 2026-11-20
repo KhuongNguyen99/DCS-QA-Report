@@ -1,6 +1,6 @@
 import { jsPDF } from "jspdf";
 import { approvedReportDate, fitImageInBox, printableText } from "./report.js";
-import { buildTestChart, formatSourceTime } from "./test-chart.js";
+import { buildTestChart, formatSourceTime, isTestTimeRange } from "./test-chart.js";
 import { importNoteClarification } from "./proneta-notes.js";
 
 const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 548 };
@@ -23,6 +23,11 @@ function reportComment(writer, label, value) {
   if (!value?.trim()) return;
   writer.heading(label, 10);
   writer.paragraph(value);
+}
+
+function isTimeRangeMap(value) {
+  return value !== null && typeof value === "object"
+    && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 }
 
 function validateSetupPhotos(run, project) {
@@ -266,13 +271,19 @@ function reportWriter(doc) {
     }
     y += 12;
   }
-  function chart(series, clock) {
+  function chart(series, clock, timeRange) {
     const geometry = buildTestChart(series, clock, {
       width: WIDTH, height: 201, padding: { left: 57, right: 25, top: 20, bottom: 45 },
+      timeRange,
     });
     const title = `${series.name || "Recorded values"} - ${geometry.unit}`;
-    const observationNote = `${geometry.observedCount} observed change(s)${geometry.invalidCount ? `; ${geometry.invalidCount} invalid reading(s), marked below the plot when dated` : ""}. ${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the graph end.`;
-    const rangeNote = `Graph span: ${rangeLabel(geometry.domain)}. Shared run span: ${rangeLabel(clock)}. ${clockLabel(clock)}.`;
+    const observationCount = geometry.manualTimeRange
+      ? `${geometry.visibleObservedCount} of ${geometry.observedCount} observed change(s) shown`
+      : `${geometry.observedCount} observed change(s)`;
+    const invalidNote = geometry.invalidCount
+      ? `; ${geometry.invalidCount} invalid reading(s)${geometry.manualTimeRange ? " in source data; dated markers are shown only within this view" : ", marked below the plot when dated"}` : "";
+    const observationNote = `${observationCount}${invalidNote}. ${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the graph end.`;
+    const rangeNote = `${geometry.manualTimeRange ? "Manual view: values outside this time range are not shown. " : ""}Graph span: ${rangeLabel(geometry.domain)}. Shared run span: ${rangeLabel(clock)}. ${clockLabel(clock)}.`;
     const heightFor = (value, size, lineHeight, gap) => {
       textStyle(doc, size);
       return doc.splitTextToSize(printableText(value), WIDTH).length * lineHeight + gap;
@@ -385,7 +396,7 @@ function parameterTable(writer, parameters, { heading = true } = {}) {
   }
 }
 
-function channelDetails(writer, channel, run, { heading = true } = {}) {
+function channelDetails(writer, channel, run, { heading = true, timeRange } = {}) {
   if (heading) writer.heading(channel.symbolicName || channelLabel(channel));
   writer.paragraph(`${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}${channel.role ? ` | ${channel.role}` : ""}`, { color: COLOR.muted });
   const result = resultLabel(channel.status);
@@ -399,7 +410,7 @@ function channelDetails(writer, channel, run, { heading = true } = {}) {
   }
   for (const series of channel.series || []) {
     if (!series.points?.length) continue;
-    writer.chart(series, run.clock);
+    writer.chart(series, run.clock, timeRange);
     const invalid = series.points.filter((point) => point.valid === false || !Number.isFinite(point.value) || !Number.isFinite(point.timeMs)
       || (series.kind === "digital" && point.value !== 0 && point.value !== 1)
       || (point.previousRawValue !== undefined && point.previousRawValue !== "" && point.previousValue === null));
@@ -423,7 +434,7 @@ function runSummary(writer, run) {
   writer.page(run.name || "Test run");
   writer.paragraph(`Software: ${run.software.name} | Version: ${run.software.version}`, { size: 11, bold: true });
   writer.paragraph(`Run time span: ${rangeLabel(run.clock)}`);
-  writer.paragraph(`Clock: ${clockLabel(run.clock)}. Each signal has a separate graph with its own unit scale and fitted time range within this run.`, { color: COLOR.muted });
+  writer.paragraph(`Clock: ${clockLabel(run.clock)}. Each signal has a separate graph with its own unit scale. Time ranges fit the observations unless a manual view is selected for the device.`, { color: COLOR.muted });
   reportComment(writer, "Overall test run comment", run.comment);
   writer.paragraph("Recorded wiring results are the tester's entries in PRONETA. Logged values alone do not establish a functional pass.", { color: COLOR.muted });
   writer.table([
@@ -517,9 +528,9 @@ function drawFooters(doc, project, closedAt) {
 }
 
 /** Export only the supplied closed QC revision. Never reads newer live run data. */
-export async function createTestReportPdf({ state, runId = null, backend, onProgress = () => {} } = {}) {
+export async function createTestReportPdf({ state, runId = null, backend, timeRanges = {}, onProgress = () => {} } = {}) {
   // Capture before the first await, so later UI edits cannot alter an in-flight export.
-  const snapshot = structuredClone({ project: state?.project, testRuns: state?.testRuns });
+  const snapshot = structuredClone({ project: state?.project, testRuns: state?.testRuns, timeRanges });
   const closedAt = approvedReportDate(snapshot);
   const project = snapshot.project;
   if (typeof project.skidName !== "string" || !project.skidName.trim())
@@ -528,6 +539,8 @@ export async function createTestReportPdf({ state, runId = null, backend, onProg
   const runs = runId === null ? snapshot.testRuns : snapshot.testRuns.filter((run) => run.id === runId);
   if (!runs.length) throw new Error("No saved test run was found in this closed revision.");
   if (runId !== null && runs.length !== 1) throw new Error("The closed revision contains duplicate test run identifiers.");
+  if (!isTimeRangeMap(snapshot.timeRanges)) throw new Error("Manual graph time ranges must be grouped by test run and device.");
+  const deviceTimeRanges = new Map();
   for (const run of runs) {
     if (run.walkdownId && run.walkdownId !== project.walkdownId)
       throw new Error("The test report contains data from another skid.");
@@ -539,7 +552,18 @@ export async function createTestReportPdf({ state, runId = null, backend, onProg
     validateReportComment(run.comment, "overall test run comment");
     for (const device of run.devices) validateReportComment(device.comment, "device comment");
     validateSetupPhotos(run, project);
-    for (const channel of [...run.devices.flatMap((device) => device.channels), ...(run.unassignedChannels || [])])
+    const ranges = Object.hasOwn(snapshot.timeRanges, run.id) ? snapshot.timeRanges[run.id] : {};
+    if (!isTimeRangeMap(ranges)) throw new Error("Manual graph time ranges must be grouped by test run and device.");
+    for (const device of run.devices) {
+      const timeRange = Object.hasOwn(ranges, device.id) ? ranges[device.id] : undefined;
+      if (Object.hasOwn(ranges, device.id) && !isTestTimeRange(timeRange, run.clock))
+        throw new Error(`The manual graph time range for "${device.name}" is invalid. Select a start before the end within this test run.`);
+      deviceTimeRanges.set(device, timeRange);
+      for (const channel of device.channels)
+        for (const series of channel.series || [])
+          if (series.points?.length) buildTestChart(series, run.clock, { timeRange });
+    }
+    for (const channel of run.unassignedChannels || [])
       for (const series of channel.series || [])
         if (series.points?.length) buildTestChart(series, run.clock);
   }
@@ -572,7 +596,7 @@ export async function createTestReportPdf({ state, runId = null, backend, onProg
     { label: "Test run", width: 260 }, { label: "Software / version", width: 290 },
     { label: "Named devices", width: WIDTH - 550 },
   ], runs.map((run) => [run.name || "Test run", `${run.software.name}\n${run.software.version}`, run.devices.length]));
-  writer.paragraph("Results, parameter selections, and logged changes are grouped by device name. Each signal has a separate graph with its own unit scale and fitted time range. The comment for each device applies to all of its graphs. Passed and Failed refer to the tester-recorded wiring result; a plotted value does not create a pass result.", { color: COLOR.muted });
+  writer.paragraph("Results, parameter selections, and logged changes are grouped by device name. Each signal has a separate graph with its own unit scale. Time ranges fit the observations unless a manual view is selected for the device. The comment for each device applies to all of its graphs. Passed and Failed refer to the tester-recorded wiring result; a plotted value does not create a pass result.", { color: COLOR.muted });
   for (const run of runs) {
     onProgress(`Building ${run.name || "test run"}...`);
     runSummary(writer, run);
@@ -584,6 +608,7 @@ export async function createTestReportPdf({ state, runId = null, backend, onProg
       reportComment(writer, "Device comment", device.comment);
       for (const channel of device.channels) channelDetails(writer, channel, run, {
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,
+        timeRange: deviceTimeRanges.get(device),
       });
     }
     runAppendices(writer, run);

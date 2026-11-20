@@ -26,6 +26,7 @@ import CommentPanel from "./CommentPanel.jsx";
 import QualityControl from "./QualityControl.jsx";
 import RevisionPanel from "./RevisionPanel.jsx";
 import TestReportsPanel from "./TestReportsPanel.jsx";
+import { testTimeRangeScope, readTestTimeRanges } from "./test-time-ranges.js";
 
 const EMPTY = { records: [], photos: [], comments: [], testRuns: [], inspector: null };
 const TARGETS = inspectionTargets(schedule);
@@ -147,6 +148,12 @@ function App() {
   const [record, setRecord] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [testDraftDirty, setTestDraftDirty] = useState(false);
+  const [timeRangeChanges, setTimeRangeChanges] = useState({});
+  const changeTimeRange = useCallback((scope, runId, deviceId, range) => {
+    if (!scope || !runId) return;
+    setTimeRangeChanges(previous => ({ ...previous, [scope]: { ...previous[scope],
+      [runId]: { ...previous[scope]?.[runId], [deviceId]: range } } }));
+  }, []);
   const [camera, setCamera] = useState(null);
   const [manualEntry, setManualEntry] = useState(false);
   const [bulkUpload, setBulkUpload] = useState(null);
@@ -565,9 +572,11 @@ function App() {
       const snapshot = await backend.loadRevision(revision);
       const { createInspectionPdf, approvedReportDate } = await import("./report.js");
       const generatedAt = approvedReportDate(snapshot);
+      const rangeScope = testTimeRangeScope(config.url, inspector?.id, snapshot.project.walkdownId, snapshot.project.revision);
       const blob = kind === "tests"
         ? await (await import("./test-report.js")).createTestReportPdf({
           state: snapshot, runId, backend, onProgress: setReporting,
+          timeRanges: readTestTimeRanges(rangeScope, snapshot.testRuns || [], timeRangeChanges[rangeScope]),
         })
         : await createInspectionPdf({
           schedule, state: snapshot, backend, onProgress: setReporting,
@@ -1245,6 +1254,8 @@ function App() {
               runs={state.testRuns || []}
               inspector={inspector}
               storageScope={config.url}
+              timeRangeChanges={timeRangeChanges}
+              onTimeRangeChange={changeTimeRange}
               readOnly={!editable}
               pending={pending > 0 || Boolean(reporting)}
               exportProgress={reporting}

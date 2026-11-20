@@ -16,21 +16,31 @@ export function formatTestValue(value) {
   return Number(value.toPrecision(7)).toString();
 }
 
+export function isTestTimeRange(range, clock) {
+  return Boolean(range && typeof range === "object" && !Array.isArray(range)
+    && Number.isSafeInteger(range.startMs) && Number.isSafeInteger(range.endMs)
+    && Number.isFinite(clock?.startMs) && Number.isFinite(clock?.endMs)
+    && range.startMs < range.endMs && range.startMs >= clock.startMs && range.endMs <= clock.endMs);
+}
+
 /**
  * Geometry shared by the SVG preview and vector PDF chart. The run-wide clock
- * validates timestamps; each graph fits its own dated observations. Dots stay
+ * validates timestamps; each graph fits its observations unless a time range is selected. Dots stay
  * tied to observed after-values. Connections and the held value are display-only
  * geometry, so no synthetic readings enter the saved evidence or event count.
  */
 export function buildTestChart(series, clock, {
   width = 700, height = 220,
   padding = { left: 62, right: 22, top: 20, bottom: 48 },
-  tickCount = 5,
+  tickCount = 5, timeRange = null,
 } = {}) {
   const runStartMs = clock?.startMs;
   const runEndMs = clock?.endMs;
   if (!Number.isFinite(runStartMs) || !Number.isFinite(runEndMs) || runEndMs < runStartMs)
     throw new Error("A valid shared test-run time span is required for the graph.");
+  const manualTimeRange = timeRange !== null;
+  if (manualTimeRange && !isTestTimeRange(timeRange, clock))
+    throw new Error("Choose an increasing whole-millisecond time range within the test run.");
   if (!Array.isArray(series?.points)) throw new Error("The graph series has no observation list.");
   let firstMs = Infinity, lastMs = -Infinity;
   for (const point of series.points) {
@@ -41,7 +51,9 @@ export function buildTestChart(series, clock, {
     lastMs = Math.max(lastMs, point.timeMs);
   }
   let startMs = runStartMs, endMs = runEndMs;
-  if (firstMs !== Infinity) {
+  if (manualTimeRange) {
+    startMs = timeRange.startMs; endMs = timeRange.endMs;
+  } else if (firstMs !== Infinity) {
     const margin = Math.max((lastMs - firstMs) * 0.04, 1000);
     startMs = Math.max(runStartMs, firstMs - margin);
     endMs = Math.min(runEndMs, lastMs + margin);
@@ -99,11 +111,27 @@ export function buildTestChart(series, clock, {
     min = 0; max = 1;
   }
   const yFor = (value) => top + (max - value) / (max - min) * plot.height;
-  const points = valid.map((point) => ({ ...point, y: yFor(point.value) }));
+  const visible = point => !manualTimeRange || (point.timeMs >= startMs && point.timeMs <= endMs);
+  const points = valid.filter(visible).map((point) => ({ ...point, y: yFor(point.value) }));
   const connections = [];
   const coordinate = (point) => ({ x: point.x, y: yFor(point.value) });
+  const segment = (from, to) => {
+    if (manualTimeRange) {
+      const rightEdge = plot.left + plot.width;
+      if (to.x < plot.left || from.x > rightEdge) return null;
+      if (from.x !== to.x) {
+        const yAt = x => from.y + (to.y - from.y) * ((x - from.x) / (to.x - from.x));
+        const startX = Math.max(plot.left, from.x), endX = Math.min(rightEdge, to.x);
+        const clippedFrom = { x: startX, y: startX === from.x ? from.y : yAt(startX) };
+        const clippedTo = { x: endX, y: endX === to.x ? to.y : yAt(endX) };
+        from = clippedFrom; to = clippedTo;
+      }
+    }
+    return from.x !== to.x || from.y !== to.y ? { from, to } : null;
+  };
   const connect = (from, to) => {
-    if (from.x !== to.x || from.y !== to.y) connections.push({ from, to });
+    const clipped = segment(from, to);
+    if (clipped) connections.push(clipped);
   };
   let previous = null;
   for (const point of sequence) {
@@ -120,7 +148,7 @@ export function buildTestChart(series, clock, {
     previous = point;
   }
   const extension = previous && previous.timeMs < endMs
-    ? { from: coordinate(previous), to: { x: plot.left + plot.width, y: yFor(previous.value) } }
+    ? segment(coordinate(previous), { x: plot.left + plot.width, y: yFor(previous.value) })
     : null;
   const count = Math.max(2, Math.min(9, Math.floor(tickCount) || 5, Math.floor((endMs - startMs) / 1000) + 1));
   const milliseconds = endMs > startMs && (endMs - startMs) / (count - 1) < 1000;
@@ -140,8 +168,10 @@ export function buildTestChart(series, clock, {
     })),
     yTicks: yValues.map((value) => ({ value, y: yFor(value), label: formatTestValue(value) })),
     points, connections, extension,
-    invalidPoints: invalid,
+    invalidPoints: invalid.filter(point => point.x === null || visible(point)),
     observedCount: valid.length,
+    visibleObservedCount: points.length,
     invalidCount: invalid.length,
+    manualTimeRange,
   };
 }

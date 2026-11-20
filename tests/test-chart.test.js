@@ -1,10 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildTestChart, formatSourceTime, formatTestValue } from "../src/test-chart.js";
+import { buildTestChart, formatSourceTime, formatTestValue, isTestTimeRange } from "../src/test-chart.js";
 
 const startMs = Date.UTC(2026, 10, 19, 19, 17);
 const clock = { startMs, endMs: startMs + 392_000 };
 const point = (offset, value, extra = {}) => ({ timeMs: startMs + offset, value, valid: true, ...extra });
+const timeRange = (start, end) => ({ startMs: startMs + start, endMs: startMs + end });
+const yFor = (chart, value) => chart.plot.top + (chart.domain.max - value) / (chart.domain.max - chart.domain.min) * chart.plot.height;
+const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-8, `${actual} is close to ${expected}`);
+
+function assertBounded(chart) {
+  const coordinates = [...chart.points, ...chart.invalidPoints.filter(point => point.x !== null),
+    ...chart.connections.flatMap(line => [line.from, line.to]), ...(chart.extension ? [chart.extension.from, chart.extension.to] : [])];
+  for (const point of coordinates) {
+    assert.ok(point.x >= chart.plot.left, `${point.x} is inside the left edge`);
+    assert.ok(point.x <= chart.plot.left + chart.plot.width, `${point.x} is inside the right edge`);
+  }
+}
 
 test("positioner and pressure current graphs default to 0–25 mA and Celsius to 20–30", () => {
   for (const name of ["V-3511-POS", "V-3511_POS", "PD-3511", "DP-3511", " pd-3511 "]) {
@@ -229,4 +241,153 @@ test("wall-clock display is timezone-independent and incomplete or out-of-range 
   const empty = buildTestChart({ points: [point(0, null, { valid: false }), { value: 1 }] }, clock);
   assert.equal(empty.observedCount, 0);
   assert.equal(empty.invalidCount, 2);
+});
+
+test("a shared manual range aligns analog and digital timestamps while preserving source counts and Y scale", () => {
+  const range = timeRange(5000, 15000);
+  const analogSeries = { kind: "analog", unit: "°C", points: [point(0, 33), point(10000, 25), point(20000, 21)] };
+  const digitalSeries = { kind: "digital", points: [point(5000, 0), point(10000, 1), point(30000, 0)] };
+  const original = structuredClone({ analogSeries, digitalSeries, range, clock });
+  const analog = buildTestChart(analogSeries, clock, { timeRange: range });
+  const digital = buildTestChart(digitalSeries, clock, { timeRange: range });
+  assert.equal(analog.manualTimeRange, true);
+  assert.deepEqual(analog.xTicks, digital.xTicks);
+  assert.equal(analog.domain.startMs, range.startMs);
+  assert.equal(analog.domain.endMs, range.endMs);
+  assert.equal(analog.points[0].x, digital.points[1].x);
+  assert.equal(analog.points[0].x, analog.plot.left + analog.plot.width / 2);
+  assert.equal(analog.observedCount, 3);
+  assert.equal(digital.observedCount, 3);
+  assert.equal(analog.visibleObservedCount, 1);
+  assert.equal(digital.visibleObservedCount, 2);
+  const automatic = buildTestChart(analogSeries, clock);
+  assert.equal(analog.domain.min, automatic.domain.min);
+  assert.equal(analog.domain.max, automatic.domain.max);
+  assert.ok(analog.domain.max > 33, "a hidden valid reading still expands the standard temperature frame");
+  assertBounded(analog); assertBounded(digital);
+  assert.deepEqual({ analogSeries, digitalSeries, range, clock }, original);
+});
+
+test("manual analog windows interpolate both crossing edges without inventing observation dots", () => {
+  const chart = buildTestChart({ kind: "analog", points: [point(0, 0), point(20000, 20)] }, clock,
+    { timeRange: timeRange(5000, 15000) });
+  assert.deepEqual(chart.points, []);
+  assert.equal(chart.visibleObservedCount, 0);
+  assert.equal(chart.observedCount, 2);
+  assert.equal(chart.connections.length, 1);
+  assert.equal(chart.connections[0].from.x, chart.plot.left);
+  assert.equal(chart.connections[0].to.x, chart.plot.left + chart.plot.width);
+  close(chart.connections[0].from.y, yFor(chart, 5));
+  close(chart.connections[0].to.y, yFor(chart, 15));
+  assert.equal(chart.extension, null);
+  assertBounded(chart);
+  const instantChange = buildTestChart({ kind: "analog", points: [point(5000, 4), point(5000, 10), point(20000, 7)] }, clock,
+    { timeRange: timeRange(5000, 10000) });
+  assert.equal(instantChange.points.length, 2);
+  assert.equal(instantChange.connections[0].from.x, instantChange.plot.left);
+  assert.equal(instantChange.connections[0].to.x, instantChange.plot.left);
+  assert.notEqual(instantChange.connections[0].from.y, instantChange.connections[0].to.y);
+  assertBounded(instantChange);
+});
+
+test("manual digital windows carry in the prior state and retain equal-time edge transitions as steps", () => {
+  const series = { kind: "digital", points: [point(0, 0), point(10000, 1), point(10000, 0), point(20000, 1)] };
+  const right = buildTestChart(series, clock, { timeRange: timeRange(5000, 10000) });
+  const leftX = right.plot.left, rightX = leftX + right.plot.width;
+  const low = yFor(right, 0), high = yFor(right, 1);
+  assert.deepEqual(right.connections, [
+    { from: { x: leftX, y: low }, to: { x: rightX, y: low } },
+    { from: { x: rightX, y: low }, to: { x: rightX, y: high } },
+    { from: { x: rightX, y: high }, to: { x: rightX, y: low } },
+  ]);
+  assert.deepEqual(right.points.map(point => point.x), [rightX, rightX]);
+  const left = buildTestChart(series, clock, { timeRange: timeRange(10000, 15000) });
+  assert.deepEqual(left.connections, [
+    { from: { x: leftX, y: low }, to: { x: leftX, y: high } },
+    { from: { x: leftX, y: high }, to: { x: leftX, y: low } },
+    { from: { x: leftX, y: low }, to: { x: rightX, y: low } },
+  ]);
+  const between = buildTestChart(series, clock, { timeRange: timeRange(11000, 15000) });
+  assert.deepEqual(between.points, []);
+  assert.deepEqual(between.connections, [{ from: { x: leftX, y: low }, to: { x: rightX, y: low } }]);
+  for (const chart of [right, left, between]) {
+    assert.equal(chart.observedCount, 4);
+    assert.ok(chart.connections.every(({ from, to }) => from.x === to.x || from.y === to.y));
+    assertBounded(chart);
+  }
+});
+
+test("manual views preserve invalid gaps and unknown-time breaks even beyond the visible window", () => {
+  const chart = buildTestChart({ kind: "analog", points: [
+    point(0, 4), point(5000, null, { valid: false }), point(10000, 8),
+    point(15000, null, { valid: false }), point(20000, 10), point(25000, null, { valid: false }), { value: 7 },
+  ] }, clock, { timeRange: timeRange(8000, 18000) });
+  assert.equal(chart.observedCount, 3);
+  assert.equal(chart.visibleObservedCount, 1);
+  assert.equal(chart.invalidCount, 4);
+  assert.deepEqual(chart.invalidPoints.map(point => point.timeMs), [startMs + 15000, undefined]);
+  assert.equal(chart.invalidPoints[1].x, null);
+  assert.deepEqual(chart.connections, []);
+  assert.equal(chart.extension, null);
+  assertBounded(chart);
+  const unknown = buildTestChart({ points: [point(0, 4), { value: 7 }, point(20000, 8), point(30000, 10)] }, clock,
+    { timeRange: timeRange(5000, 15000) });
+  assert.deepEqual(unknown.connections, [], "an undated break cannot be removed to connect across the window");
+  assert.equal(unknown.invalidCount, 1);
+  assert.equal(unknown.invalidPoints[0].x, null);
+  for (const final of [point(3000, null, { valid: false }), { value: 8 }]) {
+    const stopped = buildTestChart({ points: [point(2000, 5), final] }, clock, { timeRange: timeRange(4000, 8000) });
+    assert.equal(stopped.extension, null, "an invalid final event prevents a carry-in tail");
+  }
+});
+
+test("manual views before first data stay empty and views after final data contain only a bounded held tail", () => {
+  for (const kind of ["analog", "digital"]) {
+    const series = { kind, points: [point(10000, 0), point(20000, 1)] };
+    const before = buildTestChart(series, clock, { timeRange: timeRange(0, 5000) });
+    assert.deepEqual(before.points, []);
+    assert.deepEqual(before.connections, []);
+    assert.equal(before.extension, null);
+    const after = buildTestChart(series, clock, { timeRange: timeRange(30000, 392000) });
+    assert.deepEqual(after.points, []);
+    assert.deepEqual(after.connections, []);
+    assert.deepEqual(after.extension, {
+      from: { x: after.plot.left, y: yFor(after, 1) },
+      to: { x: after.plot.left + after.plot.width, y: yFor(after, 1) },
+    });
+    assert.equal(after.domain.endMs, clock.endMs);
+    assertBounded(after);
+    const empty = buildTestChart({ kind, points: [] }, clock, { timeRange: timeRange(5000, 10000) });
+    assert.deepEqual(empty.points, []);
+    assert.deepEqual(empty.connections, []);
+    assert.equal(empty.extension, null);
+    assert.equal(empty.visibleObservedCount, 0);
+  }
+});
+
+test("manual range validation rejects unsafe windows without weakening validation of hidden source evidence", () => {
+  const series = { points: [point(10000, 4), point(20000, 5)] };
+  const valid = timeRange(5000, 15000);
+  assert.equal(isTestTimeRange(valid, clock), true);
+  assert.equal(isTestTimeRange(clock, clock), true);
+  for (const range of [undefined, null, [], true, {}, { startMs }, timeRange(15000, 5000), timeRange(5000, 5000),
+    timeRange(-1, 5000), timeRange(5000, 392001), timeRange(5000.5, 10000),
+    { ...valid, startMs: String(valid.startMs) }, { ...valid, endMs: Infinity }, { ...valid, startMs: NaN }]) {
+    assert.equal(isTestTimeRange(range, clock), false);
+    if (range != null) assert.throws(() => buildTestChart(series, clock, { timeRange: range }), /time range within/);
+  }
+  assert.equal(isTestTimeRange(valid, {}), false);
+  assert.equal(isTestTimeRange(valid, { startMs, endMs: startMs }), false);
+  assert.throws(() => buildTestChart(series, { startMs, endMs: startMs }, { timeRange: valid }), /time range within/);
+  for (const bad of [point(-1, 4), point(393000, null, { valid: false })])
+    assert.throws(() => buildTestChart({ points: [bad] }, clock, { timeRange: valid }), /outside/);
+  assert.throws(() => buildTestChart({ points: [point(30000, 4), point(20000, 5)] }, clock,
+    { timeRange: valid }), /ordered by time/);
+  const invalidHidden = buildTestChart({ kind: "digital", points: [point(0, 3), point(10000, 1)] }, clock, { timeRange: valid });
+  assert.equal(invalidHidden.invalidCount, 1);
+  assert.deepEqual(invalidHidden.invalidPoints, []);
+  const automatic = buildTestChart(series, clock);
+  assert.deepEqual(buildTestChart(series, clock, { timeRange: null }), automatic);
+  assert.equal(automatic.manualTimeRange, false);
+  assert.equal(automatic.visibleObservedCount, automatic.observedCount);
 });

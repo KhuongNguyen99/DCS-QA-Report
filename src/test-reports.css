@@ -89,6 +89,12 @@
 .test-channel-heading p,
 .test-channel-heading small { color: #6c796e; font-size: 11px; }
 .test-channel-heading > div { min-width: 0; }
+.test-time-axis { margin: 16px 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; }
+.test-time-axis-heading { display: flex; gap: 12px; align-items: center; font-size: 13px; }
+.test-time-axis-heading span { color: var(--muted); font-size: 11px; }
+.test-time-axis-fields { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; margin: 12px 0 8px; }
+.test-time-axis-fields label { flex: 1 1 210px; min-width: 0; }
+.test-time-axis p { font-size: 11px; }
 .test-source-result { font-size: 12px; margin: 10px 0; color: #5e6c62; white-space: pre-wrap; overflow-wrap: anywhere; }
 .test-chart { margin: 18px 0; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
 .test-chart figcaption { display: flex; gap: 12px; justify-content: space-between; padding: 12px 14px 3px; font-size: 12px; }

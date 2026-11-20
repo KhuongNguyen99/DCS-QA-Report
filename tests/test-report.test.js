@@ -679,3 +679,130 @@ test("long run and device comments paginate completely above the footer through 
     assert.deepEqual(state, saved);
   });
 });
+
+test("manual device ranges apply to every separate channel graph and preserve hidden source evidence", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const device = run.devices[0];
+    const point = (offset, value) => ({ timeMs: startMs + offset, value, valid: true, sourceId: "source-log", sourceRow: 22 });
+    device.channels.push({ ...structuredClone(run.devices[1].channels[0]), id: "manual-channel", symbolicName: "Manual command", series: [
+      { id: "manual-digital", name: "Manual command", kind: "digital", unit: "", points: [point(50_000, 0), point(150_000, 1), point(250_000, 0)] },
+      { id: "manual-current", name: "V-900-POS", kind: "analog", unit: "mA", points: [point(0, 0), point(100_000, 10), point(200_000, 20), point(300_000, 25)] },
+    ] });
+    run.comment = "Overall review stays saved";
+    device.comment = "Device review stays saved";
+    const timeRanges = { [run.id]: { [device.id]: { startMs: startMs + 100_000, endMs: startMs + 200_000 } } };
+    const originalState = structuredClone(state), originalRanges = structuredClone(timeRanges);
+    const result = await pdfContent(await createTestReportPdf({ state, timeRanges }));
+    const titles = ["Temperature - degC", "Manual command - State", "V-900-POS - mA"];
+    const pages = titles.map(title => {
+      const page = result.pages.findIndex(text => text.includes(title) && text.includes("Graph span:"));
+      assert.ok(page >= 0, `Missing graph ${title}`);
+      return page;
+    });
+    assert.equal(result.text.match(/Manual view:/g)?.length, 3);
+    const expectedSpan = "2026-11-19 19:18:40 to 2026-11-19 19:20:20";
+    for (const page of pages) {
+      const text = result.pages[page].replace(/\s+/g, " ");
+      assert.ok(text.includes(`Graph span: ${expectedSpan}`));
+      assert.match(text, /Manual view: values outside this time range are not shown/);
+    }
+    assert.match(result.pages[pages[0]], /0 of 2 observed change\(s\) shown/);
+    assert.match(result.pages[pages[1]], /1 of 3 observed change\(s\) shown/);
+    assert.match(result.pages[pages[2]], /2 of 4 observed change\(s\) shown/);
+    assert.match(result.text, /1 invalid reading\(s\) in source data/);
+    assert.match(result.text, /7FFFH/);
+    assert.match(result.text, /synthetic-log.csv, row 3/);
+    const otherPage = result.pages.find(page => page.includes("Output state - State") && page.includes("Graph span:"));
+    assert.ok(otherPage);
+    assert.doesNotMatch(otherPage, /Manual view:/);
+    assert.match(otherPage, /19:21:56/);
+    const isColor = (line, rgb) => line.color.length === 3 && line.color.every((value, index) => Math.abs(value - rgb[index] / 255) < 0.005);
+    const traces = pages.map(page => pdfLines(result.streams[page]).filter(line => isColor(line, [24, 108, 161])));
+    const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
+    assert.equal(traces[0].length, 1, "the last recorded temperature holds through this later view");
+    assert.deepEqual(traces[0][0].dash, [4, 3]);
+    near(traces[0][0].from.x, 100.2); near(traces[0][0].to.x, 723.8);
+    assert.equal(traces[1].length, 3, "digital steps are clipped at both manual view edges");
+    assert.equal(traces[2].length, 1);
+    near(traces[2][0].from.x, 100.2); near(traces[2][0].to.x, 723.8);
+    near(Math.abs(traces[2][0].from.y - traces[2][0].to.y), 136 * 10 / 25, "the full source mA scale stays unchanged");
+    for (const trace of traces.flat()) for (const point of [trace.from, trace.to])
+      assert.ok(point.x >= 100.19 && point.x <= 723.81, "manual chart vectors stay within the plot");
+    assert.equal(result.streams.flatMap(pdfLines).filter(line => isColor(line, [170, 49, 43])).length, 0, "invalid markers outside the view are not plotted");
+    assert.equal(result.text.match(/Device review stays saved/g)?.length, 1);
+    assert.equal(result.text.match(/Overall review stays saved/g)?.length, 1);
+    for (const page of result.blocks) for (const block of page) {
+      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
+    }
+    assert.deepEqual(state, originalState);
+    assert.deepEqual(timeRanges, originalRanges);
+  });
+});
+
+test("manual PDF ranges remain scoped to their run and device and ignore unselected entries", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const archived = runFixture("archived"), newer = runFixture("newer");
+    archived.devices[0].channels[0].series[0].name = "Archived temperature";
+    newer.devices[0].channels[0].series[0].name = "Newer temperature";
+    state.testRuns = [archived, newer];
+    const selectedRanges = { archived: { "device-1": { startMs: startMs + 1000, endMs: startMs + 3000 }, "missing-device": "ignored" }, newer: null };
+    const selected = await pdfContent(await createTestReportPdf({ state, runId: "archived", timeRanges: selectedRanges }));
+    assert.equal(selected.text.match(/Manual view:/g)?.length, 1);
+    assert.doesNotMatch(selected.text, /Newer temperature/);
+    const allRanges = { archived: selectedRanges.archived, "missing-run": { "device-1": "ignored" } };
+    const all = await pdfContent(await createTestReportPdf({ state, timeRanges: allRanges }));
+    assert.equal(all.text.match(/Manual view:/g)?.length, 1, "a device ID shared by another run does not share its view range");
+    const newerPage = all.pages.find(page => page.includes("Newer temperature - degC") && page.includes("Graph span:"));
+    assert.ok(newerPage);
+    assert.doesNotMatch(newerPage, /Manual view:/);
+    assert.match(newerPage, /19:17:04/);
+  });
+});
+
+test("manual PDF range options are captured before asynchronous font loading", async () => {
+  const original = globalThis.fetch;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  globalThis.fetch = async url => { await gate; return new Response(fonts[String(url).split("/").pop()]); };
+  try {
+    const state = closedState();
+    const timeRanges = { "run-1": { "device-1": { startMs: startMs + 1000, endMs: startMs + 3000 } } };
+    const pending = createTestReportPdf({ state, timeRanges });
+    timeRanges["run-1"]["device-1"].startMs = startMs + 100_000;
+    timeRanges["run-1"]["device-1"].endMs = startMs + 200_000;
+    release();
+    const result = await pdfContent(await pending);
+    const graphPage = result.pages.find(page => page.includes("Temperature - degC") && page.includes("Graph span:"));
+    assert.ok(graphPage);
+    assert.match(graphPage.replace(/\s+/g, " "), /Graph span: 2026-11-19 19:17:01 to 2026-11-19 19:17:03/);
+    assert.match(graphPage, /1 of 2 observed change\(s\) shown/);
+    assert.equal(state.testRuns[0].timeRanges, undefined, "view options never become approved test-run data");
+  } finally { release(); globalThis.fetch = original; }
+});
+
+test("invalid selected PDF time ranges fail before fonts or private photos load", async () => {
+  const original = globalThis.fetch;
+  let fetched = false, accessed = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error("No assets expected"); };
+  const backend = { getPhotoUrl: async () => { accessed = true; return "/private/setup.png"; } };
+  try {
+    const state = closedState();
+    state.testRuns[0].setupPhotos = [setupPhoto("range")];
+    const invalid = [null, undefined, [], "range", {},
+      { startMs, endMs: startMs }, { startMs: startMs + 2000, endMs: startMs + 1000 },
+      { startMs: startMs - 1, endMs: startMs + 1000 }, { startMs, endMs: CLOCK.endMs + 1 },
+      { startMs: startMs + 0.5, endMs: startMs + 1000 }, { startMs, endMs: startMs + 1000.5 },
+      { startMs: NaN, endMs: startMs + 1000 }, { startMs, endMs: Infinity },
+      { startMs: String(startMs), endMs: startMs + 1000 }];
+    for (const range of invalid)
+      await assert.rejects(createTestReportPdf({ state, backend, timeRanges: { "run-1": { "device-1": range } } }), /manual graph time range.*invalid/);
+    for (const timeRanges of [null, [], "ranges", { "run-1": null }, { "run-1": [] }, { "run-1": "ranges" }])
+      await assert.rejects(createTestReportPdf({ state, backend, timeRanges }), /grouped by test run and device/);
+    assert.equal(fetched, false);
+    assert.equal(accessed, false);
+  } finally { globalThis.fetch = original; }
+});
