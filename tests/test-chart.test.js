@@ -1,95 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildTestChart, buildDeviceTestChart, formatSourceTime, formatTestValue } from "../src/test-chart.js";
+import { buildTestChart, formatSourceTime, formatTestValue } from "../src/test-chart.js";
 
 const startMs = Date.UTC(2026, 10, 19, 19, 17);
 const clock = { startMs, endMs: startMs + 392_000 };
 const point = (offset, value, extra = {}) => ({ timeMs: startMs + offset, value, valid: true, ...extra });
-
-test("a device combines channels with shared time positions and separate unit scales", () => {
-  const device = { name: "V-3511", channels: [
-    { id: "current", series: [{ name: "V-3511-POS", kind: "analog", unit: "mA", points: [point(10_000, 4), point(20_000, 20)] }] },
-    { id: "command", series: [{ name: "V-3511-OPEN", kind: "digital", points: [point(15_000, 0), point(20_000, 1)] }] },
-    { id: "temperature", series: [{ name: "Temperature", kind: "analog", unit: "°C", points: [point(15_000, 21), point(20_000, 29)] }] },
-  ] };
-  const original = structuredClone(device);
-  const chart = buildDeviceTestChart(device, clock);
-  assert.equal(chart.traces.length, 3);
-  assert.equal(chart.observedCount, 6);
-  assert.deepEqual(chart.axes.map(axis => [axis.unit, axis.min, axis.max]), [["mA", 0, 25], ["°C", 20, 30], ["State", 0, 1]]);
-  assert.ok(chart.domain.startMs > clock.startMs && chart.domain.endMs < clock.endMs);
-  assert.equal(new Set(chart.traces.map(trace => trace.points.at(-1).x)).size, 1, "matching timestamps align across signals");
-  assert.equal(new Set(chart.traces.map(trace => trace.color)).size, 3);
-  assert.ok(chart.traces.every(trace => trace.connections.length > 0));
-  assert.ok(chart.traces.every(trace => trace.extension.to.x === chart.plot.left + chart.plot.width));
-  assert.deepEqual(device, original, "combining graphs never rewrites saved evidence");
-});
-
-test("same-unit traces share one expanded scale and duplicate legends identify channel provenance", () => {
-  const device = { channels: [0, 1].map(channel => ({
-    id: `input-${channel}`, stationId: "station-a", slot: 2, channel,
-    series: [{ name: "PD-3511", kind: "analog", unit: "mA", points: [point(0, 10), point(1000, channel ? 28 : 20)] }],
-  })) };
-  const chart = buildDeviceTestChart(device, clock, { stations: [{ id: "station-a", name: "RIO A" }] });
-  assert.equal(chart.axes.length, 1);
-  assert.ok(chart.axes[0].max > 28);
-  assert.equal(chart.axes[0].min, 0);
-  assert.equal(chart.traces[0].points[0].y, chart.traces[1].points[0].y);
-  assert.notEqual(chart.traces[0].label, chart.traces[1].label);
-  assert.match(chart.traces[0].label, /RIO A, slot 2, channel 0/);
-  assert.match(chart.traces[1].label, /RIO A, slot 2, channel 1/);
-});
-
-test("combining signals retains invalid gaps without connecting independent channels", () => {
-  const device = { channels: [
-    { id: "valid", series: [{ name: "DP-3511", kind: "analog", unit: "mA", points: [point(10_000, 4), point(20_000, 8)] }] },
-    { id: "broken", series: [{ name: "Feedback", kind: "digital", points: [point(15_000, 1), point(30_000, null, { valid: false })] }] },
-    { id: "unknown", series: [{ name: "Unknown", points: [{ value: 7 }] }] },
-  ] };
-  const chart = buildDeviceTestChart(device, clock);
-  assert.equal(chart.traces[0].connections.length, 1);
-  assert.deepEqual(chart.traces[1].connections, []);
-  assert.equal(chart.traces[1].extension, null);
-  assert.equal(chart.traces[1].invalidPoints.length, 1);
-  assert.equal(chart.traces[2].invalidPoints[0].x, null);
-  assert.ok(chart.domain.startMs > clock.startMs && chart.domain.endMs < startMs + 32_000, "undated values do not stretch the time axis");
-  assert.equal(chart.invalidCount, 2);
-  assert.equal(buildDeviceTestChart({ channels: [{ series: [] }] }, clock), null);
-});
-
-test("a shared unit keeps its default frame until an actual valid reading exceeds it", () => {
-  const device = { channels: [{ series: [
-    { name: "Other current", unit: "mA", points: [point(0, 0), point(1000, 25)] },
-    { name: "PD-3511", unit: "mA", points: [point(0, 4)] },
-    { name: "Invalid current", unit: "mA", points: [point(0, 32767, { valid: false })] },
-  ] }] };
-  const chart = buildDeviceTestChart(device, clock);
-  assert.equal(chart.axes.length, 1);
-  assert.equal(chart.axes[0].min, 0);
-  assert.equal(chart.axes[0].max, 25);
-  device.channels[0].series[0].points.push(point(2000, 28));
-  const expanded = buildDeviceTestChart(device, clock);
-  assert.equal(expanded.axes[0].min, 0);
-  assert.ok(expanded.axes[0].max > 28 && expanded.axes[0].max < 31);
-});
-
-test("shared scales cannot hide observations and later signal colors also have line patterns", () => {
-  const series = { points: [point(1000, 4), point(2000, 20)] };
-  assert.throws(() => buildTestChart(series, clock, { sharedDomain: { startMs, endMs: startMs + 1500, min: 0, max: 25 } }), /every dated observation/);
-  assert.throws(() => buildTestChart(series, clock, { sharedDomain: { ...clock, min: 0, max: 10 } }), /every valid observation/);
-  const chart = buildDeviceTestChart({ channels: [{ series: Array.from({ length: 9 }, (_, index) => ({ ...series, name: `Signal ${index}` })) }] }, clock);
-  assert.equal(chart.traces[0].color, chart.traces[8].color);
-  assert.notDeepEqual(chart.traces[0].dash, chart.traces[8].dash);
-});
-
-test("case-sensitive unit prefixes retain independent axes and original legend units", () => {
-  const chart = buildDeviceTestChart({ channels: [{ series: ["mPa", "MPa"].map(unit => ({
-    name: "Pressure", unit, points: [point(0, 5)],
-  })) }] }, clock);
-  assert.deepEqual(chart.axes.map(axis => axis.unit), ["mPa", "MPa"]);
-  assert.deepEqual(chart.traces.map(trace => trace.label), ["Pressure (mPa)", "Pressure (MPa)"]);
-  assert.notEqual(chart.traces[0].axisId, chart.traces[1].axisId);
-});
 
 test("positioner and pressure current graphs default to 0–25 mA and Celsius to 20–30", () => {
   for (const name of ["V-3511-POS", "V-3511_POS", "PD-3511", "DP-3511", " pd-3511 "]) {

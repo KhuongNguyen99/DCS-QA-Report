@@ -146,7 +146,7 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false } = {}
   return h;
 }
 
-test("multi-file preview leaves the software version blank and combines the device signals before an explicit save", async t => {
+test("multi-file preview leaves the software version blank and shows separate signal graphs before an explicit save", async t => {
   const h = await setup(t);
   await h.click(h.button("Import test run"));
   assert.equal(h.field("Software version").value, "");
@@ -163,13 +163,14 @@ test("multi-file preview leaves the software version blank and combines the devi
   assert.equal(h.window.calls.length, 0);
   assert.match(h.text(), /Encoded selection/i);
   const charts = [...h.document.querySelectorAll("svg[data-time-start]")];
-  assert.equal(charts.length, 1);
+  assert.equal(charts.length, 2);
   assert.equal(charts[0].dataset.timeStart, String(startMs));
-  assert.equal(charts[0].dataset.timeEnd, String(startMs + 392_000));
-  assert.equal(charts[0].querySelectorAll("circle.test-observation").length, 2, "no invented endpoints");
-  assert.equal(charts[0].querySelectorAll(".test-signal").length, 2);
-  assert.equal(charts[0].querySelectorAll(".test-held-value").length, 1, "an early final reading extends to the common device graph end");
-  assert.equal(h.document.querySelectorAll('.test-chart-legend li').length, 2);
+  assert.equal(charts[0].dataset.timeEnd, String(startMs + 1000));
+  assert.equal(charts[1].dataset.timeStart, String(startMs + 391_000));
+  assert.equal(charts[1].dataset.timeEnd, String(startMs + 392_000));
+  assert.ok(charts.every(chart => chart.querySelectorAll("circle.test-observation").length === 1), "no invented endpoints");
+  assert.equal(charts[0].querySelectorAll(".test-held-value").length, 1, "the final reading extends only to its own fitted graph end");
+  assert.equal(h.document.querySelectorAll('.test-device-content .test-comment').length, 1);
   await h.click(h.button("Save test run"));
   assert.equal(h.window.calls.length, 0);
   assert.match(h.text(), /software version before saving/);
@@ -293,7 +294,7 @@ test("closed read-only runs remain reviewable and exportable with absolute graph
   assert.match(h.text(), /UTC/);
   assert.match(h.text(), /does not establish a duplicate physical event/);
   assert.equal(h.query(".test-import-notes li").textContent, legacyNote);
-  assert.equal(h.document.querySelectorAll("svg[data-time-start]").length, 1);
+  assert.equal(h.document.querySelectorAll("svg[data-time-start]").length, 2);
   await h.click(h.button("Export test PDF"));
   assert.deepEqual(Array.from(h.window.exports), ["run-1"]);
   assert.equal(h.window.calls.length, 0);
@@ -311,12 +312,11 @@ test("SVG graphs connect observations and draw a separate horizontal final-value
   ];
   const h = await setup(t, { runs: [run] });
   const chart = h.query("svg[data-time-start]");
-  assert.equal(chart.querySelectorAll(".test-signal").length, 2);
-  assert.equal(chart.querySelectorAll("circle.test-observation").length, 3);
-  const signal = chart.querySelector(".test-signal");
-  const dots = signal.querySelectorAll("circle.test-observation");
-  const trace = signal.querySelector(".test-trace");
-  const tail = signal.querySelector(".test-held-value");
+  assert.equal(h.document.querySelectorAll("svg[data-time-start]").length, 2);
+  assert.equal(h.document.querySelectorAll("circle.test-observation").length, 3);
+  const dots = chart.querySelectorAll("circle.test-observation");
+  const trace = chart.querySelector(".test-trace");
+  const tail = chart.querySelector(".test-held-value");
   assert.equal(dots.length, 2);
   assert.equal(trace.getAttribute("x1"), dots[0].getAttribute("cx"));
   assert.equal(trace.getAttribute("y1"), dots[0].getAttribute("cy"));
@@ -325,35 +325,32 @@ test("SVG graphs connect observations and draw a separate horizontal final-value
   assert.equal(tail.getAttribute("x1"), dots[1].getAttribute("cx"));
   assert.equal(tail.getAttribute("y1"), tail.getAttribute("y2"));
   assert.ok(Number(tail.getAttribute("x2")) > Number(tail.getAttribute("x1")));
-  assert.match(h.text(), /Dashed tails hold final values to the graph end/);
+  assert.match(h.text(), /the dashed tail holds the last value to the graph end/);
   assert.equal(series.points.length, 2);
 });
 
-test("a device shows one mixed-unit plot with matching legend colors and aligned signal times", async t => {
+test("a device shows separate mixed-unit graphs with individual scales and one shared device comment", async t => {
   const run = savedRun();
   const [current, feedback] = run.devices[0].channels.map(channel => channel.series[0]);
   Object.assign(current, { name: "V-3511-POS", kind: "analog", unit: "mA" });
   current.points[0].value = 20;
   current.points[0].rawValue = "20 mA";
-  feedback.points[0].timeMs = current.points[0].timeMs;
+  run.devices[0].comment = "One comment for the entire device";
+  run.devices[0].channels[0].series.push({ id: "empty", name: "Empty sensor", kind: "analog", unit: "°C", points: [] });
   const before = structuredClone(run);
   const h = await setup(t, { runs: [run] });
   const plots = h.document.querySelectorAll("svg[data-time-start]");
-  assert.equal(plots.length, 1);
-  const axes = plots[0].querySelectorAll(".test-value-axis");
-  assert.deepEqual(Array.from(axes, axis => axis.dataset.unit), ["mA", "State"]);
-  assert.deepEqual(Array.from(axes[0].querySelectorAll("text"), label => label.textContent), ["mA", "0", "6.25", "12.5", "18.75", "25"]);
-  const signals = plots[0].querySelectorAll(".test-signal");
-  const legend = h.document.querySelectorAll(".test-chart-legend li");
-  assert.equal(legend.length, 2);
-  assert.equal(signals[0].querySelector("circle").getAttribute("cx"), signals[1].querySelector("circle").getAttribute("cx"));
-  for (let index = 0; index < signals.length; index++) {
-    assert.equal(legend[index].textContent, signals[index].dataset.signal);
-    assert.equal(legend[index].querySelector("line").getAttribute("stroke"), signals[index].style.getPropertyValue("--test-trace-color"));
-  }
-  assert.notEqual(legend[0].querySelector("line").getAttribute("stroke"), legend[1].querySelector("line").getAttribute("stroke"));
+  assert.equal(plots.length, 2, "each populated signal gets its own graph; empty series add none");
+  assert.deepEqual(Array.from(h.document.querySelectorAll('.test-chart figcaption span'), label => label.textContent), ["mA", "State"]);
+  assert.deepEqual(Array.from(plots[0].querySelectorAll("text"), label => label.textContent).slice(0, 5), ["0", "6.25", "12.5", "18.75", "25"]);
+  assert.deepEqual(Array.from(plots[1].querySelectorAll("text"), label => label.textContent).slice(0, 2), ["0", "1"]);
+  assert.ok(Number(plots[0].dataset.timeEnd) < Number(plots[1].dataset.timeStart), "each graph fits only its own signal's observations");
+  const comments = h.document.querySelectorAll('.test-device-content .test-comment');
+  assert.equal(comments.length, 1);
+  assert.equal(comments[0].querySelector('textarea').value, "One comment for the entire device");
+  assert.equal(h.document.querySelectorAll('[aria-label="Overall test run comment"]').length, 1);
   assert.equal(h.window.calls.length, 0);
-  assert.deepEqual(run, before, "displaying combined graphs preserves saved evidence");
+  assert.deepEqual(run, before, "splitting the graphs preserves saved evidence and comments");
 });
 
 test("run and device comments start a pending edit, retain failed saves, and preserve imported evidence", async t => {

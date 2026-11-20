@@ -145,23 +145,6 @@ function pdfLines(stream) {
   return result;
 }
 
-function pdfFilledRects(stream) {
-  let color = [], rectangles = [];
-  const result = [];
-  for (const line of stream.split(/\r?\n/)) {
-    const tokens = line.trim().split(/\s+/);
-    const operator = tokens.at(-1);
-    if (operator === "rg" && tokens.length === 4) color = tokens.slice(0, 3).map(Number);
-    else if (operator === "re" && tokens.length === 5)
-      rectangles.push({ x: +tokens[0], y: 612 - Number(tokens[1]), width: +tokens[2], height: Math.abs(Number(tokens[3])) });
-    else if (["f", "F", "f*"].includes(operator)) {
-      result.push(...rectangles.map(rectangle => ({ ...rectangle, color: [...color] })));
-      rectangles = [];
-    } else if (["S", "n"].includes(operator)) rectangles = [];
-  }
-  return result;
-}
-
 async function withFonts(callback) {
   const original = globalThis.fetch;
   const requested = [];
@@ -533,7 +516,7 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
   });
 });
 
-test("PDF combines all device channels with matching legends and independent unit scales", async () => {
+test("PDF separates mixed-unit and same-unit signals within a device while printing its comment once", async () => {
   await withFonts(async () => {
     const state = closedState();
     const run = state.testRuns[0];
@@ -542,12 +525,14 @@ test("PDF combines all device channels with matching legends and independent uni
       rawValue: String(value), previousValue: 0, previousRawValue: "0", sourceId: "source-log", sourceRow: 21, ...extra,
     });
     const channel = (id, series) => ({
-      id, symbolicName: "Combined device", stationId: "station-1", slot: 3, sourceChannel: `Channel ${id}`,
+      id, symbolicName: "Valve device", stationId: "station-1", slot: 3, sourceChannel: `Channel ${id}`,
       status: "Not tested", parameters: [], series,
     });
-    run.devices = [{ id: "combined", name: "Combined device", status: "Not tested", channels: [
+    run.comment = "Overall run engineering note";
+    run.devices = [{ id: "valve", name: "Valve device", status: "Not tested", comment: "Engineering note covering every valve graph", channels: [
       channel(1, [{ id: "position", name: "VLV-900-POS", kind: "analog", unit: "mA", points: [point(0, 0), point(100_000, 25)] },
-        { id: "pressure", name: "PD-900", kind: "analog", unit: "mA", points: [point(50_000, 0), point(150_000, 25)] }]),
+        { id: "pressure", name: "PD-900", kind: "analog", unit: "mA", points: [point(50_000, 0), point(150_000, 25)] },
+        { id: "empty", name: "Empty signal", kind: "analog", unit: "mA", points: [] }]),
       channel(2, [{ id: "state", name: "Valve output", kind: "digital", unit: "", points: [point(25_000, 1), point(125_000, 0)] }]),
       channel(3, [{ id: "temperature", name: "Temperature evidence", kind: "analog", unit: "°C", points: [
         point(100_000, 20), point(200_000, 30), point(210_000, null, { rawValue: "BAD-TEMP", sourceRow: 47 }), point(220_000, 24),
@@ -556,79 +541,47 @@ test("PDF combines all device channels with matching legends and independent uni
     run.unassignedChannels = [];
     const saved = structuredClone(state);
     const result = await pdfContent(await createTestReportPdf({ state }));
-    assert.deepEqual(state, saved, "combining plots must not rewrite approved observations");
-    assert.equal(result.text.match(/Graph span:/g)?.length, 1, "one device has exactly one graph");
-    assert.equal(result.text.match(/Recorded values - shared time axis/g)?.length, 1);
-    assert.equal(result.text.match(/\nLegend\n/g)?.length, 1);
-    assert.match(result.text.replace(/\s+/g, " "), /One graph per device shares a time axis/);
+    assert.deepEqual(state, saved, "separate plots must not rewrite approved observations or comments");
+    assert.equal(result.text.match(/Graph span:/g)?.length, 4, "every populated series has its own graph");
+    assert.doesNotMatch(result.text, /Recorded values - shared time axis|\nLegend\n|Empty signal/);
+    assert.match(result.text.replace(/\s+/g, " "), /Each signal has a separate graph/);
+    assert.equal(result.text.match(/\nDevice comment\n/g)?.length, 1);
+    assert.equal(result.text.match(/Engineering note covering every valve graph/g)?.length, 1);
+    assert.equal(result.text.match(/Overall test run comment/g)?.length, 1);
+    assert.equal(result.text.match(/Overall run engineering note/g)?.length, 1);
     assert.match(result.text, /BAD-TEMP/);
     assert.match(result.text, /synthetic-log.csv, row 47/);
     assert.match(result.text, /Original source timestamp/);
-    const graphPage = result.pages.findIndex(page => page.includes("connect recorded changes"));
-    const pageBlocks = result.blocks[graphPage];
-    const axisLabels = pageBlocks.filter(block => ["mA", "degC", "State"].includes(block.text));
-    assert.deepEqual(axisLabels.map(block => block.text).sort(), ["mA", "degC", "State"].sort(), "same-unit traces share one axis");
-    assert.equal(new Set(axisLabels.map(block => block.x)).size, 3, "each unit has a separate vertical axis");
-    const legendSwatches = result.streams.flatMap(pdfFilledRects).filter(rect => rect.height === 5 && rect.width === 19);
-    assert.equal(legendSwatches.length, 4, "every trace has its own legend key");
-    const colorKey = color => color.join(",");
-    assert.equal(new Set(legendSwatches.map(rect => colorKey(rect.color))).size, 4);
-    const allLines = pdfLines(result.streams[graphPage]);
-    const traces = legendSwatches.map(rect => allLines.filter(line => colorKey(line.color) === colorKey(rect.color)));
-    assert.deepEqual(traces.map(lines => lines.length), [2, 2, 3, 2], "all traces and held tails share the plot; invalid temperatures break their trace");
+    const titles = ["VLV-900-POS - mA", "PD-900 - mA", "Valve output - State", "Temperature evidence - degC"];
+    const graphPages = titles.map(title => {
+      const page = result.pages.findIndex(text => text.includes(title));
+      assert.ok(page >= 0, `Missing separate graph: ${title}`);
+      assert.match(result.pages[page], /Valve device/);
+      return page;
+    });
+    assert.equal(new Set(graphPages).size, 4, "each complete plot is laid out separately");
+    const spans = graphPages.map(page => result.pages[page].match(/Graph span:([\s\S]*?)Shared run span:/)?.[1].replace(/\s+/g, " ").trim());
+    assert.equal(new Set(spans).size, 4, "every series fits its own observed time window");
+    assert.match(spans[0], /2026-11-19 19:17:00 to 2026-11-19 19:18:44/);
+    assert.match(spans[1], /2026-11-19 19:17:46 to 2026-11-19 19:19:34/);
+    const isBlue = line => line.color.length === 3 && line.color.every((value, index) => Math.abs(value - [24, 108, 161][index] / 255) < 0.005);
+    const traces = graphPages.map(page => pdfLines(result.streams[page]).filter(isBlue));
+    assert.deepEqual(traces.map(lines => lines.length), [2, 2, 3, 2], "individual plots preserve connections, digital steps, held tails, and invalid gaps");
     const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
-    // mA 0..25, degrees Celsius 20..30, and digital 0..1 each fill their own scale.
-    near(traces[0][0].from.y, traces[1][0].from.y);
-    near(traces[0][0].to.y, traces[1][0].to.y);
-    near(traces[0][0].from.y, traces[3][0].from.y);
-    near(traces[0][0].to.y, traces[3][0].to.y);
-    near(traces[2][0].from.y, traces[0][0].to.y);
-    near(traces[2][1].to.y, traces[0][0].from.y);
-    near(traces[0][0].to.x, traces[3][0].from.x);
-    near(traces[1][0].from.x, (traces[0][0].from.x + traces[0][0].to.x) / 2);
-    for (const [index, name] of ["VLV-900-POS", "PD-900", "Valve output", "Temperature evidence"].entries()) {
-      const text = result.blocks.flat().find(block => block.text.includes(name));
-      assert.ok(text && Math.abs(text.y - legendSwatches[index].y - 5.2) < 0.01, `${name} is paired with its colored key`);
-    }
-  });
-});
-
-test("long combined legends retain every trace, identify reused colors by dashes, and paginate above the footer", async () => {
-  await withFonts(async () => {
-    const state = closedState();
-    const run = state.testRuns[0];
-    const device = run.devices[0];
-    run.devices = [device];
-    run.unassignedChannels = [];
-    device.channels[0].parameters = [];
-    device.channels[0].series = Array.from({ length: 36 }, (_, index) => ({
-      id: `legend-${index}`, name: `Legend-trace-${String(index + 1).padStart(2, "0")} ${"Retained source description ".repeat(8)}`,
-      kind: "analog", unit: "mA", points: [
-        { timeMs: startMs, value: index, valid: true }, { timeMs: startMs + 196_000, value: index + 1, valid: true },
-      ],
-    }));
-    const saved = structuredClone(state);
-    const result = await pdfContent(await createTestReportPdf({ state }));
-    assert.equal(result.text.match(/Graph span:/g)?.length, 1);
-    for (let index = 1; index <= 36; index++)
-      assert.equal(result.text.match(new RegExp(`Legend-trace-${String(index).padStart(2, "0")}`, "g"))?.length, 1);
-    const legendPages = result.pages.filter(page => /Legend-trace-/.test(page));
-    assert.ok(legendPages.length > 1, "legend continues onto extra pages");
-    assert.ok(legendPages.some(page => page.includes("(continued)")));
-    const swatches = result.streams.flatMap(pdfFilledRects).filter(rect => rect.height === 5 && rect.width <= 19);
-    assert.ok(swatches.some(rect => rect.width < 19), "cycled trace dashes also appear in the legend keys");
-    assert.ok(result.streams.flatMap(pdfLines).some(line => line.dash.length
-      && line.from.y !== line.to.y), "the graph retains dash identity for cycled colors");
-    for (const rect of swatches) assert.ok(rect.y + rect.height <= 548.1);
+    // Each plot independently covers its full mA, Celsius, or digital frame.
+    for (const index of [0, 1, 3]) near(Math.abs(traces[index][0].from.y - traces[index][0].to.y), 136);
+    near(Math.abs(traces[2][1].from.y - traces[2][1].to.y), 136);
+    near(traces[0][0].from.x, 100.2);
+    near(traces[0][0].to.x, 100.2 + 623.6 / 1.04);
+    near(traces[1][0].from.x, 100.2 + 623.6 / 27);
     for (const page of result.blocks) for (const block of page) {
       if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
     }
-    assert.deepEqual(state, saved);
   });
 });
 
-test("unassigned channels retain their combined graphs and invalid-source details", async () => {
+test("unassigned channels retain separate signal graphs and invalid-source details", async () => {
   await withFonts(async () => {
     const state = closedState();
     const run = state.testRuns[0];
@@ -641,7 +594,7 @@ test("unassigned channels retain their combined graphs and invalid-source detail
     run.unassignedChannels = [channel];
     const saved = structuredClone(state);
     const result = await pdfContent(await createTestReportPdf({ state }));
-    assert.equal(result.text.match(/Graph span:/g)?.length, 1);
+    assert.equal(result.text.match(/Graph span:/g)?.length, 2);
     assert.match(result.text, /Unassigned channels/);
     assert.match(result.text, /Unassigned output/);
     assert.match(result.text, /Temperature/);
