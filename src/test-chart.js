@@ -67,16 +67,22 @@ export function buildTestChart(series, clock, {
   }
   let min;
   let max;
+  const unit = String(series.unit || "").replace(/\s+/g, "").toLowerCase();
+  const signalName = String(series.name || "").replace(/\s+/g, "");
+  const defaultRange = unit === "ma" && /(?:[-_]POS$|^(?:PD|DP)-)/i.test(signalName)
+    ? [0, 25] : unit === "°c" ? [20, 30] : null;
   if (series.kind === "digital") {
     min = 0; max = 1;
-  } else if (valid.length) {
-    min = Infinity; max = -Infinity;
+  } else if (valid.length || defaultRange) {
+    min = defaultRange?.[0] ?? Infinity; max = defaultRange?.[1] ?? -Infinity;
     for (const point of valid) {
       min = Math.min(min, point.value);
       max = Math.max(max, point.value);
     }
     const margin = min === max ? Math.max(Math.abs(min) * 0.05, 0.1) : (max - min) * 0.08;
-    min -= margin; max += margin;
+    // Keep the standard frame unless a valid observation needs more room.
+    if (!defaultRange || min < defaultRange[0]) min -= margin;
+    if (!defaultRange || max > defaultRange[1]) max += margin;
   } else {
     min = 0; max = 1;
   }

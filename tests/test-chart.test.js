@@ -6,6 +6,62 @@ const startMs = Date.UTC(2026, 10, 19, 19, 17);
 const clock = { startMs, endMs: startMs + 392_000 };
 const point = (offset, value, extra = {}) => ({ timeMs: startMs + offset, value, valid: true, ...extra });
 
+test("positioner and pressure current graphs default to 0–25 mA and Celsius to 20–30", () => {
+  for (const name of ["V-3511-POS", "V-3511_POS", "PD-3511", "DP-3511", " pd-3511 "]) {
+    const chart = buildTestChart({ name, kind: "analog", unit: "mA", points: [point(0, 4), point(1000, 20)] }, clock);
+    assert.equal(chart.domain.min, 0, name);
+    assert.equal(chart.domain.max, 25, name);
+    assert.equal(chart.yTicks[0].value, 0);
+    assert.equal(chart.yTicks.at(-1).value, 25);
+  }
+  const temperature = buildTestChart({ kind: "analog", unit: "°C", points: [point(0, 21), point(1000, 29)] }, clock);
+  assert.equal(temperature.domain.min, 20);
+  assert.equal(temperature.domain.max, 30);
+  const voltage = buildTestChart({ name: "PD-3511", kind: "analog", unit: "V", points: [point(0, 4), point(1000, 5)] }, clock);
+  assert.ok(voltage.domain.min > 3 && voltage.domain.max < 6, "other units keep their observed range");
+  const otherCurrent = buildTestChart({ name: "Other signal", kind: "analog", unit: "mA", points: [point(0, 4), point(1000, 5)] }, clock);
+  assert.ok(otherCurrent.domain.min > 3 && otherCurrent.domain.max < 6, "other current devices keep their existing range");
+});
+
+test("standard graph frames expand only where valid readings exceed the defaults", () => {
+  for (const [name, unit, value, expectedMin, expectedMax] of [
+    ["V-3511-POS", "mA", 27, 0, 25], ["PD-3511", "mA", -2, 0, 25],
+    ["TH-3511", "°C", 33, 20, 30], ["TH-3511", "°C", 18, 20, 30],
+  ]) {
+    const chart = buildTestChart({ name, kind: "analog", unit, points: [point(0, value)] }, clock);
+    if (value > expectedMax) {
+      assert.equal(chart.domain.min, expectedMin);
+      assert.ok(chart.domain.max > value);
+    } else {
+      assert.ok(chart.domain.min < value);
+      assert.equal(chart.domain.max, expectedMax);
+    }
+    assert.ok(chart.points[0].y > chart.plot.top);
+    assert.ok(chart.points[0].y < chart.plot.top + chart.plot.height);
+  }
+  const boundaries = buildTestChart({ name: "DP-3511", kind: "analog", unit: "mA", points: [point(0, 0), point(1000, 25)] }, clock);
+  assert.equal(boundaries.domain.min, 0);
+  assert.equal(boundaries.domain.max, 25);
+});
+
+test("default axes exclude invalid readings, handle empty series and preserve saved evidence", () => {
+  for (const [name, unit, min, max] of [["DP-3511", "mA", 0, 25], ["TH-3511", "°C", 20, 30]]) {
+    const series = { name, kind: "analog", unit, points: [point(0, 32767, { valid: false })] };
+    const original = structuredClone(series);
+    const chart = buildTestChart(series, clock);
+    assert.equal(chart.domain.min, min);
+    assert.equal(chart.domain.max, max);
+    assert.equal(chart.invalidCount, 1);
+    assert.deepEqual(series, original);
+    const empty = buildTestChart({ ...series, points: [] }, clock);
+    assert.equal(empty.domain.min, min);
+    assert.equal(empty.domain.max, max);
+  }
+  const digital = buildTestChart({ name: "PD-3511", kind: "digital", unit: "mA", points: [point(0, 1)] }, clock);
+  assert.equal(digital.domain.min, 0);
+  assert.equal(digital.domain.max, 1);
+});
+
 test("different channel coverage retains identical shared time ticks and graph bounds", () => {
   const early = buildTestChart({ kind: "analog", unit: "mA", points: [point(0, 4), point(40_000, 20)] }, clock);
   const late = buildTestChart({ kind: "analog", unit: "°C", points: [point(310_000, 19.7), point(392_000, 20)] }, clock);
