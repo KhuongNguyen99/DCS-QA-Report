@@ -25,7 +25,8 @@ before(async () => {
           const call = (kind, value) => new Promise((resolve, reject) =>
             window.calls.push({ kind, value, resolve, reject }));
           return <RevisionPanel {...props} onApprove={value => call('approve', value)}
-            onNewRevision={value => call('new', value)} onExport={value => call('export', value)} />;
+            onNewRevision={value => call('new', value)} onExport={value => call('export', value)}
+            onExportTests={value => call('test-export', value)} />;
         }
         window.act = React.act;
         window.root = createRoot(document.getElementById('root'));
@@ -109,7 +110,7 @@ test("approval captures the reviewed revision/version and rejects a changed revi
   assert.equal(h.window.calls[0].kind, "approve");
   assert.deepEqual(JSON.parse(JSON.stringify(h.window.calls[0].value)), {
     walkdownId: draft.walkdownId, revision: 4, contentVersion: 10, skidName: "Skid 2",
-    photoCount: 7, commentCount: 2, completedCount: 3,
+    photoCount: 7, commentCount: 2, completedCount: 3, testRunCount: 0,
   });
   await h.settle();
   assert.equal(h.document.querySelector('[aria-label="Confirm report approval"]'), null);
@@ -165,4 +166,22 @@ test("unknown revision state never enables approval or a new revision", async t 
   assert.equal(h.button("Approve & close"), undefined);
   assert.equal(h.button("New revision"), undefined);
   assert.match(h.document.querySelector('[role="alert"]').textContent, /needs the report revision update/);
+});
+
+test("unsaved test imports block approval and closed test exports keep their revision", async t => {
+  const h = await setup(t, { hasDraftTests: true, testRunCount: 2 });
+  assert.equal(h.button("Approve & close").disabled, true);
+  assert.match(h.document.body.textContent, /Save or discard your test run changes/);
+  await h.configure({ hasDraftTests: false });
+  await h.click(h.button("Approve & close"));
+  assert.match(h.document.querySelector('[aria-label="Confirm report approval"]').textContent, /2 test runs/);
+  await h.configure({ hasDraftTests: true });
+  assert.equal(h.button("Confirm approval & close").disabled, true);
+  await h.click(h.button("Cancel"));
+  await h.configure({ project: closed, hasDraftTests: false, revisions: [{ ...closed, revision: 3, testRunCount: 1 }, { ...closed, testRunCount: 0 }] });
+  assert.equal(h.button("Export test reports revision 4"), undefined);
+  await h.click(h.button("Export test reports revision 3"));
+  assert.equal(h.window.calls.at(-1).kind, "test-export");
+  assert.equal(h.window.calls.at(-1).value, 3);
+  await h.settle();
 });

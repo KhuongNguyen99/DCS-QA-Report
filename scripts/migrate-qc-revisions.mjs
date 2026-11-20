@@ -16,6 +16,7 @@ async function query(sql, readOnly = false) {
 }
 
 await query(await readFile(new URL("../supabase/qc-revisions.sql", import.meta.url), "utf8"));
+await query(await readFile(new URL("../supabase/proneta-test-reports.sql", import.meta.url), "utf8"));
 const result = await query(`
   select
     (select count(*) from public.qa_targets) = 39
@@ -47,11 +48,26 @@ const result = await query(`
       where w.status = 'closed' and (r.walkdown_id is null or r.closed_at is distinct from w.closed_at
         or r.closed_by is distinct from w.closed_by or r.skid_name is distinct from w.skid_name)) as closed_reports_preserved,
     not exists (select 1 from public.qa_revision_photos p where not exists
-      (select 1 from storage.objects o where o.bucket_id = 'qa-evidence' and o.name = p.path)) as archived_photos_preserved;
+      (select 1 from storage.objects o where o.bucket_id = 'qa-evidence' and o.name = p.path)) as archived_photos_preserved,
+    (select relrowsecurity from pg_class where oid = 'public.qa_test_runs'::regclass)
+      and not has_table_privilege('authenticated', 'public.qa_test_runs', 'INSERT,UPDATE,DELETE')
+      and not has_table_privilege('anon', 'public.qa_test_runs', 'SELECT')
+      and (select count(*) = 2 from pg_trigger where not tgisinternal and tgenabled = 'O'
+        and tgname in ('qa_test_runs_draft_only','qa_test_runs_report_revision')) as test_runs_protected,
+    (select bool_and(has_function_privilege('authenticated', to_regprocedure(signature), 'EXECUTE')
+      and not has_function_privilege('anon', to_regprocedure(signature), 'EXECUTE')) from unnest(array[
+      'public.qa_save_test_run(uuid,uuid,jsonb,bigint,bigint)',
+      'public.qa_delete_test_run(uuid,uuid,bigint,bigint)']) signature) as test_run_access_verified,
+    not exists (select 1 from public.qa_walkdowns w join public.qa_report_revisions r
+      on r.walkdown_id = w.id and r.revision = w.revision
+      where w.status = 'closed' and coalesce(r.snapshot->'testRuns', '[]'::jsonb)
+        is distinct from qa_private.test_runs_state(w.id))
+      as closed_test_runs_preserved;
 `, true);
 const row = Array.isArray(result) ? result[0] : result.data?.[0] ?? result.result?.[0] ?? result;
 const checks = ["catalog_preserved", "revisions_valid", "archives_protected", "locks_installed",
-  "old_writes_blocked", "revision_access_verified", "closed_reports_preserved", "archived_photos_preserved"];
+  "old_writes_blocked", "revision_access_verified", "closed_reports_preserved", "archived_photos_preserved",
+  "test_runs_protected", "test_run_access_verified", "closed_test_runs_preserved"];
 const failed = checks.filter((key) => row?.[key] !== true);
 if (failed.length) throw new Error(`QC revision verification failed: ${failed.join(", ")}`);
-console.log("QC revision migration verified: existing reports preserved, closed revisions protected, and versioned write access enabled.");
+console.log("QC revision and test-run migrations verified: existing reports preserved, closed revisions protected, and versioned write access enabled.");

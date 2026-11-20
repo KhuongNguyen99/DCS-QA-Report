@@ -149,6 +149,48 @@ function fixture(overrides = {}) {
   return { workspace, backend, calls, photo, state, listing, walkdown };
 }
 
+test("functional test runs retain provenance and are saved or removed only in their pinned revision", async () => {
+  const id = "66666666-6666-4666-8666-666666666666";
+  const payload = { schemaVersion: 1, name: "Control box functional test", software: { name: "PRONETA Basic", version: "3.9" },
+    clock: { basis: "source-local", timeZone: "Source clock (unspecified)", start: null, end: null, startMs: null, endMs: null },
+    sources: [{ id: "source-1", name: "station.csv", kind: "results", size: 200, sha256: "a".repeat(64) }],
+    stations: [], devices: [], unassignedChannels: [], warnings: ["No timed events were provided."] };
+  const saved = { ...payload, id, walkdownId, runVersion: 2, createdBy: userId };
+  const h = fixture({ rpcResults: { qa_save_test_run: saved } });
+  assert.deepEqual(await h.backend.saveTestRun({ ...payload, id }), saved);
+  assert.deepEqual(h.calls.at(-1), ["qa_save_test_run", {
+    p_walkdown_id: walkdownId, p_id: id, p_data: payload, p_expected_revision: 17, p_expected_run_version: null,
+  }]);
+  await h.backend.saveTestRun(saved);
+  assert.deepEqual(h.calls.at(-1), ["qa_save_test_run", {
+    p_walkdown_id: walkdownId, p_id: id, p_data: payload, p_expected_revision: 17, p_expected_run_version: 2,
+  }]);
+  await h.backend.deleteTestRun(id, 2);
+  assert.deepEqual(h.calls.at(-1), ["qa_delete_test_run", {
+    p_walkdown_id: walkdownId, p_id: id, p_expected_revision: 17, p_expected_run_version: 2,
+  }]);
+  await assert.rejects(h.workspace.forWalkdown(walkdownId).saveTestRun({ ...payload, id }), /current revision/);
+  await assert.rejects(h.backend.saveTestRun({ ...saved, walkdownId: otherWalkdownId }), /another skid/);
+  await assert.rejects(h.backend.deleteTestRun(id), /Refresh the test run/);
+  const denied = fixture({ rpcErrors: { qa_delete_test_run: { message: "Only the importing inspector can remove this test run." } } });
+  await assert.rejects(denied.backend.deleteTestRun(id, 2), /Only the importing inspector/);
+});
+
+test("functional test runs require software metadata and finite bounded serialized evidence", async () => {
+  const h = fixture();
+  const run = { id: "66666666-6666-4666-8666-666666666666", schemaVersion: 1,
+    name: "I/O test", software: { name: "PRONETA Basic", version: "3.9" }, devices: [] };
+  for (const version of ["", "  ", undefined])
+    await assert.rejects(h.backend.saveTestRun({ ...run, software: { ...run.software, version } }), /software name and version/);
+  await assert.rejects(h.backend.saveTestRun({ ...run, samples: [NaN] }), /finite numbers/);
+  await assert.rejects(h.backend.saveTestRun({ ...run, samples: [Infinity] }), /finite numbers/);
+  const cyclic = { ...run }; cyclic.self = cyclic;
+  await assert.rejects(h.backend.saveTestRun(cyclic), /circular data reference/);
+  await assert.rejects(h.backend.saveTestRun({ ...run, warnings: ["x".repeat(4 * 1024 * 1024)] }), /exceeds 4 MB/);
+  await assert.rejects(h.backend.saveTestRun({ ...run, runVersion: -1 }), /Refresh the test run/);
+  assert.equal(h.calls.length, 0, "invalid runs cannot reach the shared backend");
+});
+
 test("configuration accepts only HTTPS/local URLs and public keys", () => {
   assert.deepEqual(
     validateBackendConfig({ ...config, url: `${config.url}/` }),

@@ -31,6 +31,11 @@ before(async () => {
         window.pdfExports.push(JSON.parse(JSON.stringify(state)));
         return new Blob(['test-pdf'], { type: 'application/pdf' });
       }`,
+    'test-report': `export async function createTestReportPdf({ state, runId }) {
+      if (state.project.status !== 'closed') throw new Error('Only closed revisions can export.');
+      window.testPdfExports.push({ state: JSON.parse(JSON.stringify(state)), runId });
+      return new Blob(['test-run-pdf'], { type: 'application/pdf' });
+    }`,
     VoiceComment: `export default function VoiceComment({ disabled }) {
       return <button type="button" disabled={disabled}>Record voice comment</button>;
     }`,
@@ -61,7 +66,7 @@ before(async () => {
     bundle: true, jsx: "automatic", format: "iife", outfile: output,
     define: { "process.env.NODE_ENV": '"development"', "import.meta.env.BASE_URL": '"/"' },
     plugins: [{ name: "app-boundaries", setup(builder) {
-      builder.onResolve({ filter: /[\\/](backend|config|report|VoiceComment|CameraDialog|BulkPhotoDialog)\.(js|jsx)$/ }, args => ({
+      builder.onResolve({ filter: /[\\/](backend|config|report|test-report|VoiceComment|CameraDialog|BulkPhotoDialog)\.(js|jsx)$/ }, args => ({
         path: args.path.split(/[\\/]/).at(-1).replace(/\.(js|jsx)$/, ""), namespace: "mock",
       }));
       builder.onLoad({ filter: /.*/, namespace: "mock" }, args => ({
@@ -85,7 +90,7 @@ function createServer(initiallyClosed = false) {
       name: "Evidence", width: 800, height: 600, createdBy: INSPECTOR, createdAt: "2026-11-18T14:00:00Z" }],
     comments: [{ id: "comment-1", walkdownId: SKID, recordKey: DEVICE, text: "Original approved note",
       createdBy: INSPECTOR, authorName: "Kong", createdAt: "2026-11-18T14:00:00Z" }],
-    revisions: [],
+    testRuns: [], revisions: [],
   };
   const server = { state: copy(initial), calls: [], archives: new Map(), listeners: new Set() };
   server.archives.set(6, { ...copy(initial), comments: [],
@@ -95,6 +100,7 @@ function createServer(initiallyClosed = false) {
     server.state.revisions = [...server.archives.values()].map(snapshot => ({
       revision: snapshot.project.revision, skidName: snapshot.project.skidName,
       closedAt: snapshot.project.closedAt, closedByName: snapshot.project.closedByName,
+      testRunCount: snapshot.testRuns?.length || 0,
     })).sort((a, b) => b.revision - a.revision);
   }
   server.close = () => {
@@ -162,6 +168,19 @@ function createServer(initiallyClosed = false) {
             name: photo.name, width: photo.width, height: photo.height };
           server.state.photos.push(saved); server.state.project.contentVersion += 1; return saved;
         },
+        async saveTestRun(run) {
+          writable(revision); server.calls.push({ kind: "saveTestRun", revision, run: copy(run) });
+          const saved = { ...copy(run), walkdownId: SKID, createdBy: INSPECTOR, runVersion: (run.runVersion || 0) + 1 };
+          server.state.testRuns = [...server.state.testRuns.filter(item => item.id !== run.id), saved];
+          server.state.project.contentVersion += 1;
+          return copy(saved);
+        },
+        async deleteTestRun(id, runVersion) {
+          writable(revision); server.calls.push({ kind: "deleteTestRun", revision, id, runVersion });
+          assert.equal(server.state.testRuns.find(run => run.id === id).runVersion, runVersion);
+          server.state.testRuns = server.state.testRuns.filter(run => run.id !== id);
+          server.state.project.contentVersion += 1;
+        },
       };
     },
   };
@@ -196,7 +215,7 @@ async function setup(t, { closed = false } = {}) {
   const { window } = dom;
   const server = createServer(closed);
   Object.assign(window, { IS_REACT_ACT_ENVIRONMENT: true, backendMock: server.workspace,
-    pdfExports: [], downloads: [], scrollTo() {} });
+    pdfExports: [], testPdfExports: [], downloads: [], scrollTo() {}, structuredClone: copy });
   window.MessageChannel = class {
     constructor() {
       this.port1 = { onmessage: null };
@@ -445,4 +464,83 @@ test("App selects a newly created skid after saving its name", async t => {
   assert.equal(h.document.querySelector("#skid-report").value, nextId);
   assert.match(h.document.querySelector(".project-tag").textContent, /New skid.*QC Revision 1/);
   assert.equal(h.document.querySelector('textarea[id="comment-walkdown:general"]').disabled, false);
+});
+
+const testRun = () => ({
+  id: "44444444-4444-4444-8444-444444444444", walkdownId: SKID,
+  createdBy: INSPECTOR, runVersion: 1, schemaVersion: 1, name: "Valve test",
+  software: { name: "Siemens PRONETA Basic", version: "3.9-test" },
+  clock: { basis: "source-local", timeZone: "Source clock", startMs: null, endMs: null },
+  sources: [], stations: [], devices: [], unassignedChannels: [], warnings: [],
+});
+
+test("App keeps unsaved test edits across navigation, locks approval, and exports only the archived run", async t => {
+  const h = await setup(t);
+  h.server.state.testRuns = [testRun()];
+  await h.notify();
+  await h.nav("Test reports");
+  assert.equal(h.button("Export test PDF").disabled, true);
+  await h.click(h.button("Edit run"));
+  const name = [...h.document.querySelectorAll(".test-metadata-grid label")].find(item => item.textContent === "Test run name").querySelector("input");
+  await h.fill(name, "Reviewed valve test");
+  assert.equal(h.document.querySelector("#skid-report").disabled, true);
+  await h.nav("Workspace");
+  assert.equal(h.button("Sign out").disabled, true);
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, true);
+  await h.click(h.button("Review test reports"));
+  assert.equal(name.value, "Reviewed valve test", "navigation preserves local import metadata");
+  await h.click(h.button("Save test run"));
+  assert.equal(h.server.calls.at(-1).kind, "saveTestRun");
+  assert.equal(h.server.calls.at(-1).revision, 7);
+  assert.equal(h.server.calls.at(-1).run.runVersion, 1);
+  assert.equal(h.server.state.testRuns[0].name, "Reviewed valve test");
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, false);
+  await h.click(h.button("Approve & close"));
+  assert.match(h.document.querySelector('[aria-label="Confirm report approval"]').textContent, /1 test runs/);
+  await h.click(h.button("Confirm approval & close"));
+  await h.nav("Test reports");
+  assert.equal(h.button("Import test run"), undefined);
+  assert.equal(h.button("Edit run"), undefined);
+  assert.equal(h.button("Remove run"), undefined);
+  await h.click(h.button("Export test PDF"));
+  assert.equal(h.window.testPdfExports.at(-1).runId, testRun().id);
+  assert.equal(h.window.testPdfExports.at(-1).state.project.revision, 7);
+  assert.match(h.window.downloads.at(-1).name, /DCS-IO-Test-Report-Rev7-2026-11-19\.pdf$/);
+  await h.nav("Report");
+  await h.click(h.button("New revision"));
+  await h.nav("Test reports");
+  await h.click(h.button("Remove run"));
+  await h.click(h.button("Confirm removal"));
+  assert.equal(h.server.calls.at(-1).kind, "deleteTestRun");
+  assert.equal(h.server.calls.at(-1).revision, 8);
+  assert.equal(h.server.state.testRuns.length, 0);
+  await h.nav("Report");
+  await h.click(h.button("Export test reports revision 7"));
+  assert.equal(h.window.testPdfExports.at(-1).runId, null, "history exports all runs from its closed snapshot");
+  assert.equal(h.window.testPdfExports.at(-1).state.testRuns[0].name, "Reviewed valve test");
+  assert.equal(h.window.testPdfExports.at(-1).state.project.revision, 7);
+});
+
+test("App preserves a test draft but blocks saving it after another inspector closes and advances the revision", async t => {
+  const h = await setup(t);
+  h.server.state.testRuns = [testRun()];
+  await h.notify();
+  await h.nav("Test reports");
+  await h.click(h.button("Edit run"));
+  h.server.close();
+  await h.notify();
+  assert.equal(h.button("Save test run").disabled, true);
+  assert.match(h.document.querySelector(".test-import-form").textContent, /local preview is retained/);
+  h.server.next();
+  await h.notify();
+  assert.equal(h.button("Save test run").disabled, true, "an old draft is not retargeted to the new revision");
+  await h.click(h.button("Save test run"));
+  assert.equal(h.server.calls.filter(call => call.kind === "saveTestRun").length, 0);
+  await h.click(h.button("Discard changes"));
+  await h.click(h.button("Edit run"));
+  await h.click(h.button("Save test run"));
+  assert.equal(h.server.calls.at(-1).kind, "saveTestRun");
+  assert.equal(h.server.calls.at(-1).revision, 8);
 });

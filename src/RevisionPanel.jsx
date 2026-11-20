@@ -7,7 +7,8 @@ const approvedDate = (value) => new Date(value).toLocaleString(undefined, {
 
 export default function RevisionPanel({
   project, revisions = [], photoCount, commentCount, completedCount, targetCount,
-  pending = false, hasDraftComments = false, onApprove, onNewRevision, onExport,
+  testRunCount = 0, pending = false, hasDraftComments = false, hasDraftTests = false,
+  onApprove, onNewRevision, onExport, onExportTests,
 }) {
   const [review, setReview] = useState(null);
   const [busy, setBusy] = useState("");
@@ -37,12 +38,12 @@ export default function RevisionPanel({
   }
 
   function beginReview() {
-    if (blocked || hasDraftComments || project.status !== "draft") return;
+    if (blocked || hasDraftComments || hasDraftTests || project.status !== "draft") return;
     setError("");
     setReview({
       walkdownId: project.walkdownId, revision: project.revision,
       contentVersion: project.contentVersion, skidName: project.skidName,
-      photoCount, commentCount, completedCount,
+      photoCount, commentCount, completedCount, testRunCount,
     });
   }
 
@@ -71,23 +72,24 @@ export default function RevisionPanel({
         </div>
       ) : (
         <div className="revision-body">
-          <p>Review the saved photos, comments, and results, then approve and close this revision to export it.</p>
-          <span className="revision-summary">{photoCount} photos · {commentCount} comments · {completedCount}/{targetCount} items reviewed</span>
-          {!review && <button type="button" className="button primary" disabled={blocked || hasDraftComments} onClick={beginReview}>
+          <p>Review the saved photos, comments, and test reports, then approve and close this revision to export it.</p>
+          <span className="revision-summary">{photoCount} photos · {commentCount} comments · {completedCount}/{targetCount} items reviewed · {testRunCount} test runs</span>
+          {!review && <button type="button" className="button primary" disabled={blocked || hasDraftComments || hasDraftTests} onClick={beginReview}>
             <Icon name="check" size={17} />Approve &amp; close
           </button>}
           {hasDraftComments && <p className="revision-draft-notice" role="status">Post or clear your draft comments before approving this revision.</p>}
+          {hasDraftTests && <p className="revision-draft-notice" role="status">Save or discard your test run changes before approving this revision.</p>}
         </div>
       )}
       {review && (
         <div className="revision-confirmation" role="group" aria-label="Confirm report approval">
           <h3>Approve and close revision {review.revision}?</h3>
-          <p><strong>{review.skidName}</strong> — {review.photoCount} photos, {review.commentCount} comments, {review.completedCount}/{targetCount} items reviewed.</p>
-          <p>Approval locks this report’s evidence and results. Use New revision for any later changes.</p>
+          <p><strong>{review.skidName}</strong> — {review.photoCount} photos, {review.commentCount} comments, {review.completedCount}/{targetCount} items reviewed, {review.testRunCount} test runs.</p>
+          <p>Approval locks the inspection evidence and all saved test reports, including their software details, results, parameters, and graphs. Use New revision for any later changes.</p>
           {changed && <p className="field-error" role="alert">The report changed while you were reviewing. Cancel and review the updated report before approving.</p>}
           <div className="revision-actions">
             <button type="button" className="button secondary" disabled={blocked} onClick={() => setReview(null)}>Cancel</button>
-            <button type="button" className="button primary" disabled={blocked || changed || hasDraftComments}
+            <button type="button" className="button primary" disabled={blocked || changed || hasDraftComments || hasDraftTests}
               onClick={() => action("approve", () => onApprove(review))}>
               {busy === "approve" ? "Approving…" : "Confirm approval & close"}
             </button>
@@ -106,11 +108,16 @@ export default function RevisionPanel({
                   <span>{item.skidName || project.skidName}</span>
                   <small>{item.closedByName || "Inspector"} · {approvedDate(item.closedAt)}</small>
                 </div>
-                <button type="button" className="small-button" disabled={blocked}
+                <div className="revision-export-actions"><button type="button" className="small-button" disabled={blocked}
                   aria-label={`Export revision ${item.revision}`}
                   onClick={() => action(`export-${item.revision}`, () => onExport(item.revision))}>
                   <Icon name="download" size={15} />{busy === `export-${item.revision}` ? "Exporting…" : "Export PDF"}
                 </button>
+                {item.testRunCount > 0 && onExportTests && <button type="button" className="small-button" disabled={blocked}
+                  aria-label={`Export test reports revision ${item.revision}`}
+                  onClick={() => action(`tests-${item.revision}`, () => onExportTests(item.revision))}>
+                  <Icon name="download" size={15} />{busy === `tests-${item.revision}` ? "Exporting…" : "Export test PDF"}
+                </button>}</div>
               </li>
             ))}
           </ul>

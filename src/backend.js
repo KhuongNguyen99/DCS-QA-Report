@@ -2,6 +2,8 @@ import { createClient } from "@supabase/supabase-js";
 
 const BUCKET = "qa-evidence";
 const MAX_PHOTO_BYTES = 12 * 1024 * 1024;
+export const MAX_TEST_RUN_BYTES = 4 * 1024 * 1024;
+export const MAX_TEST_RUNS = 20;
 const PHOTO_TYPES = {
   "image/jpeg": "jpg",
   "image/png": "png",
@@ -53,6 +55,41 @@ function validateRevision(value) {
   if (!Number.isSafeInteger(value) || value < 1)
     throw new Error("Refresh the report and select its current revision before making changes.");
   return value;
+}
+
+function validateTestRunId(value) {
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))
+    throw new Error("Choose a valid imported test run.");
+  return value.toLowerCase();
+}
+
+function testRunPayload(run) {
+  if (!run || typeof run !== "object" || Array.isArray(run))
+    throw new Error("Import the test files before saving a run.");
+  const { id, walkdownId, runVersion, createdAt, createdBy, updatedAt, updatedBy, deletedAt, deletedBy, ...data } = run;
+  if (data.schemaVersion !== 1 || typeof data.name !== "string" || !data.name.trim() || data.name.length > 160)
+    throw new Error("Enter a test run name between 1 and 160 characters.");
+  if (typeof data.software?.name !== "string" || !data.software.name.trim() || data.software.name.length > 120
+    || typeof data.software?.version !== "string" || !data.software.version.trim() || data.software.version.length > 80)
+    throw new Error("Enter the test software name and version before saving the test run.");
+  const seen = new WeakSet();
+  function check(value) {
+    if (typeof value === "number" && !Number.isFinite(value))
+      throw new Error("Test measurements must use finite numbers or explicit missing values.");
+    if (value && typeof value === "object") {
+      if (seen.has(value)) throw new Error("The test run contains a circular data reference.");
+      seen.add(value);
+      for (const child of Object.values(value)) check(child);
+      seen.delete(value);
+    }
+  }
+  check(data);
+  let serialized;
+  try { serialized = JSON.stringify(data); }
+  catch { throw new Error("The test run could not be serialized. Import the files again."); }
+  if (new TextEncoder().encode(serialized).byteLength > MAX_TEST_RUN_BYTES)
+    throw new Error("The normalized test run exceeds 4 MB. Import a smaller set of files.");
+  return data;
 }
 
 function validateEvidenceId(value, kind) {
@@ -308,6 +345,26 @@ export function createBackend(
       },
       async newRevision() {
         return writeRpc("qa_new_revision", {}, "Could not open a new revision");
+      },
+
+      async saveTestRun(run) {
+        const id = validateTestRunId(run?.id);
+        if (run.walkdownId && run.walkdownId !== walkdownId)
+          throw new Error("This test run belongs to another skid.");
+        const version = run.runVersion ?? null;
+        if (version !== null && (!Number.isSafeInteger(version) || version < 1))
+          throw new Error("Refresh the test run before saving changes.");
+        return writeRpc("qa_save_test_run", {
+          p_id: id, p_data: testRunPayload(run), p_expected_run_version: version,
+        }, "Could not save the test run");
+      },
+
+      async deleteTestRun(id, runVersion) {
+        validateTestRunId(id);
+        if (!Number.isSafeInteger(runVersion) || runVersion < 1)
+          throw new Error("Refresh the test run before removing it.");
+        return writeRpc("qa_delete_test_run", { p_id: id, p_expected_run_version: runVersion },
+          "Could not remove the test run");
       },
 
       async addPhoto(

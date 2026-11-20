@@ -2003,7 +2003,7 @@ h3 > span {
     height: calc(67px + env(safe-area-inset-bottom));
     padding: 7px 8px calc(6px + env(safe-area-inset-bottom));
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 5px;
     background: #fff;
     border-top: 1px solid #dfe5d5;

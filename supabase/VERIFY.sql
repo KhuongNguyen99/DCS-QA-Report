@@ -39,7 +39,7 @@ select c.relname, c.relrowsecurity as rls_expected_true,
   has_table_privilege('authenticated', c.oid, 'UPDATE') as browser_update_expected_false,
   has_table_privilege('authenticated', c.oid, 'DELETE') as browser_delete_expected_false
 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-where n.nspname = 'public' and c.relname in ('qa_inspectors','qa_targets','qa_records','qa_photos','qa_comments','qa_walkdowns','qa_project','qa_report_revisions','qa_revision_photos')
+where n.nspname = 'public' and c.relname in ('qa_inspectors','qa_targets','qa_records','qa_photos','qa_comments','qa_walkdowns','qa_project','qa_report_revisions','qa_revision_photos','qa_test_runs')
 order by c.relname;
 
 -- Current scoped/workspace RPCs: authenticated execute true; anonymous false;
@@ -96,6 +96,18 @@ from public.qa_report_revisions r cross join lateral jsonb_array_elements(r.snap
 where not exists (select 1 from public.qa_revision_photos p where p.walkdown_id = r.walkdown_id
   and p.revision = r.revision and p.photo_id = (photo->>'id')::uuid and p.path = photo->>'path');
 
+-- Imported functional-test evidence shares the same immutable report snapshot.
+-- Old snapshots may have no testRuns property; this means no imported runs.
+select w.id as closed_report_with_changed_test_runs
+from public.qa_walkdowns w join public.qa_report_revisions r
+  on r.walkdown_id = w.id and r.revision = w.revision
+where w.status = 'closed' and coalesce(r.snapshot->'testRuns', '[]'::jsonb)
+  is distinct from qa_private.test_runs_state(w.id);
+select r.walkdown_id, r.revision as snapshot_with_invalid_test_run_scope
+from public.qa_report_revisions r cross join lateral jsonb_array_elements(coalesce(r.snapshot->'testRuns', '[]'::jsonb)) t
+where (t->>'walkdownId')::uuid is distinct from r.walkdown_id
+  or (t->>'runVersion')::bigint < 1 or t->'software'->>'name' is null or trim(t->'software'->>'version') = '';
+
 -- Inspect additional Storage policies: broad permissive policies can widen access.
 select policyname, roles, cmd, qual, with_check
 from pg_policies where schemaname = 'storage' and tablename = 'objects' order by policyname;
@@ -138,7 +150,8 @@ begin
   exception when insufficient_privilege then raise notice 'PASS: scoped changes require membership'; end;
   if exists (select 1 from public.qa_walkdowns) or exists (select 1 from public.qa_records)
     or exists (select 1 from public.qa_photos) or exists (select 1 from public.qa_comments)
-    or exists (select 1 from public.qa_report_revisions) or exists (select 1 from public.qa_revision_photos) then
+    or exists (select 1 from public.qa_report_revisions) or exists (select 1 from public.qa_revision_photos)
+    or exists (select 1 from public.qa_test_runs) then
     raise exception 'FAIL: missing inspector identity can read inspection data';
   end if;
   if exists (select 1 from storage.objects where bucket_id = 'qa-evidence') then

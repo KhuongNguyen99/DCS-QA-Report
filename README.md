@@ -21,10 +21,10 @@ Use **General walkdown comments** on the layout or report screen for notes about
 
 ## Approve, close, and revise
 
-Each skid has an editable **Draft** or a locked **Closed** revision. New reports begin at revision 1. Existing reports keep their current number when upgraded and remain drafts until an inspector explicitly approves them. Saving photos, comments, quality, completion, or a skid name does not advance the revision.
+Each skid has an editable **Draft** or a locked **Closed** revision. New reports begin at revision 1. Existing reports keep their current number when upgraded and remain drafts until an inspector explicitly approves them. Saving photos, comments, quality, completion, test runs, or a skid name does not advance the revision.
 
 1. Finish uploads and save any comments you want included. Review the current shared report.
-2. Select **Approve & close**. The server saves an immutable snapshot of the skid name, inspection catalog, evidence, comments, quality, and completion, together with the approving inspector and approval time. The report becomes read-only. Approval is an explicit report-level decision; unfinished inspection items remain visible in the report.
+2. Select **Approve & close**. The server saves an immutable snapshot of the skid name, inspection catalog, evidence, comments, quality, completion, and imported test runs, together with the approving inspector and approval time. Test runs include software details, recorded results, selected parameters, source identifiers, import notes, and graph observations. The report becomes read-only. Approval is an explicit report-level decision; unfinished inspection items remain visible in the report. Save or discard local test-import changes before approving.
 3. Export the closed revision as a PDF. Draft reports cannot be exported. Repeated downloads use the same approved content, revision number, and approval date.
 4. Select **New revision** to advance the number once and continue with the existing inspection content in an editable draft. Close that draft when it is ready to become the next approved revision. Previous approved revisions remain available for export; removing a photo or comment from a later draft does not change them.
 
@@ -33,6 +33,31 @@ The QC PDF matches the landscape wiring document's cover, header, and footer, wi
 Each documented device, terminal, or equipment item starts on its own page with its name, photos, a large Passed/Failed stamp, and bold red comments. Up to six photos with brief comments fit on one page when space permits; longer records continue without cropping or omitting evidence. The overview lists all 39 names and ratings, including unfinished items.
 
 Photos, comments, quality, and completion are shared across signed-in devices. OCR runs locally using the bundled Tesseract English model. Failed saves show an error and retain the capture for retry; a network connection is required to save shared evidence.
+
+## PRONETA I/O test reports
+
+Open **Test reports** after choosing a named skid. This view imports Siemens PRONETA Basic test-result CSV files, I/O event-log CSV files, and `.mpr` parameter exports. The software name is editable metadata; the importer still expects supported PRONETA file formats.
+
+1. Select **Import test run**. Enter a run name, the software name, and the exact software version used. The default name is Siemens PRONETA Basic; the version starts blank and must be entered before saving. Module firmware is recorded separately and is never substituted for the software version.
+2. Choose all exports from the same run in one file selection, including every RIO station. Files are identified from their contents. Result headers establish station identity, while parameter hardware serial numbers and filename stems connect associated files. For renamed log files that cannot be matched, enter the recorded station name beside the file and select **Read files again**.
+3. Review the device list. Matching uses station, module slot, physical channel, and symbolic name. Explicit feedback/position/open/close suffixes group supported device tags while preserving distinct `-Y` and `#1/#2` identities. Unassigned channels and unmatched events remain available for review rather than disappearing from the report.
+4. Expand **Set parameters** and **Shared module parameters**. The importer reads active configuration records and their selected `Value` fields. It does not substitute `DefaultValue` or duplicate nested submodule copies. Where the export provides an encoded selection without a label dictionary, the exact code is shown and marked as encoded; range or mode descriptions are not guessed.
+5. Select **Save test run**. The importing inspector or an administrator can edit or remove it while the skid revision is a draft. Save failures preserve the preview and metadata for retry. Navigation between Test reports and Report retains the local import; save or discard it before switching skids, signing out, or changing the connection.
+6. Open **Report**, review the saved content, and **Approve & close**. The same revision locks both QC evidence and test runs. **Export test PDF** is then available for the selected run. The closed-revision history also exports all test runs from any approved revision. **New revision** carries the current runs into an editable draft; edits and removals do not change earlier PDFs.
+
+### Results and graphs
+
+`Status Wiring` is the tester-recorded result: `OK` becomes **Passed**, `Error` becomes **Failed**, and `N. a.` remains **Not applicable**, never a pass. An aggregate device fails if any applicable channel failed; otherwise every applicable channel must pass for the device to pass. Missing or unknown results remain **Not tested**. These meanings follow the [Siemens PRONETA Basic manual, Test Results and IO Event Log sections](https://cache.industry.siemens.com/dl/files/624/67460624/att_1347024/v1/PRONETA_Documentation_V3_9_en.pdf), printed pages 59–61.
+
+Graphs show observed after-change values in the exported units, including digital states, mA, V, and temperature. They do not infer an overall functional pass, convert current to valve travel or pressure without calibration, interpolate measurements, or extrapolate across gaps. Duplicate and same-second events are retained with source rows. Invalid values remain visible as raw observations and import notes.
+
+Every graph in one run uses the **earliest through latest valid timestamp across every selected station log**. Later-starting and earlier-finishing series therefore share identical axes and retain blank intervals. Naive source timestamps stay on the original computer's clock; the browser's timezone does not shift them. The source-clock/timezone field is descriptive, not a conversion. Logs with explicit timezone offsets use a UTC graph axis, labeled UTC, and retain the original timestamps in their event details. Combining files assumes the source clocks were aligned. Timestamp formats that are ambiguous or unsupported are retained for review; timestamps with explicit offsets cannot be mixed with an unspecified source clock in one run.
+
+### Import storage and limits
+
+Parsing happens in the browser. Saving stores normalized report data privately in Supabase, together with filenames, byte counts, SHA-256 hashes, and original result/event provenance. Original CSV and parameter files are not uploaded to public GitHub or retained as separate server files. Keep the source exports if you need the original files later. Approved snapshots freeze the normalized data, so future parser changes do not reinterpret earlier reports.
+
+Each import accepts up to 20 files, 10 MiB per file, 30 MiB in total, and 10,000 event rows. A normalized run is limited to 4 MiB, with up to 20 active runs per skid. An import belongs to its opening revision; a remote closeout or revision change retains the local preview but blocks saving it into a different revision. Conflicting saved edits require reopening the current run. Source parsing and PDF generation are covered by synthetic tests; private field exports are not committed as fixtures.
 
 ## Bulk photo review
 
@@ -62,12 +87,13 @@ The current public browser configuration points to `ybeinufetluekswsulvj.supabas
 - [Supabase setup and inspector access](supabase/SETUP.md)
 - [Database schema](supabase/schema.sql)
 - [Closed-revision upgrade](supabase/qc-revisions.sql)
+- [PRONETA test-report upgrade](supabase/proneta-test-reports.sql)
 - [Read-only deployment verification](supabase/VERIFY.sql)
 - [Voice attempt limits](supabase/voice-rate-limit.sql)
 
 The initial administrator is `khuong@jeevyfabrication.com`. Add each inspector to `qa_inspectors` as described in the setup guide. Supabase's default email service has recipient restrictions; configure custom SMTP for a team rollout. The app supports the default sign-in link as well as numeric codes, so custom OTP templates are optional.
 
-The website deployment runs the tests and build, applies the repeatable QC revision migration with the existing deployment environment, and verifies database protections before publishing the updated app. This upgrade keeps current reports as drafts; it never approves an inspection automatically.
+The website deployment runs the tests and build, applies the repeatable QC revision and test-report migrations with the existing deployment environment, and verifies database protections before publishing the updated app. The migrations never approve an inspection automatically and preserve existing closed snapshots.
 
 GitHub hosts the application and its device catalog. Inspection photos, audio, comments, and secret keys are not committed to GitHub.
 
@@ -85,7 +111,7 @@ npm run preview
 
 The build copies the OCR worker, WASM cores, and English language data into `public/ocr`. These generated files and `node_modules` are ignored by Git. The relative Vite base works at the repository's GitHub Pages subpath.
 
-Automated tests cover schedule integrity, conservative label matching, the bulk review queue and keyboard controls, OCR cancellation and cleanup, shared data calls, comment removal permissions, approval and immutable revision history, read-only controls, quality, completion prerequisites, photo handling, microphone cleanup, voice validation/order, and PDF coverage/pagination. Browser checks additionally exercise real OCR, mobile layout, capture, comments, shared updates, and PDF downloads. Physical phone cameras, noisy field audio, and actual two-inspector use should be checked on site.
+Automated tests cover schedule integrity, conservative label matching, the bulk review queue and keyboard controls, OCR cancellation and cleanup, shared data calls, comment removal permissions, approval and immutable revision history, read-only controls, quality, completion prerequisites, photo handling, microphone cleanup, voice validation/order, and PDF coverage/pagination. PRONETA tests cover source parsing, status and channel matching, active parameter selection, shared time domains, invalid/duplicate events, run edit conflicts, immutable snapshots, and approved-only PDF export. Browser checks additionally exercise real OCR, mobile layout, capture, comments, shared updates, and PDF downloads. Physical phone cameras, noisy field audio, and actual two-inspector use should be checked on site.
 
 ## Update the cable schedule
 

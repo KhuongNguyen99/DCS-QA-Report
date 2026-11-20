@@ -25,13 +25,15 @@ import OverviewTable from "./OverviewTable.jsx";
 import CommentPanel from "./CommentPanel.jsx";
 import QualityControl from "./QualityControl.jsx";
 import RevisionPanel from "./RevisionPanel.jsx";
+import TestReportsPanel from "./TestReportsPanel.jsx";
 
-const EMPTY = { records: [], photos: [], comments: [], inspector: null };
+const EMPTY = { records: [], photos: [], comments: [], testRuns: [], inspector: null };
 const TARGETS = inspectionTargets(schedule);
 const TITLES = {
   layout: "Conduit layout",
   devices: "QC overview",
   report: "Inspection report",
+  tests: "Test reports",
   workspace: "Shared workspace",
 };
 const STATUS = {
@@ -144,6 +146,7 @@ function App() {
   const [authOpen, setAuthOpen] = useState(false);
   const [record, setRecord] = useState(null);
   const [drafts, setDrafts] = useState({});
+  const [testDraftDirty, setTestDraftDirty] = useState(false);
   const [camera, setCamera] = useState(null);
   const [manualEntry, setManualEntry] = useState(false);
   const [bulkUpload, setBulkUpload] = useState(null);
@@ -178,7 +181,7 @@ function App() {
     !state.project?.nameRequired,
   );
   const switchBlocked = Boolean(
-    pending || reporting || camera || record || manualEntry || bulkUpload,
+    pending || reporting || camera || record || manualEntry || bulkUpload || testDraftDirty,
   );
   const reportRevision = state.project?.revision ?? selectedSkid?.revision ?? 1;
   const revisionStatus = state.project?.status;
@@ -412,6 +415,11 @@ function App() {
     setNotice(skidDialog === "new" ? "Skid report created" : "Skid name saved");
   }
   async function signOut() {
+    if (testDraftDirty) {
+      setError("Save or discard your test run changes before signing out.");
+      navigate("tests");
+      return;
+    }
     try {
       await workspaceBackend.signOut();
       ++request.current;
@@ -519,6 +527,8 @@ function App() {
       throw new Error("Select the report you reviewed before approving.");
     if (action === "approve" && hasDraftComments)
       throw new Error("Post or clear your draft comments before approving this revision.");
+    if (action === "approve" && testDraftDirty)
+      throw new Error("Save or discard your test run changes before approving this revision.");
     const scope = backend.forRevision(review.revision);
     transitionRef.current = true;
     setPending((count) => count + 1);
@@ -546,7 +556,7 @@ function App() {
       setPending((count) => count - 1);
     }
   }
-  async function exportReport(revision = reportRevision) {
+  async function exportReport(revision = reportRevision, kind = "qc", runId = null) {
     if (!connected || exportingRef.current) return;
     exportingRef.current = true;
     setReporting("Preparing your report…");
@@ -555,19 +565,21 @@ function App() {
       const snapshot = await backend.loadRevision(revision);
       const { createInspectionPdf, approvedReportDate } = await import("./report.js");
       const generatedAt = approvedReportDate(snapshot);
-      const blob = await createInspectionPdf({
-        schedule,
-        state: snapshot,
-        backend,
-        onProgress: setReporting,
-      });
+      const blob = kind === "tests"
+        ? await (await import("./test-report.js")).createTestReportPdf({
+          state: snapshot, runId, onProgress: setReporting,
+        })
+        : await createInspectionPdf({
+          schedule, state: snapshot, backend, onProgress: setReporting,
+        });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
       const skidFilename = snapshot.project.skidName
         .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
         .replace(/[. ]+$/g, "");
-      anchor.download = `450k-Skid-x7-${skidFilename}-DCS-QC-Report-Rev${snapshot.project.revision}-${generatedAt.toISOString().slice(0, 10)}.pdf`;
+      const reportName = kind === "tests" ? "DCS-IO-Test-Report" : "DCS-QC-Report";
+      anchor.download = `450k-Skid-x7-${skidFilename}-${reportName}-Rev${snapshot.project.revision}-${generatedAt.toISOString().slice(0, 10)}.pdf`;
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 60000);
       setNotice(`Approved revision ${snapshot.project.revision} exported`);
@@ -577,6 +589,19 @@ function App() {
       exportingRef.current = false;
       setReporting("");
     }
+  }
+  const exportTestReport = (revision = reportRevision, runId = null) => exportReport(revision, "tests", runId);
+
+  async function saveTestRun(run, expectedRevision) {
+    if (expectedRevision !== reportRevision || activeEditor.current !== writeBackend)
+      throw new Error("This test import belongs to an earlier revision. Reopen it in the current draft.");
+    return mutate(() => writeBackend.saveTestRun(run), "Test run saved to this revision");
+  }
+
+  async function deleteTestRun(run, expectedRevision) {
+    if (expectedRevision !== reportRevision || activeEditor.current !== writeBackend)
+      throw new Error("This report revision changed. Refresh before removing a test run.");
+    return mutate(() => writeBackend.deleteTestRun(run.id, run.runVersion), "Test run removed from this draft");
   }
 
   return (
@@ -605,6 +630,7 @@ function App() {
           {[
             ["layout", "layout", "Conduit layout"],
             ["devices", "device", "QC overview"],
+            ["tests", "equipment", "Test reports"],
             ["report", "report", "Report"],
             ["workspace", "settings", "Workspace"],
           ].map(([id, icon, label]) => (
@@ -670,9 +696,13 @@ function App() {
                 ? "Connecting…"
                 : loading
                   ? "Syncing…"
-                  : signedIn
-                    ? "All changes shared"
-                    : "Not signed in"}
+                  : pending
+                    ? "Saving…"
+                    : testDraftDirty
+                      ? "Unsaved test changes"
+                      : signedIn
+                        ? "All changes shared"
+                        : "Not signed in"}
             </span>
             {signedIn ? (
               <button
@@ -1164,6 +1194,29 @@ function App() {
             />
           )}
 
+          {connected && <div hidden={view !== "tests"}>
+            <TestReportsPanel
+              key={selectedId}
+              project={state.project}
+              runs={state.testRuns || []}
+              inspector={inspector}
+              readOnly={!editable}
+              pending={pending > 0 || Boolean(reporting)}
+              exportProgress={reporting}
+              onSave={saveTestRun}
+              onDelete={deleteTestRun}
+              onExport={(runId) => exportTestReport(reportRevision, runId)}
+              onReview={() => navigate("report")}
+              onDirtyChange={setTestDraftDirty}
+            />
+          </div>}
+          {!signedIn && view === "tests" && <section className="card test-empty">
+            <Icon name="equipment" size={36} />
+            <h2>PRONETA I/O test reports</h2>
+            <p>Sign in and choose a skid to import CSV results, event logs, and parameter files. Review devices and aligned graphs, then approve the revision to export.</p>
+            <button type="button" className="button primary" onClick={() => setAuthOpen(true)}>Sign in to import</button>
+          </section>}
+
           {(connected || !signedIn) && view === "report" && (
             <>
               <section className="report-hero card">
@@ -1191,6 +1244,8 @@ function App() {
                   key={`${selectedId}:${reportRevision}`}
                   project={state.project}
                   revisions={state.revisions || []}
+                  testRunCount={state.testRuns?.length || 0}
+                  hasDraftTests={testDraftDirty}
                   photoCount={state.photos.length}
                   commentCount={state.comments.length}
                   completedCount={completedTargets}
@@ -1200,8 +1255,14 @@ function App() {
                   onApprove={(review) => changeRevision("approve", review)}
                   onNewRevision={(revision) => changeRevision("new", { revision })}
                   onExport={exportReport}
+                  onExportTests={exportTestReport}
                 />
               )}
+              {connected && ((state.testRuns?.length || 0) > 0 || testDraftDirty) && <div className="card test-report-link">
+                <div><strong>{state.testRuns?.length || 0} saved test runs in revision {reportRevision}</strong>
+                  <p>{testDraftDirty ? "You have unsaved test run changes. Save or discard them before approval." : "Software details, recorded results, parameters, and graphs share this report’s revision lock."}</p></div>
+                <button type="button" className="button secondary" onClick={() => navigate("tests")}>Review test reports</button>
+              </div>}
               <section className="stats-strip report-stats">
                 <Stat
                   value={connected ? `${totals.devices}/${schedule.devices.length}` : "—"}
@@ -1324,6 +1385,7 @@ function App() {
               lastSync={lastSync}
               onSignIn={() => setAuthOpen(true)}
               onSignOut={signOut}
+              hasDraftTests={testDraftDirty}
             />
           )}
           <footer className="app-footer">
@@ -2259,6 +2321,7 @@ function Workspace({
   lastSync,
   onSignIn,
   onSignOut,
+  hasDraftTests = false,
 }) {
   return (
     <div className="workspace-settings">
@@ -2291,6 +2354,7 @@ function Workspace({
           </div>
           <button
             className="button secondary"
+            disabled={hasDraftTests}
             onClick={connected || session?.user ? onSignOut : onSignIn}
           >
             <Icon
@@ -2299,6 +2363,7 @@ function Workspace({
             />
             {connected || session?.user ? "Sign out" : "Inspector sign-in"}
           </button>
+          {hasDraftTests && <p className="help-text">Save or discard your changes in Test reports before signing out or changing the connection.</p>}
         </div>
       </section>
       <section className="card settings-card">
@@ -2307,7 +2372,9 @@ function Workspace({
           <span className="subtle-label">Administrator settings</span>
         </div>
         <div className="settings-content">
-          <ConfigForm config={config} onSave={setConfig} />
+          <fieldset disabled={hasDraftTests} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+            <ConfigForm config={config} onSave={setConfig} />
+          </fieldset>
           <a
             className="text-link"
             href="https://github.com/KhuongNguyen99/DCS-QA-Report/blob/main/supabase/SETUP.md"

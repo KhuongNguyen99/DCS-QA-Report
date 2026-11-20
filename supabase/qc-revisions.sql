@@ -145,6 +145,18 @@ returns jsonb language sql stable security definer set search_path = '' as $$
   from auth.users u join public.qa_inspectors i on i.email = lower(u.email) where u.id = auth.uid();
 $$;
 
+-- Functional-test storage is an optional extension. Keep its state hook when
+-- rerunning this migration so existing imported runs remain in future snapshots.
+do $install_test_runs_hook$
+begin
+  if to_regprocedure('qa_private.test_runs_state(uuid)') is null then
+    execute $hook$create function qa_private.test_runs_state(p_walkdown_id uuid)
+      returns jsonb language sql stable security definer set search_path = '' as
+      'select ''[]''::jsonb';$hook$;
+  end if;
+end;
+$install_test_runs_hook$;
+
 create or replace function qa_private.live_report_state(p_walkdown_id uuid)
 returns jsonb language sql stable security definer set search_path = '' as $$
   select jsonb_build_object(
@@ -153,6 +165,7 @@ returns jsonb language sql stable security definer set search_path = '' as $$
       'status', w.status, 'contentVersion', w.content_version, 'closedAt', w.closed_at,
       'closedBy', w.closed_by, 'closedByName', w.closed_by_name),
     'inspector', qa_private.current_inspector(),
+    'testRuns', qa_private.test_runs_state(p_walkdown_id),
     'catalog', coalesce((select jsonb_agg(jsonb_build_object('key', t.key, 'kind', t.kind, 'terminal', t.terminal, 'label', case when t.kind = 'terminal' then 'Terminal ' || t.label else t.label end)
       order by case when t.kind = 'equipment' then 0 else 1 end,
       case when t.kind = 'equipment' then t.key else t.terminal end,
@@ -191,7 +204,8 @@ returns jsonb language plpgsql security definer set search_path = '' as $$
 begin
   perform qa_private.require_walkdown(p_walkdown_id, false);
   return coalesce((select jsonb_agg(jsonb_build_object('revision', revision, 'skidName', skid_name,
-    'closedAt', closed_at, 'closedBy', closed_by, 'closedByName', closed_by_name) order by revision desc)
+    'closedAt', closed_at, 'closedBy', closed_by, 'closedByName', closed_by_name,
+    'testRunCount', case when jsonb_typeof(snapshot->'testRuns') = 'array' then jsonb_array_length(snapshot->'testRuns') else 0 end) order by revision desc)
     from public.qa_report_revisions where walkdown_id = p_walkdown_id), '[]'::jsonb);
 end;
 $$;

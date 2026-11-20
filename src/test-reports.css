@@ -1,0 +1,139 @@
+.test-reports {
+  display: grid;
+  gap: 22px;
+}
+.test-intro,
+.test-run-toolbar,
+.test-run-actions,
+.test-import-actions,
+.test-preview > header,
+.test-device-heading,
+.test-channel-heading,
+.test-report-link {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.test-intro > div,
+.test-report-link > div {
+  flex: 1 1 340px;
+}
+.test-intro h2 { margin: 6px 0; }
+.test-intro p,
+.test-report-link p { color: #5e6c62; }
+.test-import-form,
+.test-preview,
+.test-empty { padding: 24px; }
+.test-import-form > h3 { margin-bottom: 18px; }
+.test-import-form fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.test-metadata-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.test-reports label { display: grid; gap: 7px; font-weight: 600; font-size: 12px; }
+.test-reports input,
+.test-reports select {
+  width: 100%;
+  min-width: 0;
+  background: #fff;
+  color: var(--ink);
+  border: 1px solid #d8e0d4;
+  border-radius: 7px;
+  padding: 10px 12px;
+  font-weight: 400;
+  font-size: 13px;
+}
+.test-muted { color: #6c796e; font-size: 12px; margin: 12px 0; }
+.test-file-choice { margin: 20px 0 12px; }
+.test-file-choice input { padding: 18px; border-style: dashed; background: #f8faf6; }
+.test-file-choice input::file-selector-button { color: var(--green); background: #edf3e8; border: 0; border-radius: 4px; margin-right: 12px; padding: 8px 12px; cursor: pointer; }
+.test-file-list { padding: 14px; background: #f8faf6; border-radius: 8px; }
+.test-file-list > p { font-size: 12px; color: #5e6c62; margin-bottom: 12px; }
+.test-file-list > label { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 16px; margin-bottom: 8px; }
+.test-file-list > label > span { overflow-wrap: anywhere; }
+.test-import-actions { margin-top: 20px; }
+.test-import-actions small { color: #6c796e; }
+.test-run-toolbar { justify-content: space-between; }
+.test-run-toolbar > label { flex: 1 1 240px; max-width: 460px; }
+.test-run-actions { font-size: 12px; }
+.test-export-progress { display: flex; align-items: center; gap: 10px; color: var(--green); font-size: 12px; }
+.test-remove { color: #a23632; }
+.test-preview > header { justify-content: space-between; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.test-preview > header > span { font-size: 12px; color: #63715f; background: #eff4eb; padding: 6px 10px; border-radius: 5px; }
+.test-run-facts { display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 20px; padding: 20px 0 12px; }
+.test-run-facts > div { display: grid; gap: 5px; align-content: start; }
+.test-run-facts span { font-size: 10px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #78876e; }
+.test-run-facts strong { font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.test-run-facts small { color: #6c796e; }
+.test-meaning { color: #65735f; font-size: 12px; margin: 6px 0 16px; }
+.test-import-notes { background: #fbf7e9; color: #776230; border: 1px solid #eee2b9; padding: 12px 15px; border-radius: 7px; font-size: 12px; margin-bottom: 20px; }
+.test-reports summary { cursor: pointer; font-weight: 600; line-height: 1.6; }
+.test-import-notes ul { padding-left: 20px; margin: 10px 0 0; max-height: 230px; overflow: auto; }
+.test-import-notes li + li { margin-top: 6px; }
+.test-device-layout { display: grid; grid-template-columns: 205px minmax(0, 1fr); gap: 24px; }
+.test-device-picker { border-right: 1px solid var(--line); padding-right: 18px; }
+.test-device-list { display: grid; gap: 5px; max-height: 680px; overflow-y: auto; margin-top: 12px; padding-right: 4px; }
+.test-device-list > button { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; padding: 11px 9px; border: 1px solid transparent; background: none; border-radius: 6px; text-align: left; }
+.test-device-list > button:hover { background: #f5f8f1; }
+.test-device-list > button.selected { border-color: #bfd2b1; background: #edf3e8; }
+.test-device-list > button > strong { font-size: 12px; overflow-wrap: anywhere; }
+.test-status { display: inline-flex; align-items: center; flex-shrink: 0; border-radius: 4px; padding: 4px 7px; font-size: 10px; font-weight: 700; line-height: 1.2; }
+.test-status.passed { color: #285e3b; background: #e8f3e7; }
+.test-status.failed { color: #a03632; background: #fbe9e6; }
+.test-status.untested { color: #6c715f; background: #f0f1e9; }
+.test-device-content { min-width: 0; }
+.test-device-heading { justify-content: space-between; margin-bottom: 16px; }
+.test-device-heading h3 { font-size: 19px; }
+.test-channel { padding: 18px 0; border-top: 1px solid var(--line); }
+.test-channel-heading { justify-content: space-between; align-items: flex-start; flex-wrap: nowrap; }
+.test-channel-heading h4 { margin: 0 0 5px; font-size: 14px; overflow-wrap: anywhere; }
+.test-channel-heading p,
+.test-channel-heading small { color: #6c796e; font-size: 11px; }
+.test-channel-heading > div { min-width: 0; }
+.test-source-result { font-size: 12px; margin: 10px 0; color: #5e6c62; white-space: pre-wrap; overflow-wrap: anywhere; }
+.test-chart { margin: 18px 0; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.test-chart figcaption { display: flex; gap: 12px; justify-content: space-between; padding: 12px 14px 3px; font-size: 12px; }
+.test-chart figcaption span { color: #6c796e; }
+.test-chart-scroll { overflow-x: auto; }
+.test-chart svg { display: block; width: 100%; min-width: 410px; }
+.test-chart svg text { fill: #65735f; font: 11px "QC Sans", sans-serif; }
+.test-gridline { stroke: #e2e7df; stroke-width: 1; }
+.test-observation { fill: #39724e; opacity: 0.8; }
+.test-invalid-observation { stroke: #b54338; stroke-width: 1.8; fill: none; }
+.test-chart > p { font-size: 11px; color: #6c796e; padding: 0 14px 12px; }
+.test-events { border-top: 1px solid var(--line); padding: 10px 14px; font-size: 11px; }
+.test-parameters { padding: 10px 0; font-size: 12px; }
+.test-parameters + .test-parameters { border-top: 1px solid #eef1ea; }
+.test-table-scroll { width: 100%; overflow-x: auto; max-height: 520px; margin-top: 10px; }
+.test-reports table { width: 100%; border-collapse: collapse; text-align: left; font-size: 11px; line-height: 1.55; }
+.test-reports th { position: sticky; top: 0; background: #f3f6ef; font-weight: 600; color: #5d6e55; z-index: 1; }
+.test-reports td,
+.test-reports th { border-bottom: 1px solid #e9ede5; padding: 8px 10px; vertical-align: top; }
+.test-reports td small { display: block; color: #7a8574; max-width: 420px; margin-top: 3px; }
+.test-reports td strong { white-space: pre-wrap; overflow-wrap: anywhere; }
+.test-reports .test-hash { font-family: monospace; overflow-wrap: anywhere; min-width: 170px; max-width: 260px; }
+.test-sources { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 16px; font-size: 12px; }
+.test-station h4 { margin: 20px 0 5px; }
+.test-station p { font-size: 11px; color: #6c796e; }
+.test-empty { display: grid; justify-items: center; gap: 12px; text-align: center; color: #65735f; }
+.test-empty p { max-width: 560px; }
+.test-report-link { margin: 20px 0; }
+.revision-export-actions { display: flex !important; flex-wrap: wrap; align-items: center; gap: 8px !important; }
+@media (max-width: 1100px) {
+  .test-run-facts { grid-template-columns: 1fr 1fr; }
+  .test-device-layout { grid-template-columns: 170px minmax(0, 1fr); gap: 16px; }
+  .test-device-picker { padding-right: 12px; }
+}
+@media (max-width: 700px) {
+  .test-import-form,
+  .test-preview,
+  .test-empty { padding: 16px; }
+  .test-metadata-grid,
+  .test-run-facts { grid-template-columns: 1fr; gap: 14px; }
+  .test-device-layout { grid-template-columns: 1fr; }
+  .test-device-picker { border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 14px; }
+  .test-device-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 195px; }
+  .test-file-list > label { grid-template-columns: 1fr; gap: 5px; margin-bottom: 14px; }
+  .test-run-actions { width: 100%; }
+  .test-run-facts { padding-top: 14px; }
+  .test-intro > .button { width: 100%; }
+  .test-import-actions > .button { flex: 1; }
+}
