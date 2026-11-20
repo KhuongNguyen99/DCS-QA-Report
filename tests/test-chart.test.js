@@ -391,3 +391,77 @@ test("manual range validation rejects unsafe windows without weakening validatio
   assert.equal(automatic.manualTimeRange, false);
   assert.equal(automatic.visibleObservedCount, automatic.observedCount);
 });
+
+test("excluded rows leave active chart ranges and geometry equivalent to their active neighbors without changing source evidence", () => {
+  const series = { kind: "analog", unit: "°C", points: [
+    point(0, 1000, { excluded: true, rawValue: "1000", sourceRow: 2 }),
+    point(10000, 24, { excluded: false, sourceRow: 3 }), point(20000, 26, { sourceRow: 4 }),
+    point(300000, -1000, { excluded: true, sourceRow: 5 }),
+  ] };
+  const original = structuredClone(series);
+  for (const options of [{}, { timeRange: timeRange(12000, 25000) }]) {
+    const chart = buildTestChart(series, clock, options);
+    const active = buildTestChart({ ...series, points: series.points.filter(point => point.excluded !== true) }, clock, options);
+    assert.deepEqual(chart, { ...active, excludedCount: 2 });
+    assert.equal(chart.observedCount, 2);
+    assert.equal(chart.domain.min, 20);
+    assert.equal(chart.domain.max, 30);
+    assertBounded(chart);
+  }
+  const restored = structuredClone(series);
+  restored.points[0].excluded = false;
+  const chart = buildTestChart(restored, clock);
+  assert.equal(chart.excludedCount, 1);
+  assert.equal(chart.observedCount, 3);
+  assert.ok(chart.domain.max > 1000);
+  assert.equal(chart.domain.startMs, clock.startMs);
+  assert.deepEqual(series, original, "rendering never removes or rewrites original evidence");
+});
+
+test("excluding invalid gaps reconnects active neighbors and excluding the final event updates the held tail", () => {
+  for (const kind of ["analog", "digital"]) {
+    const series = { kind, points: [point(0, 0), point(5000, null, { valid: false, excluded: true }),
+      { value: 3, excluded: true }, point(10000, 1), point(20000, 0, { excluded: true })] };
+    for (const options of [{}, { timeRange: timeRange(2000, 15000) }]) {
+      const chart = buildTestChart(series, clock, options);
+      const active = buildTestChart({ kind, points: [series.points[0], series.points[3]] }, clock, options);
+      assert.deepEqual(chart, { ...active, excludedCount: 3 });
+      assert.equal(chart.invalidCount, 0);
+      assert.equal(chart.extension.from.y, yFor(chart, 1));
+      assertBounded(chart);
+    }
+    series.points[1].excluded = false;
+    const restoredGap = buildTestChart(series, clock);
+    assert.equal(restoredGap.invalidCount, 1);
+    assert.deepEqual(restoredGap.connections, []);
+    const excludedFinalInvalid = buildTestChart({ kind, points: [point(10000, 1),
+      point(20000, null, { valid: false, excluded: true })] }, clock);
+    assert.ok(excludedFinalInvalid.extension);
+    assert.equal(excludedFinalInvalid.invalidCount, 0);
+  }
+});
+
+test("all excluded rows produce empty active charts while exclusion cannot hide malformed flags or invalid source timing", () => {
+  const chart = buildTestChart({ points: [point(1000, 4, { excluded: true }),
+    point(2000, null, { valid: false, excluded: true }), { value: 7, excluded: true }] }, clock);
+  assert.equal(chart.excludedCount, 3);
+  assert.equal(chart.observedCount, 0);
+  assert.equal(chart.invalidCount, 0);
+  assert.equal(chart.visibleObservedCount, 0);
+  assert.equal(chart.domain.startMs, clock.startMs);
+  assert.equal(chart.domain.endMs, clock.endMs);
+  assert.deepEqual(chart.points, []);
+  assert.deepEqual(chart.connections, []);
+  assert.deepEqual(chart.invalidPoints, []);
+  assert.equal(chart.extension, null);
+  for (const excluded of [undefined, null, 1, "true", [], {}])
+    assert.throws(() => buildTestChart({ points: [point(0, 4, { excluded })] }, clock,
+      { timeRange: timeRange(10000, 20000) }), /excluded flag.*true or false/);
+  for (const offset of [-1, 393000])
+    assert.throws(() => buildTestChart({ points: [point(offset, 4, { excluded: true })] }, clock), /outside/);
+  for (const points of [
+    [point(20000, 4, { excluded: true }), point(10000, 5)],
+    [point(20000, 4), point(10000, 5, { excluded: true })],
+    [point(20000, 4, { excluded: true }), point(10000, 5, { excluded: true })],
+  ]) assert.throws(() => buildTestChart({ points }, clock, { timeRange: timeRange(30000, 40000) }), /ordered by time/);
+});

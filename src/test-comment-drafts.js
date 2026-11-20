@@ -1,3 +1,5 @@
+import { validTestEventEdits } from "./test-event-edits.js";
+
 const PREFIX = "jeevy-qa-test-comments:v1:";
 const MAX_RECORD_LENGTH = 2_200_000;
 const object = value => value && typeof value === "object" && !Array.isArray(value);
@@ -19,6 +21,7 @@ function valid(record) {
     && (record.runVersion === null || version(record.runVersion)) && Number.isFinite(record.updatedAt)
     && text(record.name, 160) && object(record.software) && text(record.software.name, 120) && text(record.software.version, 80)
     && text(record.timeZone, 120) && text(record.comment, 4000) && typeof record.requiresFiles === "boolean"
+    && (record.eventEdits === undefined || validTestEventEdits(record.eventEdits))
     && object(record.deviceComments) && Object.keys(record.deviceComments).length <= 250
     && Object.entries(record.deviceComments).every(([id, value]) => id && text(id, 160) && text(value, 4000))
     && object(record.deviceNames) && Object.keys(record.deviceNames).length <= 250
@@ -30,7 +33,7 @@ function valid(record) {
 
 export function readTestCommentDrafts(scope) {
   const drafts = [];
-  if (!scope) return { drafts, error: "Local comment recovery is unavailable until the project and inspector are identified." };
+  if (!scope) return { drafts, error: "Local test draft recovery is unavailable until the project and inspector are identified." };
   let error = "";
   try {
     const storage = globalThis.localStorage;
@@ -43,9 +46,9 @@ export function readTestCommentDrafts(scope) {
         const record = JSON.parse(raw);
         if (!valid(record) || testCommentDraftKey(scope, record) !== key) throw new Error();
         drafts.push(record);
-      } catch { error = "A local comment draft could not be read. Its stored data has been left untouched."; }
+      } catch { error = "A local test draft could not be read. Its stored data has been left untouched."; }
     }
-  } catch { error = "Local comment recovery is blocked by this browser. Keep this tab open until you save the test run."; }
+  } catch { error = "Local test draft recovery is blocked by this browser. Keep this tab open until you save the test run."; }
   return { drafts: drafts.sort((a, b) => b.updatedAt - a.updatedAt), error };
 }
 
@@ -57,12 +60,13 @@ export function writeTestCommentDraft(scope, draft) {
       name: draft.name, software: draft.software, timeZone: draft.timeZone,
       comment: draft.comment, deviceComments: draft.deviceComments, deviceNames: draft.deviceNames,
       sources: draft.sources, requiresFiles: draft.requiresFiles,
+      eventEdits: draft.eventEdits === undefined ? [] : draft.eventEdits,
     };
     const serialized = JSON.stringify(record);
     if (!valid(record) || serialized.length > MAX_RECORD_LENGTH) throw new Error();
     globalThis.localStorage.setItem(testCommentDraftKey(scope, record), serialized);
     return "";
-  } catch { return "Your pending comments could not be cached locally. Keep this tab open until Save test run succeeds."; }
+  } catch { return "Your pending test changes could not be cached locally. Keep this tab open until Save test run succeeds."; }
 }
 
 export function removeTestCommentDraft(scope, draft) {
@@ -70,5 +74,5 @@ export function removeTestCommentDraft(scope, draft) {
     if (!scope) return "";
     globalThis.localStorage.removeItem(testCommentDraftKey(scope, draft));
     return "";
-  } catch { return "The local comment cache could not be cleared. It may reappear after a refresh; no pending comments were sent automatically."; }
+  } catch { return "The local test draft cache could not be cleared. It may reappear after a refresh; no pending test changes were sent automatically."; }
 }

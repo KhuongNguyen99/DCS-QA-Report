@@ -162,6 +162,22 @@ test("functional test writes require source/software validity, ordered shared ti
   await checkInvalid(data => { data.devices[0].channels[0].series[0].points[0].value = null; }, /numeric value/);
   await checkInvalid(data => { data.devices[0].channels[0].series[0].points[0].sourceId = "unknown"; }, /reference an imported source/);
   await checkInvalid(data => { data.devices[0].status = "Looks okay"; }, /device test result is invalid/);
+  for (const excluded of [null, 0, 1, "true", [], {}]) {
+    await checkInvalid(data => { data.devices[0].channels[0].series[0].points[0].excluded = excluded; }, /excluded flag.*true or false/);
+    await checkInvalid(data => {
+      data.unassignedChannels = data.devices[0].channels; data.devices = [];
+      data.unassignedChannels[0].series[0].points[0].excluded = excluded;
+    }, /excluded flag.*true or false/);
+  }
+  await checkInvalid(data => {
+    const point = data.devices[0].channels[0].series[0].points[0]; point.excluded = true; point.timeMs -= 1;
+  }, /shared run time span/);
+  await checkInvalid(data => {
+    const points = data.devices[0].channels[0].series[0].points; points[1].excluded = true; points.reverse();
+  }, /Measurements must be ordered/);
+  await checkInvalid(data => {
+    const point = data.devices[0].channels[0].series[0].points[0]; point.excluded = true; point.sourceId = "unknown";
+  }, /reference an imported source/);
   for (const comment of [null, 1, false, [], {}, "x".repeat(4001), "😀".repeat(4001)]) {
     await checkInvalid(data => { data.comment = comment; }, /comments.*4,000/);
     await checkInvalid(data => { data.devices[0].comment = comment; }, /comments.*4,000/);
@@ -258,6 +274,47 @@ test("authored comments belong to one test run and remain frozen after approval 
   assert.deepEqual(cleared.sources, data.sources);
   assert.deepEqual((await h.state(report.id)).testRuns.find(run => run.id === otherId), other);
   assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns);
+});
+
+test("event exclusions retain original source JSON, require normal save locks, and stay frozen after later restoration", async t => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Reviewed event rows skid");
+  const id = crypto.randomUUID(), data = runData();
+  const saved = await h.rpc("qa_save_test_run", report.id, id, data, 1, null);
+  assert.equal(Object.hasOwn(saved.devices[0].channels[0].series[0].points[0], "excluded"), false);
+  const excluded = structuredClone(data);
+  excluded.devices[0].channels[0].series[0].points[0].excluded = true;
+  await h.user(second);
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, excluded, 1, 1), /Only the importing inspector/);
+  await h.user(admin);
+  const changed = await h.rpc("qa_save_test_run", report.id, id, excluded, 1, 1);
+  assert.equal(changed.runVersion, 2);
+  assert.deepEqual(changed.devices[0].channels[0].series[0].points, excluded.devices[0].channels[0].series[0].points);
+  assert.deepEqual(changed.sources, data.sources);
+  const stored = (await h.db.query("select data from public.qa_test_runs where id=$1", [id])).rows[0].data;
+  delete stored.devices[0].channels[0].series[0].points[0].excluded;
+  assert.deepEqual(stored, data, "the exclusion flag is the only change to imported source evidence");
+  const restored = structuredClone(excluded);
+  restored.devices[0].channels[0].series[0].points[0].excluded = false;
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, restored, 1, 1), /changed since you opened/);
+  const current = await h.state(report.id);
+  const closed = await h.rpc("qa_approve_revision", report.id, 1, current.project.contentVersion);
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, restored, 1, 2), /approved and closed/);
+  await h.db.exec("reset role");
+  await h.db.exec(migration);
+  await h.db.exec(setupMigration);
+  await h.user(admin);
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns);
+  await h.rpc("qa_new_revision", report.id, 1);
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, restored, 1, 2), /different revision/);
+  const invalid = structuredClone(restored);
+  invalid.devices[0].channels[0].series[0].points[0].excluded = "false";
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, invalid, 2, 2), /excluded flag.*true or false/);
+  const active = await h.rpc("qa_save_test_run", report.id, id, restored, 2, 2);
+  assert.equal(active.runVersion, 3);
+  assert.equal(active.devices[0].channels[0].series[0].points[0].excluded, false);
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns,
+    "restoring a source event cannot rewrite its exclusion in an approved snapshot");
 });
 
 test("deployment verification works for a table-read role without private helper execution", async (t) => {

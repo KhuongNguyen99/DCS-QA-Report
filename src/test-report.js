@@ -282,7 +282,8 @@ function reportWriter(doc) {
       : `${geometry.observedCount} observed change(s)`;
     const invalidNote = geometry.invalidCount
       ? `; ${geometry.invalidCount} invalid reading(s)${geometry.manualTimeRange ? " in source data; dated markers are shown only within this view" : ", marked below the plot when dated"}` : "";
-    const observationNote = `${observationCount}${invalidNote}. ${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the graph end.`;
+    const removedNote = geometry.excludedCount ? `; ${geometry.excludedCount} removed event(s), retained in the audit table` : "";
+    const observationNote = `${observationCount}${invalidNote}${removedNote}. ${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the graph end.`;
     const rangeNote = `${geometry.manualTimeRange ? "Manual view: values outside this time range are not shown. " : ""}Graph span: ${rangeLabel(geometry.domain)}. Shared run span: ${rangeLabel(clock)}. ${clockLabel(clock)}.`;
     const heightFor = (value, size, lineHeight, gap) => {
       textStyle(doc, size);
@@ -411,9 +412,9 @@ function channelDetails(writer, channel, run, { heading = true, timeRange } = {}
   for (const series of channel.series || []) {
     if (!series.points?.length) continue;
     writer.chart(series, run.clock, timeRange);
-    const invalid = series.points.filter((point) => point.valid === false || !Number.isFinite(point.value) || !Number.isFinite(point.timeMs)
+    const invalid = series.points.filter((point) => point.excluded !== true && (point.valid === false || !Number.isFinite(point.value) || !Number.isFinite(point.timeMs)
       || (series.kind === "digital" && point.value !== 0 && point.value !== 1)
-      || (point.previousRawValue !== undefined && point.previousRawValue !== "" && point.previousValue === null));
+      || (point.previousRawValue !== undefined && point.previousRawValue !== "" && point.previousValue === null)));
     if (invalid.length) {
       writer.heading(`Invalid or unplottable values - ${series.name || "Recorded values"}`, 10);
       writer.paragraph("Original tokens are retained below. Invalid after-values are excluded from the vertical scale; an invalid previous token does not invalidate a valid recorded after-value.", { size: 8, color: COLOR.muted });
@@ -424,6 +425,20 @@ function channelDetails(writer, channel, run, { heading = true, timeRange } = {}
       ], invalid.map((point) => [
         point.time || formatSourceTime(point.timeMs, true),
         `${point.previousRawValue ?? "Not recorded"} -> ${point.rawValue ?? "Not recorded"}`,
+        sourceLabel(run, point),
+      ]));
+    }
+    const removed = series.points.filter((point) => point.excluded === true);
+    if (removed.length) {
+      writer.heading(`Removed events - ${series.name || "Recorded values"}`, 10);
+      writer.paragraph("These events were removed from the active graphs. Their original values and source references are retained below for review, including events outside the displayed time range.", { size: 8, color: COLOR.muted });
+      writer.table([
+        { label: "Original source time", width: 142 },
+        { label: "Before / after (original tokens)", width: 220 },
+        { label: "Source", width: WIDTH - 362 },
+      ], removed.map((point) => [
+        point.time || formatSourceTime(point.timeMs, true),
+        `${point.previousRawValue ?? (Number.isFinite(point.previousValue) ? String(point.previousValue) : "Not recorded")} -> ${point.rawValue ?? (Number.isFinite(point.value) ? String(point.value) : "Not recorded")}`,
         sourceLabel(run, point),
       ]));
     }

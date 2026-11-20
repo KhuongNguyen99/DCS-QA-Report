@@ -206,6 +206,36 @@ test("test run and device comments validate optional text without changing impor
   assert.equal(run.devices[0].channels[0].comment, "Original tester evidence");
 });
 
+test("event exclusion validates optional booleans on assigned and unassigned channels while retaining every source row", async () => {
+  const h = fixture();
+  const run = { id: "66666666-6666-4666-8666-666666666666", schemaVersion: 1, runVersion: 2,
+    name: "Reviewed events", software: { name: "PRONETA Basic", version: "3.9" }, devices: [], unassignedChannels: [] };
+  const originalPoint = { timeMs: 1000, value: 4, valid: true, sourceId: "source-1", sourceRow: 2, rawValue: "4.0" };
+  const withPoint = (point, assigned) => {
+    const channel = { series: [{ points: [point] }] };
+    return { ...run, ...(assigned ? { devices: [{ channels: [channel] }] } : { unassignedChannels: [channel] }) };
+  };
+  for (const assigned of [true, false]) {
+    for (const excluded of [undefined, null, 0, 1, "true", [], {}])
+      await assert.rejects(h.backend.saveTestRun(withPoint({ ...originalPoint, excluded }, assigned)), /excluded flag.*true or false/);
+  }
+  assert.deepEqual(h.calls, []);
+  for (const assigned of [true, false]) {
+    for (const flags of [{}, { excluded: true }, { excluded: false }]) {
+      const payload = withPoint({ ...originalPoint, ...flags }, assigned);
+      const before = structuredClone(payload);
+      await h.backend.saveTestRun(payload);
+      const request = h.calls.at(-1)[1];
+      const channel = assigned ? request.p_data.devices[0].channels[0] : request.p_data.unassignedChannels[0];
+      assert.deepEqual(channel.series[0].points, [{ ...originalPoint, ...flags }]);
+      assert.equal(request.p_expected_run_version, 2);
+      assert.equal(request.p_expected_revision, 17);
+      assert.deepEqual(payload, before);
+    }
+  }
+  await assert.rejects(h.backend.saveTestRun(withPoint({ ...originalPoint, excluded: true, value: NaN }, true)), /finite numbers/);
+});
+
 test("setup photo uploads use the saved run and pinned revision without creating an inspection record", async () => {
   const runId = "66666666-6666-4666-8666-666666666666";
   const saved = { id: photoId, walkdownId, testRunId: runId, path: `${userId}/${photoId}.jpg`, caption: "", name: "Setup", width: 100, height: 150 };

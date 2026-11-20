@@ -1166,6 +1166,9 @@ begin
       point_count := point_count + jsonb_array_length(series->'points');
       previous_time := null;
       for point in select value from jsonb_array_elements(series->'points') loop
+        if point ? 'excluded' and jsonb_typeof(point->'excluded') is distinct from 'boolean' then
+          raise exception 'A recorded event''s excluded flag must be true or false.';
+        end if;
         if jsonb_typeof(point) is distinct from 'object' or jsonb_typeof(point->'timeMs') is distinct from 'number'
           or jsonb_typeof(point->'valid') is distinct from 'boolean' or lower_time is null then
           raise exception 'Every measurement needs a valid timestamp within the shared run time span.';

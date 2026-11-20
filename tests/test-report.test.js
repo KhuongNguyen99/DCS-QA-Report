@@ -265,6 +265,7 @@ test("export captures the approved payload before asynchronous font loading", as
     const state = closedState();
     state.testRuns[0].comment = "Approved overall review comment";
     state.testRuns[0].devices[0].comment = "Approved device review comment";
+    state.testRuns[0].devices[0].channels[0].series[0].points[1].excluded = true;
     const pending = createTestReportPdf({ state });
     state.project.revision = 99;
     state.project.skidName = "Mutated skid";
@@ -272,12 +273,15 @@ test("export captures the approved payload before asynchronous font loading", as
     state.testRuns[0].software.version = "Mutated software";
     state.testRuns[0].comment = "Mutated overall comment";
     state.testRuns[0].devices[0].comment = "Mutated device comment";
+    state.testRuns[0].devices[0].channels[0].series[0].points[1].excluded = false;
     release();
     const result = await pdfContent(await pending);
     assert.match(result.text, /Revision 2/);
     assert.match(result.text, /RTD-EXAMPLE/);
     assert.match(result.text, /Approved overall review comment/);
     assert.match(result.text, /Approved device review comment/);
+    assert.match(result.text, /Removed events - Temperature/);
+    assert.match(result.text, /1 removed event\(s\), retained in the audit table/);
     assert.doesNotMatch(result.text, /Mutated|Revision 99/);
   } finally { globalThis.fetch = original; }
 });
@@ -802,6 +806,130 @@ test("invalid selected PDF time ranges fail before fonts or private photos load"
       await assert.rejects(createTestReportPdf({ state, backend, timeRanges: { "run-1": { "device-1": range } } }), /manual graph time range.*invalid/);
     for (const timeRanges of [null, [], "ranges", { "run-1": null }, { "run-1": [] }, { "run-1": "ranges" }])
       await assert.rejects(createTestReportPdf({ state, backend, timeRanges }), /grouped by test run and device/);
+    assert.equal(fetched, false);
+    assert.equal(accessed, false);
+  } finally { globalThis.fetch = original; }
+});
+
+test("approved PDF reconnects retained readings and moves removed values into source audit tables", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const point = (offset, value, extra = {}) => ({ timeMs: startMs + offset, time: `Source time ${offset}`,
+      value, valid: value !== null, rawValue: value === null ? "REMOVED-INVALID" : `Original ${value}`,
+      previousValue: 0, previousRawValue: "Previous original", sourceId: "source-log", sourceRow: offset / 1000 + 2, ...extra });
+    const device = run.devices[0];
+    run.devices = [device];
+    run.unassignedChannels = [];
+    device.comment = "One review for all retained graphs";
+    const channel = device.channels[0];
+    channel.parameters = [];
+    channel.series = [
+      { id: "analog-removal", name: "Analog removal", kind: "analog", unit: "mA", points: [
+        point(0, 0, { excluded: false }), point(98_000, 25, { excluded: true }),
+        point(196_000, 10), point(294_000, 20, { excluded: true }),
+      ] },
+      { id: "digital-removal", name: "Digital removal", kind: "digital", unit: "", points: [
+        point(0, 0), point(98_000, 1, { excluded: true }), point(196_000, 0),
+      ] },
+      { id: "invalid-removal", name: "Invalid removal", kind: "analog", unit: "mA", points: [
+        point(0, 4), point(98_000, null, { excluded: true }), point(196_000, 20),
+      ] },
+    ];
+    const original = structuredClone(state);
+    const timeRanges = { [run.id]: { [device.id]: { ...CLOCK } } };
+    const result = await pdfContent(await createTestReportPdf({ state, timeRanges }));
+    const plots = ["Analog removal - mA", "Digital removal - State", "Invalid removal - mA"].map(title => {
+      const page = result.pages.findIndex(text => text.includes(title) && text.includes("Graph span:"));
+      assert.ok(page >= 0);
+      assert.match(result.pages[page], /2 of 2 observed change\(s\) shown/);
+      return pdfLines(result.streams[page]).filter(line => line.color.length === 3
+        && line.color.every((value, index) => Math.abs(value - [24, 108, 161][index] / 255) < 0.005));
+    });
+    assert.deepEqual(plots.map(lines => lines.length), [2, 2, 2]);
+    const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
+    for (const lines of plots) {
+      assert.deepEqual(lines.map(line => line.dash), [[], [4, 3]]);
+      near(lines[0].from.x, 100.2); near(lines[0].to.x, 412);
+      near(lines[1].from.x, 412); near(lines[1].to.x, 723.8);
+      near(lines[1].from.y, lines[0].to.y); near(lines[1].from.y, lines[1].to.y);
+    }
+    assert.notEqual(plots[0][0].from.y, plots[0][0].to.y, "analog trace reconnects across the removed spike");
+    assert.ok(plots[1].every(line => line.from.y === line.to.y), "removed digital change creates no remaining state transition");
+    assert.notEqual(plots[2][0].from.y, plots[2][0].to.y, "a removed invalid row no longer breaks the retained trace");
+    for (const name of ["Analog removal", "Digital removal", "Invalid removal"])
+      assert.match(result.text, new RegExp(`Removed events - ${name}`));
+    assert.match(result.text, /2 removed event\(s\), retained in the audit table/);
+    assert.match(result.text, /Previous original -> Original 25/);
+    assert.match(result.text, /Previous original -> Original 20/);
+    assert.match(result.text, /Previous original -> REMOVED-INVALID/);
+    assert.match(result.text, /Source time 294000/);
+    assert.match(result.text, /synthetic-log.csv, row 296/);
+    assert.doesNotMatch(result.text, /Invalid or unplottable values|invalid reading\(s\)/, "removed invalid rows are audited without active-invalid warnings");
+    assert.equal(result.text.match(/One review for all retained graphs/g)?.length, 1);
+    assert.deepEqual(state, original);
+  });
+});
+
+test("removed-event audit tables paginate fully outside a manual view and retain original tokens and provenance", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const device = run.devices[0];
+    run.devices = [device];
+    run.unassignedChannels = [];
+    const channel = device.channels[0];
+    channel.parameters = [];
+    const removed = Array.from({ length: 75 }, (_, index) => ({
+      timeMs: startMs + index * 1000, time: `Audit-source-time-${String(index + 1).padStart(2, "0")}`,
+      value: index, previousValue: index - 1, valid: index !== 22, excluded: true,
+      rawValue: `After-token-${String(index + 1).padStart(2, "0")}`, previousRawValue: `Before-token-${String(index + 1).padStart(2, "0")}`,
+      sourceId: "source-log", sourceRow: index + 8001,
+    }));
+    channel.series = [{ id: "audited", name: "Audited signal", kind: "analog", unit: "mA", points: [
+      ...removed,
+      { timeMs: startMs + 125_000, value: null, valid: false, rawValue: "ACTIVE-INVALID-TOKEN", previousRawValue: "Active before", sourceId: "source-log", sourceRow: 9000 },
+      { timeMs: startMs + 150_000, value: 10 }, { timeMs: startMs + 200_000, value: 20 },
+    ] }];
+    const original = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state, timeRanges: {
+      [run.id]: { [device.id]: { startMs: startMs + 100_000, endMs: startMs + 200_000 } },
+    } }));
+    assert.match(result.text, /2 of 2 observed change\(s\) shown/);
+    assert.match(result.text, /75 removed event\(s\), retained in the audit table/);
+    assert.match(result.text, /Removed events - Audited signal/);
+    assert.match(result.text, /including events outside the displayed time range/);
+    for (let index = 1; index <= 75; index++) {
+      const number = String(index).padStart(2, "0");
+      assert.match(result.text, new RegExp(`Audit-source-time-${number}`));
+      assert.match(result.text, new RegExp(`Before-token-${number} -> After-token-${number}`));
+      assert.match(result.text, new RegExp(`synthetic-log.csv, row ${index + 8000}`));
+    }
+    assert.ok(result.pages.filter(page => /Audit-source-time-/.test(page)).length > 1);
+    assert.match(result.text, /1 invalid reading\(s\)/, "only retained invalid events count as active invalid readings");
+    assert.match(result.text, /Invalid or unplottable values - Audited signal/);
+    assert.equal(result.text.match(/ACTIVE-INVALID-TOKEN/g)?.length, 1);
+    assert.equal(result.text.match(/After-token-23/g)?.length, 1, "a removed invalid event appears only in its audit row");
+    for (const page of result.blocks) for (const block of page) {
+      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
+    }
+    assert.deepEqual(state, original);
+  });
+});
+
+test("malformed event removal flags are rejected before assets load", async () => {
+  const original = globalThis.fetch;
+  let fetched = false, accessed = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error("No assets expected"); };
+  const backend = { getPhotoUrl: async () => { accessed = true; return "/private/setup.png"; } };
+  try {
+    for (const excluded of [null, undefined, 0, 1, "true", [], {}]) {
+      const state = closedState();
+      state.testRuns[0].setupPhotos = [setupPhoto("removal")];
+      state.testRuns[0].devices[0].channels[0].series[0].points[0].excluded = excluded;
+      await assert.rejects(createTestReportPdf({ state, backend }), /excluded|exclusion|remov|boolean/i);
+    }
     assert.equal(fetched, false);
     assert.equal(accessed, false);
   } finally { globalThis.fetch = original; }

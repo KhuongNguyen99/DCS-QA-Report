@@ -89,6 +89,15 @@ function testRunPayload(run) {
     }
   }
   check(data);
+  const channels = [
+    ...(Array.isArray(data.devices) ? data.devices.flatMap(device => Array.isArray(device?.channels) ? device.channels : []) : []),
+    ...(Array.isArray(data.unassignedChannels) ? data.unassignedChannels : []),
+  ];
+  for (const channel of channels)
+    for (const series of Array.isArray(channel?.series) ? channel.series : [])
+      for (const point of Array.isArray(series?.points) ? series.points : [])
+        if (point && Object.hasOwn(point, "excluded") && typeof point.excluded !== "boolean")
+          throw new Error("A recorded event's excluded flag must be true or false.");
   let serialized;
   try { serialized = JSON.stringify(data); }
   catch { throw new Error("The test run could not be serialized. Import the files again."); }

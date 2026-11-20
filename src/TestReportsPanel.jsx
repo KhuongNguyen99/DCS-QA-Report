@@ -6,6 +6,7 @@ import { importNoteClarification } from "./proneta-notes.js";
 import { buildTestChart, isTestTimeRange, formatSourceTime, formatTestValue } from "./test-chart.js";
 import { testCommentDraftScope, readTestCommentDrafts, writeTestCommentDraft, removeTestCommentDraft } from "./test-comment-drafts.js";
 import { testTimeRangeScope, readDeviceTimeRange, saveDeviceTimeRange, resetDeviceTimeRange } from "./test-time-ranges.js";
+import { createTestEventEdit, setTestEventEdit, applyTestEventEdits } from "./test-event-edits.js";
 import "./test-reports.css";
 
 const statusClass = (status) => status === "Passed" ? "passed" : status === "Failed" ? "failed" : "untested";
@@ -32,32 +33,65 @@ function TestComment({ title, label = title, value, onChange, disabled }) {
 }
 
 function DeviceTimeAxis({ clock, timeRange, onChange, warning }) {
-  const inputTime = value => {
-    const date = new Date(value);
-    return Number.isFinite(value) && Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 23) : "";
-  };
-  const [start, setStart] = useState(() => inputTime(timeRange?.startMs ?? clock?.startMs));
-  const [end, setEnd] = useState(() => inputTime(timeRange?.endMs ?? clock?.endMs));
+  const [start, setStart] = useState(() => timeRange?.startMs ?? clock?.startMs);
+  const [end, setEnd] = useState(() => timeRange?.endMs ?? clock?.endMs);
   const [error, setError] = useState("");
-  if (!Number.isFinite(clock?.startMs) || !Number.isFinite(clock?.endMs) || clock.endMs <= clock.startMs) return null;
+  const startHandle = useRef(null);
+  const endHandle = useRef(null);
+  if (!Number.isSafeInteger(clock?.startMs) || !Number.isSafeInteger(clock?.endMs) || clock.endMs <= clock.startMs) return null;
+  const span = clock.endMs - clock.startMs;
+  const startPercent = (start - clock.startMs) / span * 100;
+  const endPercent = (end - clock.startMs) / span * 100;
+  const midpoint = (startPercent + endPercent) / 2;
+  const includeDate = formatSourceTime(clock.startMs, true).slice(0, 10) !== formatSourceTime(clock.endMs, true).slice(0, 10);
+  const labelTime = value => formatSourceTime(value, includeDate, value % 1000 !== 0);
+  function moveStart(value) {
+    if (Number.isFinite(value)) setStart(Math.max(clock.startMs, Math.min(Math.round(value), end - 1)));
+    setError("");
+  }
+  function moveEnd(value) {
+    if (Number.isFinite(value)) setEnd(Math.min(clock.endMs, Math.max(Math.round(value), start + 1)));
+    setError("");
+  }
   return <form className="test-time-axis" aria-label="Device time axis" onSubmit={event => {
     event.preventDefault();
-    const range = { startMs: event.currentTarget.elements.rangeStart.valueAsNumber,
-      endMs: event.currentTarget.elements.rangeEnd.valueAsNumber };
+    const range = { startMs: start, endMs: end };
     if (!isTestTimeRange(range, clock)) {
       setError("Choose a start before the end, within the recorded run time span."); return;
     }
-    setStart(inputTime(range.startMs)); setEnd(inputTime(range.endMs)); setError(""); onChange(range);
+    setError(""); onChange(range);
   }}>
     <div className="test-time-axis-heading"><strong>Device time axis</strong><span>{timeRange ? "Manual" : "Automatic"}</span></div>
-    <div className="test-time-axis-fields">
-      <label>Start time<input name="rangeStart" type="datetime-local" step="0.001" required
-        min={inputTime(clock.startMs)} max={inputTime(clock.endMs)} value={start} onChange={event => setStart(event.target.value)} /></label>
-      <label>End time<input name="rangeEnd" type="datetime-local" step="0.001" required
-        min={inputTime(clock.startMs)} max={inputTime(clock.endMs)} value={end} onChange={event => setEnd(event.target.value)} /></label>
+    <div className="test-time-slider-labels">
+      <span>Start time<strong>{labelTime(start)}</strong></span><span>End time<strong>{labelTime(end)}</strong></span>
+    </div>
+    <div className="test-time-slider" role="group" aria-label="Select device time interval" onPointerDown={event => {
+      if (event.target.tagName === "INPUT") return;
+      const bounds = event.currentTarget.getBoundingClientRect();
+      if (!bounds.width) return;
+      const value = clock.startMs + Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) * span;
+      event.preventDefault();
+      if (Math.abs(value - start) <= Math.abs(value - end)) { moveStart(value); startHandle.current?.focus(); }
+      else { moveEnd(value); endHandle.current?.focus(); }
+    }}>
+      <div className="test-time-slider-track"><span style={{ left: `${startPercent}%`, right: `${100 - endPercent}%` }} /></div>
+      <div className="test-time-slider-handle" style={{ clipPath: `inset(-8px ${100 - midpoint}% -8px -16px)` }}>
+        <input ref={startHandle} name="rangeStart" type="range" aria-label="Start time" step={1}
+          min={clock.startMs} max={clock.endMs} value={start} aria-valuemax={end - 1}
+          aria-valuetext={formatSourceTime(start, true, start % 1000 !== 0)}
+          onChange={event => moveStart(event.target.valueAsNumber)} />
+      </div>
+      <div className="test-time-slider-handle" style={{ clipPath: `inset(-8px -16px -8px ${midpoint}%)` }}>
+        <input ref={endHandle} name="rangeEnd" type="range" aria-label="End time" step={1}
+          min={clock.startMs} max={clock.endMs} value={end} aria-valuemin={start + 1}
+          aria-valuetext={formatSourceTime(end, true, end % 1000 !== 0)}
+          onChange={event => moveEnd(event.target.valueAsNumber)} />
+      </div>
+    </div>
+    <div className="test-time-axis-actions">
       <button className="small-button" type="submit">Apply time range</button>
       <button className="small-button" type="button" onClick={() => {
-        setStart(inputTime(clock.startMs)); setEnd(inputTime(clock.endMs)); setError(""); onChange(null);
+        setStart(clock.startMs); setEnd(clock.endMs); setError(""); onChange(null);
       }}>Reset to auto</button>
     </div>
     <p>Applies to all graphs for this device and its PDF. Times use {clock.basis === "absolute" ? "UTC" : "the recorded source clock"}.</p>
@@ -66,11 +100,29 @@ function DeviceTimeAxis({ clock, timeRange, onChange, warning }) {
   </form>;
 }
 
-export function TestSeriesChart({ series, clock, timeRange = null }) {
+function TestEventTable({ entries, seriesName = "recorded signal", onExclusionChange, disabled, restoring = false }) {
+  return <div className="test-table-scroll"><table>
+    <thead><tr><th>Source time</th><th>Previous</th><th>Recorded value</th><th>Source row</th>{onExclusionChange && <th>Action</th>}</tr></thead>
+    <tbody>{entries.map(({ point, index }) => <tr key={index}>
+      <td>{point.time || formatSourceTime(point.timeMs, true)}</td>
+      <td>{point.previousRawValue ?? formatTestValue(point.previousValue)}</td>
+      <td>{point.rawValue ?? formatTestValue(point.value)}{point.valid === false && " (invalid)"}</td>
+      <td>{point.sourceRow}</td>
+      {onExclusionChange && <td><button type="button" className={`small-button ${restoring ? "" : "test-remove"}`}
+        disabled={disabled} aria-label={`${restoring ? "Restore" : "Remove"} event from ${seriesName}, ${point.sourceRow == null ? `event ${index + 1}` : `source row ${point.sourceRow}`}`}
+        onClick={() => onExclusionChange(index, !restoring)}>{restoring ? "Restore" : "Remove"}</button></td>}
+    </tr>)}</tbody>
+  </table></div>;
+}
+
+export function TestSeriesChart({ series, clock, timeRange = null, onExclusionChange, editsDisabled = false }) {
   let chart;
   try { chart = buildTestChart(series, clock, { timeRange }); }
   catch (e) { return <p className="field-error">{e.message}</p>; }
   const { plot } = chart;
+  const entries = series.points.map((point, index) => ({ point, index }));
+  const retained = entries.filter(({ point }) => point.excluded !== true);
+  const removed = entries.filter(({ point }) => point.excluded === true);
   const graphClock = { ...clock, startMs: chart.domain.startMs, endMs: chart.domain.endMs };
   return (
     <figure className="test-chart">
@@ -103,18 +155,13 @@ export function TestSeriesChart({ series, clock, timeRange = null }) {
             </path>)}
         </svg>
       </div>
-      <p>{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "The time axis automatically fits this series."}{clock.basis === "absolute" && " Times are UTC."}</p>
-      <details className="test-events"><summary>View recorded events ({series.points.length})</summary>
-        <div className="test-table-scroll"><table>
-          <thead><tr><th>Source time</th><th>Previous</th><th>Recorded value</th><th>Source row</th></tr></thead>
-          <tbody>{series.points.map((point, index) => <tr key={index}>
-            <td>{point.time || formatSourceTime(point.timeMs, true)}</td>
-            <td>{point.previousRawValue ?? formatTestValue(point.previousValue)}</td>
-            <td>{point.rawValue ?? formatTestValue(point.value)}{point.valid === false && " (invalid)"}</td>
-            <td>{point.sourceRow}</td>
-          </tr>)}</tbody>
-        </table></div>
+      <p>{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}{chart.excludedCount ? ` · ${chart.excludedCount} removed events` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "The time axis automatically fits this series."}{clock.basis === "absolute" && " Times are UTC."}</p>
+      <details className="test-events"><summary>View recorded events ({retained.length})</summary>
+        <TestEventTable entries={retained} seriesName={series.name} onExclusionChange={onExclusionChange} disabled={editsDisabled} />
       </details>
+      {removed.length > 0 && <details className="test-events test-removed-events"><summary>Removed events ({removed.length})</summary>
+        <TestEventTable entries={removed} seriesName={series.name} onExclusionChange={onExclusionChange} disabled={editsDisabled} restoring />
+      </details>}
     </figure>
   );
 }
@@ -137,7 +184,7 @@ function Parameters({ parameters = [], title = "Set parameters" }) {
 }
 
 export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDisabled = false,
-  timeRangeScope = null, rangeOverrides = {}, onTimeRangeChange }) {
+  timeRangeScope = null, rangeOverrides = {}, onTimeRangeChange, onEventExclusionChange }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
   const [localRanges, setLocalRanges] = useState({});
@@ -196,8 +243,10 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
                 {module?.name && <small>{module.name}</small>}</div><TestStatus status={channel.status} /></div>
               <p className="test-source-result">Recorded wiring status: <strong>{channel.rawStatus || "Not recorded"}</strong>{channel.comment ? ` · ${channel.comment}` : ""}</p>
               {!channel.series?.some(series => series.points?.length) && <p className="test-muted">No signal changes were recorded for this channel in the supplied logs.</p>}
-              {(channel.series || []).filter(series => series.points?.length).map((series, index) =>
-                <TestSeriesChart key={series.id || index} series={series} clock={run.clock} timeRange={chosenRange.range} />)}
+              {(channel.series || []).map((series, seriesIndex) => series.points?.length ?
+                <TestSeriesChart key={series.id || seriesIndex} series={series} clock={run.clock} timeRange={chosenRange.range}
+                  editsDisabled={commentsDisabled} onExclusionChange={onEventExclusionChange && ((pointIndex, excluded) =>
+                    onEventExclusionChange(device.id, channel.id, seriesIndex, pointIndex, excluded))} /> : null)}
               <Parameters parameters={channel.parameters} />
               {module?.parameters?.length > 0 && <Parameters parameters={module.parameters} title="Shared module parameters" />}
             </section>;
@@ -243,9 +292,13 @@ function ScopedTestReportsPanel({
     const cached = records.find(item => item.revision === project.revision) || records[0];
     if (!cached) return null;
     const run = runs.find(item => item.id === cached.id && item.runVersion === cached.runVersion);
+    let data = null, eventReplayError = "";
+    try { if (run && !cached.requiresFiles) data = applyTestEventEdits(run, cached.eventEdits || []); }
+    catch (failure) { eventReplayError = failure.message; }
     return { ...cached, walkdownId: project.walkdownId, recovered: true,
+      eventEdits: cached.eventEdits || [], eventReplayError,
       reselectSources: cached.requiresFiles ? cached.sources : null,
-      data: run && !cached.requiresFiles ? structuredClone(run) : null };
+      data };
   }
   const [recovery] = useState(() => readTestCommentDrafts(cacheScope));
   const [draft, setDraft] = useState(() => recover(recovery.drafts));
@@ -264,7 +317,7 @@ function ScopedTestReportsPanel({
   access.current = { readOnly, revision: project.revision, walkdownId: project.walkdownId };
   const selectedRun = runs.find(run => run.id === selectedId) || runs[0];
   const draftRun = runs.find(run => run.id === draft?.id);
-  const stale = draft && (draft.revision !== project.revision || draft.walkdownId !== project.walkdownId
+  const stale = draft && (draft.eventReplayError || draft.revision !== project.revision || draft.walkdownId !== project.walkdownId
     || (draft.runVersion !== null && (!draftRun || draftRun.runVersion !== draft.runVersion
       || !(inspector?.isAdmin || inspector?.id === draftRun.createdBy))));
   const blocked = pending || Boolean(busy);
@@ -282,6 +335,12 @@ function ScopedTestReportsPanel({
   }, [Boolean(draft), setupDirty]);
 
   function draftFrom(run) {
+    const eventEdits = [];
+    for (const device of run?.devices || []) for (const channel of device.channels || [])
+      (channel.series || []).forEach((series, seriesIndex) => (series.points || []).forEach((point, pointIndex) => {
+        if (point.excluded === true) eventEdits.push(createTestEventEdit(run,
+          { deviceId: device.id, channelId: channel.id, seriesIndex, pointIndex }, true));
+      }));
     return {
       revision: project.revision, walkdownId: project.walkdownId,
       id: run?.id || crypto.randomUUID(), runVersion: run?.runVersion ?? null,
@@ -292,6 +351,7 @@ function ScopedTestReportsPanel({
       deviceNames: Object.fromEntries((run?.devices || []).map(device => [device.id, device.name])),
       sources: (run?.sources || []).map(({ name, sha256 }) => ({ name, sha256 })),
       requiresFiles: !run,
+      eventEdits,
       data: run ? structuredClone(run) : null,
     };
   }
@@ -324,6 +384,17 @@ function ScopedTestReportsPanel({
         : { ...next, deviceComments: { ...next.deviceComments, [deviceId]: value } };
     });
   }
+  function changeEventExclusion(deviceId, channelId, seriesIndex, pointIndex, excluded) {
+    if (readOnly || stale || blocked || setupDirty || busyRef.current || (!draft && (!selectedRun || !canEdit(selectedRun)))) return;
+    try {
+      const next = draftRef.current || draftFrom(selectedRun);
+      if (!next.data) return;
+      const edit = createTestEventEdit(next.data, { deviceId, channelId, seriesIndex, pointIndex }, excluded);
+      const eventEdits = setTestEventEdit(next.eventEdits || [], edit);
+      updateDraft({ ...next, eventEdits, data: applyTestEventEdits(next.data, [edit]) });
+      setConfirmDelete(null); setError("");
+    } catch (failure) { setError(failure.message); }
+  }
   function discard() {
     if (busyRef.current) return;
     ++parseRef.current; finishDraft(); setError("");
@@ -343,7 +414,8 @@ function ScopedTestReportsPanel({
         if (hashes(parsed.sources) !== hashes(draft.reselectSources))
           throw new Error("These files do not match the recovered import. Reselect the original files to keep these comments with their test evidence.");
       }
-      if (run === parseRef.current) updateDraft(previous => previous && ({ ...previous, data: parsed, reselectSources: null,
+      const data = applyTestEventEdits(parsed, draft.eventEdits || []);
+      if (run === parseRef.current) updateDraft(previous => previous && ({ ...previous, data, reselectSources: null, eventReplayError: "",
         sources: parsed.sources.map(({ name, sha256 }) => ({ name, sha256 })),
         deviceNames: { ...previous.deviceNames, ...Object.fromEntries(parsed.devices.map(device => [device.id, device.name])) } }));
     } catch (e) {
@@ -404,7 +476,8 @@ function ScopedTestReportsPanel({
     {cacheError && <p className="message error" role="alert">{cacheError}</p>}
     {draft && <section className="card test-import-form" aria-label="Import test run">
       <h3>{draft.runVersion ? "Edit test run" : "Import a test run"}</h3>
-      {draft.recovered && <p role="status">Recovered pending comments for {draft.name || "this test run"}, revision {draft.revision}. They remain unsaved until Save test run.</p>}
+      {draft.recovered && <p role="status">Recovered pending {draft.eventEdits?.length ? "comments and event edits" : "comments"} for {draft.name || "this test run"}, revision {draft.revision}. They remain unsaved until Save test run.</p>}
+      {draft.eventReplayError && <p className="field-error" role="alert">{draft.eventReplayError}</p>}
       {(readOnly || stale) && <p className="field-error" role="alert">This revision or test run was closed or changed. Your local preview is retained for review and copying. Discard this draft and reopen the current run before saving.</p>}
       {draft.recovered && draft.requiresFiles && !draft.data && <p role="status">Reselect the original source files to restore this import before saving: {draft.sources.map(source => source.name).join(", ") || "the files for this test run"}.</p>}
       <fieldset disabled={blocked || readOnly || stale}>
@@ -458,6 +531,7 @@ function ScopedTestReportsPanel({
       onRemovePhoto={onRemoveSetupPhoto} onDirtyChange={setSetupDirty} />}
     {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${project.revision}`}</span></header>
       <TestRunDetail key={preview.id || draft?.id} run={preview} onCommentChange={canComment ? changeComment : undefined}
+        onEventExclusionChange={canComment ? changeEventExclusion : undefined}
         commentsDisabled={blocked || setupDirty} runId={previewRunId} timeRangeScope={rangeScope}
         rangeOverrides={timeRangeChanges[rangeScope]?.[previewRunId]} onTimeRangeChange={onTimeRangeChange} /></section>}
     {!preview && !draft && <div className="card test-empty"><Icon name="report" size={36} /><h3>No test runs in this revision</h3><p>{readOnly ? "Start a new revision to import a test run." : "Import the files for your test, review the devices and parameters, then save the run."}</p></div>}

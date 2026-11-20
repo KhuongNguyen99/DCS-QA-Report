@@ -44,9 +44,12 @@ export function buildTestChart(series, clock, {
   if (!Array.isArray(series?.points)) throw new Error("The graph series has no observation list.");
   let firstMs = Infinity, lastMs = -Infinity;
   for (const point of series.points) {
+    if (Object.hasOwn(point, "excluded") && typeof point.excluded !== "boolean")
+      throw new Error("A recorded event's excluded flag must be true or false.");
     if (!Number.isFinite(point.timeMs)) continue;
     if (point.timeMs < runStartMs || point.timeMs > runEndMs)
       throw new Error("An observation falls outside the shared test-run time span.");
+    if (point.excluded === true) continue;
     firstMs = Math.min(firstMs, point.timeMs);
     lastMs = Math.max(lastMs, point.timeMs);
   }
@@ -69,16 +72,19 @@ export function buildTestChart(series, clock, {
   const valid = [];
   const invalid = [];
   const sequence = [];
-  let latestTime = -Infinity;
+  let latestTime = -Infinity, excludedCount = 0;
   for (const point of series.points) {
+    if (Number.isFinite(point.timeMs)) {
+      if (point.timeMs < latestTime)
+        throw new Error("Observations must be ordered by time before connecting the graph.");
+      latestTime = point.timeMs;
+    }
+    if (point.excluded === true) { excludedCount += 1; continue; }
     if (!Number.isFinite(point.timeMs)) {
       invalid.push({ ...point, x: null });
       sequence.push(null);
       continue;
     }
-    if (point.timeMs < latestTime)
-      throw new Error("Observations must be ordered by time before connecting the graph.");
-    latestTime = point.timeMs;
     const candidate = { ...point, x: xFor(point.timeMs) };
     if (point.valid === false || !Number.isFinite(point.value)
       || (series.kind === "digital" && point.value !== 0 && point.value !== 1)) {
@@ -172,6 +178,7 @@ export function buildTestChart(series, clock, {
     observedCount: valid.length,
     visibleObservedCount: points.length,
     invalidCount: invalid.length,
+    excludedCount,
     manualTimeRange,
   };
 }

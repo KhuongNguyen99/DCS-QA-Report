@@ -121,7 +121,7 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false } = {}
     stored: () => Object.fromEntries(Object.keys(window.localStorage).map(key => [key, window.localStorage.getItem(key)])),
     query: selector => document.querySelector(selector),
     text: () => document.body.textContent.replace(/\s+/g, " "),
-    button: name => [...document.querySelectorAll("button")].find(button => button.textContent.trim() === name),
+    button: name => [...document.querySelectorAll("button")].find(button => button.textContent.trim() === name || button.getAttribute('aria-label') === name),
     field: name => [...document.querySelectorAll("label")].find(label => label.textContent.trim() === name)?.querySelector("input"),
     async click(button) { assert.ok(button, "button exists"); await window.act(async () => button.click()); },
     async configure(changes) { await window.act(async () => window.configure(changes)); },
@@ -352,6 +352,149 @@ test("a device shows separate mixed-unit graphs with individual scales and one s
   assert.equal(h.document.querySelectorAll('[aria-label="Overall test run comment"]').length, 1);
   assert.equal(h.window.calls.length, 0);
   assert.deepEqual(run, before, "splitting the graphs preserves saved evidence and comments");
+});
+
+function eventRun() {
+  const run = savedRun();
+  const channel = run.devices[0].channels[0];
+  const series = { ...channel.series[0], name: "PD-EXAMPLE", kind: "analog", unit: "mA" };
+  series.points = [4, 100, 5].map((value, index) => ({ ...series.points[0], timeMs: startMs + index * 10_000,
+    time: `2026-11-19 12:00:${String(index * 10).padStart(2, "0")}`, value, rawValue: `${value} mA`, sourceRow: index + 2 }));
+  channel.series = [{ ...series, id: "empty-series", points: [] }, series];
+  return run;
+}
+
+test("removing a recorded row updates graph geometry immediately and saves only an exclusion of its original evidence", async t => {
+  const run = eventRun(), before = structuredClone(run);
+  const h = await setup(t, { runs: [run] });
+  const graph = () => h.query('svg[data-time-start]');
+  assert.equal(graph().querySelectorAll('.test-observation').length, 3);
+  assert.ok(Number(graph().querySelectorAll('text')[4].textContent) > 100);
+  await h.click(h.button('Remove event from PD-EXAMPLE, source row 3'));
+  assert.equal(graph().querySelectorAll('.test-observation').length, 2);
+  assert.equal(graph().querySelectorAll('.test-trace').length, 1);
+  assert.equal(graph().querySelectorAll('text')[4].textContent, '25', 'removed outlier no longer expands the current scale');
+  assert.match(h.query('.test-removed-events').textContent, /100 mA/);
+  assert.equal(h.window.dirty.at(-1), true);
+  assert.equal(h.window.calls.length, 0);
+  assert.deepEqual(run, before);
+  await h.click(h.button('Save test run'));
+  const payload = structuredClone(h.window.calls[0].payload);
+  const points = payload.devices[0].channels[0].series[1].points;
+  assert.deepEqual(points, before.devices[0].channels[0].series[1].points.map((point, index) => index === 1 ? { ...point, excluded: true } : point));
+  assert.deepEqual(payload.devices[0].channels[0].series[0].points, [], 'original series index survives empty series');
+  await h.settle('Network unavailable');
+  assert.equal(graph().querySelectorAll('.test-observation').length, 2);
+  assert.equal(Object.keys(h.stored()).length, 1);
+  await h.click(h.button('Save test run'));
+  assert.deepEqual(structuredClone(h.window.calls[1].payload), payload);
+  await h.settle();
+  assert.deepEqual(h.stored(), {});
+  assert.equal(h.window.dirty.at(-1), false);
+  assert.ok(h.button('Restore event from PD-EXAMPLE, source row 3'));
+});
+
+test("event removals recover with comments after reopening and can all be restored or discarded", async t => {
+  const run = eventRun();
+  const h = await setup(t, { runs: [run] });
+  await h.fill(h.query('[aria-label="Overall test run comment"] textarea'), 'Pending conclusion');
+  for (const row of [2, 3, 4]) await h.click(h.button(`Remove event from PD-EXAMPLE, source row ${row}`));
+  assert.equal(h.query('svg[data-time-start]').querySelectorAll('.test-observation,.test-trace,.test-held-value').length, 0);
+  const stored = h.stored();
+  await h.unmount();
+  const reopened = await setup(t, { runs: [run] }, { stored });
+  assert.match(reopened.text(), /Recovered pending comments and event edits/);
+  assert.equal(reopened.query('[aria-label="Overall test run comment"] textarea').value, 'Pending conclusion');
+  assert.equal(reopened.query('svg[data-time-start]').querySelectorAll('.test-observation').length, 0);
+  await reopened.click(reopened.button('Restore event from PD-EXAMPLE, source row 3'));
+  assert.equal(reopened.query('svg[data-time-start]').querySelectorAll('.test-observation').length, 1);
+  assert.equal(reopened.window.calls.length, 0);
+  const cache = JSON.parse(Object.values(reopened.stored())[0]);
+  assert.equal(cache.eventEdits.find(edit => edit.pointIndex === 1).excluded, false);
+  await reopened.click(reopened.button('Discard changes'));
+  assert.equal(reopened.query('svg[data-time-start]').querySelectorAll('.test-observation').length, 3);
+  assert.deepEqual(reopened.stored(), {});
+});
+
+test("restoring a previously saved exclusion is pending and respects ownership and revision locks", async t => {
+  const run = eventRun();
+  run.devices[0].channels[0].series[1].points[1].excluded = true;
+  const h = await setup(t, { runs: [run], inspector: { id: 'other-inspector', isAdmin: false } });
+  assert.equal(h.button('Restore event from PD-EXAMPLE, source row 3'), undefined);
+  assert.equal(h.button('Remove event from PD-EXAMPLE, source row 2'), undefined);
+  await h.configure({ inspector: { id: 'other-inspector', isAdmin: true } });
+  await h.click(h.button('Restore event from PD-EXAMPLE, source row 3'));
+  assert.equal(h.query('svg[data-time-start]').querySelectorAll('.test-observation').length, 3);
+  await h.configure({ pending: true });
+  assert.equal(h.button('Remove event from PD-EXAMPLE, source row 2').disabled, true);
+  await h.configure({ pending: false, runs: [{ ...run, runVersion: run.runVersion + 1 }] });
+  assert.equal(h.button('Remove event from PD-EXAMPLE, source row 2'), undefined);
+  assert.equal(h.button('Save test run').disabled, true);
+  await h.configure({ readOnly: true, project: { ...project, status: 'closed' } });
+  assert.equal(h.button('Remove event from PD-EXAMPLE, source row 2'), undefined);
+  assert.equal(h.window.calls.length, 0);
+  assert.equal(run.devices[0].channels[0].series[1].points[1].excluded, true);
+});
+
+test("recovered event edits require matching source files and original row identity before replay", async t => {
+  const parsed = eventRun();
+  const h = await setup(t);
+  await h.click(h.button('Import test run'));
+  await h.fill(h.field('Software version'), '1.0');
+  await h.choose(); await h.finishParse(parsed);
+  await h.click(h.button('Remove event from PD-EXAMPLE, source row 3'));
+  const stored = h.stored();
+  await h.unmount();
+  const reopened = await setup(t, {}, { stored });
+  assert.equal(reopened.button('Save test run').disabled, true);
+  await reopened.choose();
+  await reopened.finishParse({ ...parsed, sources: [{ ...parsed.sources[0], sha256: 'cd'.repeat(32) }] });
+  assert.match(reopened.text(), /files do not match/);
+  assert.equal(reopened.button('Save test run').disabled, true);
+  const changed = structuredClone(parsed);
+  changed.devices[0].channels[0].series[1].points[1].rawValue = 'different source evidence';
+  await reopened.choose(); await reopened.finishParse(changed);
+  assert.match(reopened.text(), /recorded events no longer match/);
+  assert.equal(reopened.button('Save test run').disabled, true);
+  await reopened.choose(); await reopened.finishParse(parsed);
+  assert.equal(reopened.query('svg[data-time-start]').querySelectorAll('.test-observation').length, 2);
+  assert.equal(reopened.button('Save test run').disabled, false);
+  assert.equal(reopened.window.calls.length, 0);
+});
+
+test("a recovered saved-run event identity mismatch retains the cache and blocks saving", async t => {
+  const run = eventRun();
+  const h = await setup(t, { runs: [run] });
+  await h.click(h.button('Remove event from PD-EXAMPLE, source row 3'));
+  const stored = h.stored(); await h.unmount();
+  const changed = structuredClone(run);
+  changed.devices[0].channels[0].series[1].points[1].value = 99;
+  const reopened = await setup(t, { runs: [changed] }, { stored });
+  assert.match(reopened.text(), /recorded events no longer match/);
+  assert.equal(reopened.button('Save test run').disabled, true);
+  assert.deepEqual(reopened.stored(), stored);
+  assert.equal(reopened.window.calls.length, 0);
+});
+
+test("rereading original files retains saved exclusions and honors pending removals and restores", async t => {
+  const original = eventRun();
+  const run = structuredClone(original);
+  run.devices[0].channels[0].series[1].points[0].excluded = true;
+  run.devices[0].channels[0].series[1].points[1].excluded = true;
+  const h = await setup(t, { runs: [run] });
+  await h.click(h.button('Restore event from PD-EXAMPLE, source row 3'));
+  await h.click(h.button('Remove event from PD-EXAMPLE, source row 4'));
+  await h.choose(); await h.finishParse(original);
+  assert.equal(h.query('svg[data-time-start]').querySelectorAll('.test-observation').length, 1);
+  assert.ok(h.button('Restore event from PD-EXAMPLE, source row 2'));
+  assert.ok(h.button('Remove event from PD-EXAMPLE, source row 3'));
+  assert.ok(h.button('Restore event from PD-EXAMPLE, source row 4'));
+  const stored = h.stored(); await h.unmount();
+  const reopened = await setup(t, { runs: [run] }, { stored });
+  await reopened.choose(); await reopened.finishParse(original);
+  await reopened.click(reopened.button('Save test run'));
+  assert.deepEqual(Array.from(reopened.window.calls[0].payload.devices[0].channels[0].series[1].points, point => point.excluded), [true, false, true]);
+  await reopened.settle();
 });
 
 test("run and device comments start a pending edit, retain failed saves, and preserve imported evidence", async t => {
@@ -602,10 +745,10 @@ test("malformed and blocked browser storage cannot erase in-memory comments or t
   assert.equal(quota.window.dirty.at(-1), false);
 });
 
-const rangeInput = offset => new Date(startMs + offset).toISOString().slice(0, 23);
+const rangeInput = offset => String(startMs + offset);
 async function applyRange(h, start, end) {
-  await h.fill(h.field("Start time"), rangeInput(start));
-  await h.fill(h.field("End time"), rangeInput(end));
+  await h.fill(h.query('input[name="rangeStart"]'), rangeInput(start));
+  await h.fill(h.query('input[name="rangeEnd"]'), rangeInput(end));
   await h.click(h.button("Apply time range"));
 }
 
@@ -621,8 +764,10 @@ test("one manual device range aligns every graph without changing comments or cr
   const before = structuredClone(run);
   const h = await setup(t, { runs: [run] });
   await applyRange(h, 10_000, 60_000);
-  assert.equal(h.field('Start time').valueAsNumber, startMs + 10_000);
-  assert.equal(h.field('End time').valueAsNumber, startMs + 60_000);
+  assert.equal(h.query('input[name="rangeStart"]').valueAsNumber, startMs + 10_000);
+  assert.equal(h.query('input[name="rangeEnd"]').valueAsNumber, startMs + 60_000);
+  assert.equal(h.document.querySelectorAll('.test-time-slider input[type="range"]').length, 2);
+  assert.equal(h.query('input[type="datetime-local"]'), null);
   const plots = h.document.querySelectorAll('svg[data-time-start]');
   assert.equal(plots.length, 2);
   for (const plot of plots) {
@@ -644,14 +789,34 @@ test("one manual device range aligns every graph without changing comments or cr
   await h.unmount();
   const reopened = await setup(t, { runs: [run] }, { stored });
   assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
-  assert.equal(reopened.field('Start time').valueAsNumber, startMs + 10_000, 'source-clock coordinates are not shifted by the browser timezone');
-  await applyRange(reopened, 70_000, 60_000);
-  assert.match(reopened.text(), /Choose a start before the end/);
+  assert.equal(reopened.query('input[name="rangeStart"]').valueAsNumber, startMs + 10_000, 'source-clock coordinates are not shifted by the browser timezone');
+  await reopened.fill(reopened.query('input[name="rangeStart"]'), rangeInput(70_000));
+  assert.equal(reopened.query('input[name="rangeStart"]').valueAsNumber, startMs + 60_000 - 1, 'start handle cannot cross the end handle');
+  await reopened.fill(reopened.query('input[name="rangeEnd"]'), rangeInput(0));
+  assert.equal(reopened.query('input[name="rangeEnd"]').valueAsNumber, startMs + 60_000, 'end handle cannot cross the start handle');
   assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
   await reopened.click(reopened.button('Reset to auto'));
   assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs));
   assert.deepEqual(reopened.stored(), {});
   assert.equal(reopened.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea').value, before.devices[0].comment);
+});
+
+test("slider handles announce source-clock times and preserve millisecond precision across midnight", async t => {
+  const midnight = Date.UTC(2026, 10, 20);
+  const run = savedRun({ clock: { basis: 'absolute', timeZone: 'UTC', startMs: midnight - 2000, endMs: midnight + 2000 } });
+  run.devices[0].channels.forEach(channel => { channel.series[0].points = [{ ...channel.series[0].points[0], timeMs: midnight, value: 1 }]; });
+  const h = await setup(t, { runs: [run] });
+  await h.fill(h.query('input[name="rangeStart"]'), String(midnight - 125));
+  await h.fill(h.query('input[name="rangeEnd"]'), String(midnight + 250));
+  assert.equal(h.query('input[name="rangeStart"]').getAttribute('aria-valuetext'), '2026-11-19 23:59:59.875');
+  assert.equal(h.query('input[name="rangeEnd"]').getAttribute('aria-valuetext'), '2026-11-20 00:00:00.250');
+  assert.match(h.query('.test-time-slider-labels').textContent, /2026-11-19 23:59:59.875/);
+  assert.match(h.query('.test-time-slider-labels').textContent, /2026-11-20 00:00:00.250/);
+  assert.equal(h.query('svg[data-time-start]').dataset.timeStart, String(midnight - 1000), 'dragging is a preview until Apply');
+  await h.click(h.button('Apply time range'));
+  assert.equal(h.query('svg[data-time-start]').dataset.timeStart, String(midnight - 125));
+  assert.equal(h.query('svg[data-time-start]').dataset.timeEnd, String(midnight + 250));
+  assert.equal(h.window.calls.length, 0);
 });
 
 test("manual time ranges and pending comment drafts recover independently", async t => {

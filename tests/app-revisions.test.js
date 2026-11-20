@@ -626,8 +626,8 @@ test("App exports the current device view range on approved reports even when br
   const approved = copy(h.server.state);
   await h.nav('Test reports');
   const range = async (from, to) => {
-    await h.fill(h.document.querySelector('input[name="rangeStart"]'), new Date(start + from).toISOString().slice(0, 23));
-    await h.fill(h.document.querySelector('input[name="rangeEnd"]'), new Date(start + to).toISOString().slice(0, 23));
+    await h.fill(h.document.querySelector('input[name="rangeStart"]'), String(start + from));
+    await h.fill(h.document.querySelector('input[name="rangeEnd"]'), String(start + to));
     await h.click(h.button('Apply time range'));
   };
   await range(10_000, 40_000);
