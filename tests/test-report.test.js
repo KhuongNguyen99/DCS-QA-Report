@@ -151,13 +151,23 @@ test("test PDF rejects drafts, incomplete approval data, wrong skid, and missing
 
 test("approved test PDF preserves results, active settings, raw invalid tokens, provenance, and common graph clocks", async () => {
   await withFonts(async (requested) => {
-    const result = await pdfContent(await createTestReportPdf({ state: closedState() }));
+    const state = closedState();
+    const legacyNote = "synthetic-log.csv, line 10: duplicate I/O event retained; no observations were removed.";
+    state.testRuns[0].warnings.push(legacyNote);
+    const savedState = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    assert.deepEqual(state, savedState, "Clarifying a legacy import note must not change approved evidence");
     assert.deepEqual(requested.sort(), ["NotoSans-Bold.ttf", "NotoSans-Regular.ttf"]);
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
       "Siemens PRONETA Basic", "Version entered by tester", "RTD-EXAMPLE", "VALVE-EXAMPLE", "Recorded wiring result: Failed (source: Error)",
       "Recorded wiring result: Passed (source: OK)", "0 (encoded selection)", "Celsius", "7FFFH", "synthetic-log.csv, row 3",
       "Module diagnostic setting", "Unused-channel setting", "Not applicable", "Synthetic warning retained for review.", "Unrecognized synthetic event"])
       assert.ok(result.text.includes(text), `Missing report text: ${text}`);
+    const reportText = result.text.replace(/\s+/g, " ");
+    assert.ok(reportText.includes(legacyNote), "The original archived warning stays in the report");
+    assert.match(reportText, /This does not establish a duplicate physical event; multiple changes can share a timestamp\./);
+    assert.match(reportText, /All observations were retained\./);
+    assert.ok(reportText.indexOf("Earlier import notes use") < reportText.indexOf(legacyNote), "Clarification precedes the original notes");
     assert.ok(result.text.replace(/\s/g, "").includes("ab".repeat(32)));
     assert.doesNotMatch(result.raw, /\/Subtype\s*\/Image/, "Charts must remain vector shapes");
     assert.match(result.raw, /D:20261120113000\+00'00'/, "PDF metadata uses approval time, not export time");

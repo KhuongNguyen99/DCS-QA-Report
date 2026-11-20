@@ -55,6 +55,8 @@ Every graph in one run uses the **earliest through latest valid timestamp across
 
 ### Import storage and limits
 
+Import notes record source limitations and recovery actions. Unquoted commas in log module names are reassembled without dropping the full name or event description. Matching change text at the same channel and timestamp is described as a repeated change, since timestamp precision can conceal separate events; every observation is retained. Earlier saved notes that called these “duplicate I/O events” keep their original text and receive a clarification in the preview and PDF. This does not alter approved revision data. Missing timezone offsets and parameter enum-label dictionaries remain documented source limitations.
+
 Parsing happens in the browser. Saving stores normalized report data privately in Supabase, together with filenames, byte counts, SHA-256 hashes, and original result/event provenance. Original CSV and parameter files are not uploaded to public GitHub or retained as separate server files. Keep the source exports if you need the original files later. Approved snapshots freeze the normalized data, so future parser changes do not reinterpret earlier reports.
 
 Each import accepts up to 20 files, 10 MiB per file, 30 MiB in total, and 10,000 event rows. A normalized run is limited to 4 MiB, with up to 20 active runs per skid. An import belongs to its opening revision; a remote closeout or revision change retains the local preview but blocks saving it into a different revision. Conflicting saved edits require reopening the current run. Source parsing and PDF generation are covered by synthetic tests; private field exports are not committed as fixtures.

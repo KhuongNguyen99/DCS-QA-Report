@@ -141,8 +141,24 @@ test('raw invalid readings and exact duplicates survive import without fabricate
   assert.equal(points[2].previousValue, 20);
   assert.equal(points[3].rawValue, 'NaN °C');
   assert.equal(run.devices[0].status, 'Not tested');
-  assert.ok(run.warnings.some((warning) => /duplicate I\/O event/.test(warning)));
+  assert.ok(run.warnings.some((warning) => /repeated I\/O change at the same recorded timestamp/.test(warning)));
   assert.ok(run.warnings.some((warning) => /invalid current/.test(warning)));
+});
+
+test('same-second back-and-forth changes remain distinct observations without claiming duplicate events', async () => {
+  const run = await parsePronetaFiles([file('S-log.csv', log([
+    [2, 'AI 2xRTD', event('TH-1001', 0, '20 °C', '20.1 °C'), '2026-01-20 12:00:03'],
+    [2, 'AI 2xRTD', event('TH-1001', 0, '20.1 °C', '20 °C'), '2026-01-20 12:00:03'],
+    [2, 'AI 2xRTD', event('TH-1001', 0, '20 °C', '20.1 °C'), '2026-01-20 12:00:03'],
+    [2, 'AI 2xRTD', event('TH-1001', 0, '19.9 °C', '20 °C'), '2026-01-20 12:00:02'],
+  ]))], options);
+  const points = allPoints(run);
+  assert.deepEqual(points.map((point) => point.value), [20, 20.1, 20, 20.1]);
+  assert.deepEqual(points.map((point) => point.sourceRow), [5, 4, 3, 2]);
+  const repeated = run.warnings.filter((warning) => /repeated I\/O change/.test(warning));
+  assert.equal(repeated.length, 1);
+  assert.match(repeated[0], /line 4:.*all observations retained \(duplicate event not established\)/);
+  assert.ok(!run.warnings.some((warning) => /duplicate I\/O event retained/.test(warning)));
 });
 
 test('invalid numeric tokens and nonbinary digital readings are not partially parsed', async () => {

@@ -273,15 +273,21 @@ test("closed read-only runs remain reviewable and exportable with absolute graph
   const run = savedRun();
   run.clock.basis = "absolute";
   run.clock.timeZone = "Source clock (timezone not recorded)";
+  const legacyNote = "synthetic-log.csv, line 10: duplicate I/O event retained; no observations were removed.";
+  run.warnings = [legacyNote];
+  const before = structuredClone(run);
   const h = await setup(t, { readOnly: true, project: { ...project, status: "closed" }, runs: [run] });
   assert.equal(h.button("Import test run"), undefined);
   assert.equal(h.button("Edit run"), undefined);
   assert.equal(h.button("Remove run"), undefined);
   assert.match(h.text(), /UTC/);
+  assert.match(h.text(), /does not establish a duplicate physical event/);
+  assert.equal(h.query(".test-import-notes li").textContent, legacyNote);
   assert.equal(h.document.querySelectorAll("svg[data-time-start]").length, 2);
   await h.click(h.button("Export test PDF"));
   assert.deepEqual(Array.from(h.window.exports), ["run-1"]);
   assert.equal(h.window.calls.length, 0);
+  assert.deepEqual(run, before, "clarifying saved notes does not rewrite approved data");
 });
 
 test("SVG graphs connect observations and draw a separate horizontal final-value extension", async t => {

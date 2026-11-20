@@ -1,6 +1,7 @@
 import { jsPDF } from "jspdf";
 import { approvedReportDate, printableText } from "./report.js";
 import { buildTestChart, formatSourceTime } from "./test-chart.js";
+import { importNoteClarification } from "./proneta-notes.js";
 
 const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 548 };
 const WIDTH = PAGE.width - PAGE.margin * 2;
@@ -363,6 +364,8 @@ function runAppendices(writer, run) {
     source.sha256 || "Not recorded",
   ]));
   writer.heading("Import notes");
+  const clarification = importNoteClarification(run.warnings);
+  if (clarification) writer.paragraph(clarification, { size: 8.5 });
   if (!run.warnings?.length) writer.paragraph("No import warnings recorded.");
   else run.warnings.forEach((warning) => writer.paragraph(warning, { size: 8.5 }));
   if (run.unparsedEvents?.length) {

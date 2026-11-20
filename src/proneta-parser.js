@@ -3,6 +3,8 @@
  * is a list of changes, not sampled telemetry and never evidence of a pass.
  * No source files are uploaded or executable spreadsheet expressions evaluated.
  */
+import { REPEATED_IO_CHANGE_NOTE } from './proneta-notes.js';
+
 export const PRONETA_LIMITS = Object.freeze({
   files: 20,
   fileBytes: 10 * 1024 * 1024,
@@ -573,7 +575,7 @@ export async function parsePronetaFiles(files, options = {}) {
         channel.series.push(series);
       }
       const signature = `${station.id}|${record.slot}|${record.channel}|${record.time}|${record.description}`;
-      if (signatures.has(signature)) warn(`${source.name}, line ${record.sourceRow}: duplicate I/O event retained; no observations were removed.`);
+      if (signatures.has(signature)) warn(`${source.name}, line ${record.sourceRow}: ${REPEATED_IO_CHANGE_NOTE}`);
       signatures.add(signature);
       if (!record.reading.valid || !record.previous.valid) warn(`${source.name}, line ${record.sourceRow}: invalid ${!record.reading.valid ? 'current' : 'previous'} reading retained as raw text; no numeric value was invented.`);
       series.points.push({

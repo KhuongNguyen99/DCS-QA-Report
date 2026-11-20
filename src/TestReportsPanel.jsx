@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "./Icons.jsx";
 import { parsePronetaFiles } from "./proneta-parser.js";
+import { importNoteClarification } from "./proneta-notes.js";
 import { buildTestChart, formatSourceTime, formatTestValue } from "./test-chart.js";
 import "./test-reports.css";
 
@@ -90,6 +91,7 @@ export function TestRunDetail({ run }) {
   const shown = useMemo(() => devices.filter(device => `${device.name} ${device.status}`.toLowerCase().includes(search.toLowerCase())), [devices, search]);
   const device = shown.find(item => item.id === selected) || shown[0];
   const counts = devices.reduce((result, item) => ({ ...result, [item.status]: (result[item.status] || 0) + 1 }), {});
+  const noteClarification = importNoteClarification(run.warnings);
   return <div className="test-run-detail">
     <div className="test-run-facts">
       <div><span>Software</span><strong>{run.software?.name} {run.software?.version || "— version required"}</strong></div>
@@ -98,7 +100,9 @@ export function TestRunDetail({ run }) {
     </div>
     <p className="test-meaning">Passed/Failed comes from the recorded PRONETA wiring result. Graphs show logged signal changes in their original units.</p>
     {run.warnings?.length > 0 && <details className="test-import-notes" open>
-      <summary>Import notes ({run.warnings.length})</summary><ul>{run.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+      <summary>Import notes ({run.warnings.length})</summary>
+      {noteClarification && <p>{noteClarification}</p>}
+      <ul>{run.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
     </details>}
     <div className="test-device-layout">
       <aside className="test-device-picker" aria-label="Tested devices">
