@@ -19,8 +19,6 @@
 .test-setup-drag:active { cursor: grabbing; }
 .test-setup-photo.is-dragging { opacity: .55; }
 .test-setup-photo.is-drop-target { outline: 3px solid #39724e; outline-offset: 2px; }
-.test-setup-order-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; margin-bottom: 16px; border-radius: 7px; background: #eef4e8; font-size: 12px; }
-.test-setup-order-actions p { flex-basis: 100%; margin: 0; }
 .test-setup-filename { font-size: 11px; font-weight: 600; color: #61705b; overflow-wrap: anywhere; margin: 0 0 8px; }
 .test-setup-caption { font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 12px; color: #354431; }
 .test-setup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 11px; }

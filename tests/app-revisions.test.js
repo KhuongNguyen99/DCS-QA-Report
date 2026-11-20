@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { inspectionTargets } from "../src/domain.js";
-import { photoOrderKey } from "../src/photo-order.js";
 
 const schedule = JSON.parse(await readFile(new URL("../src/data/schedule.json", import.meta.url), "utf8"));
 const SKID = "11111111-1111-4111-8111-111111111111";
@@ -200,7 +199,7 @@ function createServer(initiallyClosed = false) {
           const run = server.state.testRuns.find(item => item.id === runId);
           assert.deepEqual(copy(expectedIds), run.setupPhotos.map(photo => photo.id));
           server.calls.push({ kind: 'orderSetup', revision, runId, orderedIds: copy(orderedIds), expectedIds: copy(expectedIds) });
-          run.setupPhotos = orderedIds.map(id => run.setupPhotos.find(photo => photo.id === id));
+          run.setupPhotos = Array.from(orderedIds, id => run.setupPhotos.find(photo => photo.id === id));
           server.state.project.contentVersion += 1;
           return copy(run.setupPhotos);
         },
@@ -237,7 +236,7 @@ function createServer(initiallyClosed = false) {
   return server;
 }
 
-async function setup(t, { closed = false, stored = {}, photos } = {}) {
+async function setup(t, { closed = false, photos } = {}) {
   const errors = [];
   const console = new VirtualConsole();
   console.on("jsdomError", error => errors.push(error.message));
@@ -248,7 +247,6 @@ async function setup(t, { closed = false, stored = {}, photos } = {}) {
   const { window } = dom;
   const server = createServer(closed);
   if (photos) server.state.photos = copy(photos);
-  for (const [key, value] of Object.entries(stored)) window.localStorage.setItem(key, value);
   Object.assign(window, { IS_REACT_ACT_ENVIRONMENT: true, backendMock: server.workspace,
     pdfExports: [], testPdfExports: [], downloads: [], scrollTo() {}, structuredClone: copy });
   window.MessageChannel = class {
@@ -265,10 +263,8 @@ async function setup(t, { closed = false, stored = {}, photos } = {}) {
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.eval(bundle);
   await window.act(async () => window.mount());
-  let unmounted = false;
-  const unmount = async () => { if (!unmounted) { await window.act(async () => window.root.unmount()); unmounted = true; } };
   t.after(async () => {
-    await unmount();
+    await window.act(async () => window.root.unmount());
     dom.window.close();
     assert.deepEqual(errors, [], "no React or DOM errors");
   });
@@ -276,8 +272,7 @@ async function setup(t, { closed = false, stored = {}, photos } = {}) {
     item.textContent.trim() === name || item.getAttribute("aria-label") === name);
   const click = async item => { assert.ok(item, "button exists"); await window.act(async () => item.click()); };
   return {
-    window, document: window.document, server, button, click, unmount,
-    stored: () => Object.fromEntries(Object.keys(window.localStorage).map(key => [key, window.localStorage.getItem(key)])),
+    window, document: window.document, server, button, click,
     currentExport: () => button("Export PDF", window.document.querySelector(".heading-actions")),
     async nav(name) {
       await click([...window.document.querySelectorAll("nav button")].find(item => item.querySelector("span")?.textContent === name));
@@ -559,11 +554,6 @@ test('App saves setup photo order before approval and exports the original order
   await h.notify(); await h.nav('Test reports');
   const moveLater = () => [...h.document.querySelectorAll('.test-setup-photo')].find(card => card.textContent.includes('a.jpg')).querySelector('[title="Move later"]');
   await h.click(moveLater());
-  assert.equal(h.server.calls.some(call => call.kind === 'orderSetup'), false);
-  await h.nav('Report');
-  assert.equal(h.button('Approve & close').disabled, true);
-  await h.nav('Test reports');
-  await h.click(h.button('Save photo order'));
   assert.deepEqual(h.server.calls.at(-1), { kind: 'orderSetup', revision: 7, runId: testRun().id,
     orderedIds: ['setup-b', 'setup-a', 'setup-c'], expectedIds: ['setup-a', 'setup-b', 'setup-c'] });
   await h.nav('Report');
@@ -572,7 +562,7 @@ test('App saves setup photo order before approval and exports the original order
   assert.deepEqual(copy(h.window.testPdfExports.at(-1).state.testRuns[0].setupPhotos.map(photo => photo.id)), ['setup-b', 'setup-a', 'setup-c']);
   assert.equal(h.document.querySelector('.test-setup-order-controls'), null);
   await h.nav('Report'); await h.click(h.button('New revision')); await h.nav('Test reports');
-  await h.click(moveLater()); await h.click(h.button('Save photo order'));
+  await h.click(moveLater());
   assert.deepEqual(copy(h.server.state.testRuns[0].setupPhotos.map(photo => photo.id)), ['setup-b', 'setup-c', 'setup-a']);
   await h.nav('Report'); await h.click(h.button('Export test reports revision 7'));
   assert.deepEqual(copy(h.window.testPdfExports.at(-1).state.testRuns[0].setupPhotos.map(photo => photo.id)), ['setup-b', 'setup-a', 'setup-c']);
@@ -581,49 +571,22 @@ test('App saves setup photo order before approval and exports the original order
 const inspectionOrderPhotos = () => ['a', 'b', 'c'].map(id => ({ id: `inspection-${id}`, walkdownId: SKID, recordKey: DEVICE,
   path: `private/${id}.jpg`, name: `${id}.jpg`, width: 800, height: 600, createdBy: INSPECTOR, createdAt: '2026-11-20T12:00:00Z' }));
 
-test('inspection image order locks approval until saved and remains frozen in archived PDF exports', async t => {
+test('inspection image moves save immediately and remain frozen in archived PDF exports', async t => {
   const h = await setup(t, { photos: inspectionOrderPhotos() });
   await h.nav('QC overview'); await h.openDevice();
   await h.click(h.button('Move a.jpg later'));
-  assert.equal(h.server.calls.some(call => call.kind === 'orderInspection'), false);
-  assert.equal(h.button('Close dialog').disabled, true);
-  assert.equal(h.button('Upload photos').disabled, true);
-  await h.nav('Report');
-  assert.equal(h.button('Approve & close').disabled, true);
-  await h.click(h.button('Save photo order'));
   assert.deepEqual(h.server.calls.at(-1), { kind: 'orderInspection', key: DEVICE, revision: 7,
     orderedIds: ['inspection-b', 'inspection-a', 'inspection-c'], expectedIds: ['inspection-a', 'inspection-b', 'inspection-c'] });
   await h.click(h.button('Close dialog'));
+  await h.nav('Report');
   await h.click(h.button('Approve & close')); await h.click(h.button('Confirm approval & close'));
   await h.click(h.currentExport());
   assert.deepEqual(copy(h.window.pdfExports.at(-1).photos.map(photo => photo.id)), ['inspection-b', 'inspection-a', 'inspection-c']);
   await h.click(h.button('New revision')); await h.nav('QC overview'); await h.openDevice();
-  await h.click(h.button('Move a.jpg later')); await h.click(h.button('Save photo order')); await h.click(h.button('Close dialog'));
+  await h.click(h.button('Move a.jpg later')); await h.click(h.button('Close dialog'));
   assert.deepEqual(copy(h.server.state.photos.map(photo => photo.id)), ['inspection-b', 'inspection-c', 'inspection-a']);
   await h.nav('Report'); await h.click(h.button('Export revision 7'));
   assert.deepEqual(copy(h.window.pdfExports.at(-1).photos.map(photo => photo.id)), ['inspection-b', 'inspection-a', 'inspection-c']);
-});
-
-test('cached inspection image order survives reopen and blocks approval before its gallery is opened', async t => {
-  const photos = inspectionOrderPhotos();
-  const h = await setup(t, { photos });
-  await h.nav('QC overview'); await h.openDevice();
-  await h.click(h.button('Move a.jpg later'));
-  const stored = h.stored(); await h.unmount();
-  const reopened = await setup(t, { photos, stored });
-  await reopened.nav('Report');
-  assert.equal(reopened.button('Approve & close').disabled, true);
-  assert.equal(reopened.document.querySelector('#skid-report').disabled, true);
-  await reopened.nav('Workspace');
-  assert.equal(reopened.button('Sign out').disabled, true);
-  await reopened.click(reopened.button('Review photo order'));
-  assert.deepEqual(Array.from(reopened.document.querySelectorAll('.record-dialog .test-setup-photo-body > .test-setup-filename'), e => e.textContent), ['b.jpg', 'a.jpg', 'c.jpg']);
-  await reopened.click(reopened.button('Discard photo order')); await reopened.click(reopened.button('Close dialog'));
-  const key = photoOrderKey('https://example.supabase.co', INSPECTOR, SKID, 7, `inspection:${DEVICE}`);
-  assert.equal(reopened.window.localStorage.getItem(key), null);
-  await reopened.nav('Report');
-  assert.equal(reopened.button('Approve & close').disabled, false);
-  assert.equal(reopened.server.calls.some(call => call.kind === 'orderInspection'), false);
 });
 
 test("App keeps unsaved test edits across navigation, locks approval, and exports only the archived run", async t => {

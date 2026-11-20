@@ -2,7 +2,6 @@ import React, { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Icon from "./Icons.jsx";
 import { normalizePhoto } from "./photos.js";
-import { samePhotoOrder, readPhotoOrder, writePhotoOrder, clearPhotoOrder } from "./photo-order.js";
 import "./test-setup-photos.css";
 
 const MAX_PHOTOS = 30;
@@ -55,27 +54,23 @@ function SetupPhotoDialog({ photo, index, count, getPhotoUrl, onClose, inspectio
 
 /** Each evidence write remains pinned to its opening collection and revision. */
 export default function PhotoGallery(props) {
-  return <ScopedPhotoGallery key={props.orderStorageKey || JSON.stringify([props.run.walkdownId, props.run.id, props.revision])} {...props} />;
+  return <ScopedPhotoGallery key={JSON.stringify([props.run.walkdownId, props.run.id, props.revision])} {...props} />;
 }
 
 function ScopedPhotoGallery({
   run, revision, readOnly = false, pending = false, getPhotoUrl,
-  onAddPhoto, onUpdatePhoto, onRemovePhoto, onReorderPhotos, onDirtyChange, orderStorageKey,
+  onAddPhoto, onUpdatePhoto, onRemovePhoto, onReorderPhotos, onDirtyChange,
   kind = "setup", headerActions, canRemovePhoto = () => true,
 }) {
   const inspection = kind === "inspection";
-  const limit = inspection ? 1000 : MAX_PHOTOS;
   const savedPhotos = run.setupPhotos || [];
-  const savedIds = savedPhotos.map(photo => photo.id);
-  const [recovered] = useState(() => readPhotoOrder(orderStorageKey));
-  const [order, setOrder] = useState(recovered.order);
-  const [orderCacheError, setOrderCacheError] = useState(recovered.error);
+  const [movingOrder, setMovingOrder] = useState(null);
   const [draggedId, setDraggedId] = useState(null);
   const [dropId, setDropId] = useState(null);
   const drag = useRef(null);
-  const orderConflict = order && !samePhotoOrder(savedIds, order.expectedIds) && !samePhotoOrder(savedIds, order.orderedIds);
-  const photos = order && !orderConflict && !readOnly ? order.orderedIds.map(id => savedPhotos.find(photo => photo.id === id)) : savedPhotos;
-  const orderDirty = Boolean(order && !samePhotoOrder(savedIds, order.orderedIds));
+  const showMove = movingOrder && !readOnly && savedPhotos.length === movingOrder.before.length
+    && savedPhotos.every((photo, index) => photo.id === movingOrder.before[index]);
+  const photos = showMove ? movingOrder.after.map(id => savedPhotos.find(photo => photo.id === id)) : savedPhotos;
   const [busy, setBusy] = useState("");
   const [queue, setQueue] = useState([]);
   const [progress, setProgress] = useState("");
@@ -93,10 +88,11 @@ function ScopedPhotoGallery({
   const dirtyCallback = useRef(onDirtyChange);
   dirtyCallback.current = onDirtyChange;
   const captionDirty = editing !== null && editing.text !== (editing.photo.caption || "");
-  const dirty = Boolean(busy || queue.length || captionDirty || orderDirty);
+  const dirty = Boolean((busy && busy !== "order") || queue.length || captionDirty);
   const blocked = pending || Boolean(busy);
-  const editingLocked = blocked || Boolean(queue.length) || Boolean(editing) || orderDirty;
-  const orderLocked = blocked || Boolean(queue.length) || Boolean(editing) || readOnly || orderConflict;
+  const editingLocked = blocked || Boolean(queue.length) || Boolean(editing);
+  const canReorder = !readOnly && typeof onReorderPhotos === "function" && photos.length > 1;
+  const orderLocked = !canReorder || editingLocked;
   const viewed = photos.find(photo => photo.id === viewedId);
 
   useEffect(() => {
@@ -104,11 +100,6 @@ function ScopedPhotoGallery({
     return () => { mounted.current = false; ++operation.current; dirtyCallback.current?.(false); };
   }, []);
   useEffect(() => { dirtyCallback.current?.(dirty); }, [dirty, onDirtyChange]);
-  useEffect(() => {
-    if (order && samePhotoOrder(savedIds, order.orderedIds)) {
-      setOrder(null); setOrderCacheError(clearPhotoOrder(orderStorageKey));
-    }
-  }, [JSON.stringify(savedIds), order, orderStorageKey]);
   useEffect(() => {
     ++operation.current;
     busyRef.current = false;
@@ -143,7 +134,7 @@ function ScopedPhotoGallery({
   }
 
   async function upload(chosen) {
-    if (!chosen.length || editing || orderDirty || readOnly || pending || busyRef.current) return;
+    if (!chosen.length || editing || readOnly || pending || busyRef.current) return;
     if (photos.length + chosen.length > MAX_PHOTOS) {
       setError(`A test run can have up to ${MAX_PHOTOS} setup photos. Choose at most ${Math.max(0, MAX_PHOTOS - photos.length)} more, or remove a photo first.`);
       return;
@@ -204,36 +195,43 @@ function ScopedPhotoGallery({
     finally { finish(token, captured); }
   }
 
-  function movePhoto(id, destination) {
-    if (orderLocked || busyRef.current || typeof onReorderPhotos !== "function") return;
-    const ids = photos.map(photo => photo.id), from = ids.indexOf(id);
-    if (from < 0 || destination < 0 || destination >= ids.length || from === destination) return;
-    ids.splice(destination, 0, ids.splice(from, 1)[0]);
-    const expectedIds = order?.expectedIds || savedIds;
-    const next = samePhotoOrder(ids, expectedIds) ? null : { v: 1, expectedIds, orderedIds: ids };
-    setOrder(next); setError(""); setNotice(""); setConfirmRemove(null);
-    setOrderCacheError(next ? writePhotoOrder(orderStorageKey, next) : clearPhotoOrder(orderStorageKey));
-  }
-  async function saveOrder() {
-    if (!orderDirty || orderLocked || typeof onReorderPhotos !== "function") return;
+  async function movePhoto(id, destination) {
+    if (orderLocked) return;
+    const before = savedPhotos.map(photo => photo.id);
+    const from = before.indexOf(id);
+    if (from < 0 || destination < 0 || destination >= before.length || from === destination) return;
     const task = start("order");
     if (!task) return;
     const { token, captured } = task;
+    const after = [...before];
+    after.splice(from, 1);
+    after.splice(destination, 0, id);
+    setMovingOrder({ before, after });
     try {
       requireScope(token, captured);
-      await onReorderPhotos(captured.run, order.orderedIds, order.expectedIds, captured.revision);
+      await onReorderPhotos(captured.run, after, before, captured.revision);
+    } catch (error) {
+      if (isCurrent(token, captured)) setError(error?.message || "Could not save the photo order. Try moving the photo again.");
+    } finally {
       if (isCurrent(token, captured)) {
-        setOrder(null); setOrderCacheError(clearPhotoOrder(orderStorageKey)); setNotice(`${inspection ? "Evidence" : "Setup"} photo order saved.`);
+        setMovingOrder(null);
+        finish(token, captured);
       }
-    } catch (error) { if (isCurrent(token, captured)) setError(messageFor(error)); }
-    finally { finish(token, captured); }
+    }
+  }
+  function beginDrag(event, id) {
+    if (orderLocked || busyRef.current) { event.preventDefault(); return; }
+    drag.current = id;
+    setDraggedId(id);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", id);
   }
   function endDrag() { drag.current = null; setDraggedId(null); setDropId(null); }
 
   return <section className="test-setup" aria-label={inspection ? "Evidence photos" : "Test setup"}>
     <header className="test-setup-header">
       <div><h3>{inspection ? "Evidence photos" : "Setup"}</h3><p>{inspection ? "Saved photo order is used in the inspection report and PDF." : "Photos of the setup used for this test are included in the report."}</p></div>
-      <span className="test-setup-count">{inspection ? photos.length : `${photos.length} / ${limit}`} photos</span>
+      <span className="test-setup-count">{inspection ? photos.length : `${photos.length} / ${MAX_PHOTOS}`} photos</span>
       {headerActions}
       {!readOnly && typeof onAddPhoto === "function" && <>
         <input ref={input} className="test-setup-file-input" type="file" multiple tabIndex={-1}
@@ -244,15 +242,6 @@ function ScopedPhotoGallery({
       </>}
     </header>
     {error && <p className="field-error test-setup-message" role="alert">{error}</p>}
-    {orderCacheError && <p className="field-error test-setup-message" role="alert">{orderCacheError}</p>}
-    {orderConflict && <p className="field-error test-setup-message" role="alert">The saved {inspection ? "inspection" : "setup"} photos or their order changed. Your pending order is retained locally. Discard it and arrange the current photos again.</p>}
-    {(orderDirty || orderCacheError) && <div className="test-setup-order-actions">
-      <p>{orderDirty ? `Photo order is pending. Save it to use this order in the report and PDF.${inspection ? " Save or discard before closing this item." : ""}` : "A previous photo order is cached in this browser."}</p>
-      {orderDirty && <button type="button" className="small-button" disabled={orderLocked} onClick={saveOrder}>{busy === "order" ? "Saving order…" : "Save photo order"}</button>}
-      <button type="button" className="small-button" disabled={blocked} onClick={() => {
-        setOrder(null); setOrderCacheError(clearPhotoOrder(orderStorageKey)); setError(""); setNotice(""); endDrag();
-      }}>Discard photo order</button>
-    </div>}
     {(progress || notice) && <p className="test-setup-message" role="status">{progress || notice}</p>}
     {queue.length > 0 && !busy && <div className="test-setup-retry">
       <p>{queue.length} {queue.length === 1 ? "photo remains" : "photos remain"} to upload: {queue.map(file => file.name).join(", ")}.</p>
@@ -267,20 +256,18 @@ function ScopedPhotoGallery({
       onDragOver={event => { if (!drag.current || orderLocked) return; event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropId(photo.id); }}
       onDrop={event => { if (!drag.current || orderLocked) return; event.preventDefault(); movePhoto(drag.current, index); endDrag(); }}>
       <button type="button" className="test-setup-thumbnail" aria-label={`View ${inspection ? "evidence" : "setup"} photo ${index + 1}: ${photo.name}`}
+        draggable={!orderLocked} onDragStart={event => beginDrag(event, photo.id)} onDragEnd={endDrag}
         onClick={() => setViewedId(photo.id)}><SetupImage photo={photo} getPhotoUrl={getPhotoUrl} /></button>
       <div className="test-setup-photo-body">
         <div className="test-setup-photo-position"><span>Photo {index + 1} of {photos.length}</span>
-          {!readOnly && typeof onReorderPhotos === "function" && photos.length > 1 && <div className="test-setup-order-controls">
+          {canReorder && <div className="test-setup-order-controls">
             <button type="button" className="small-button" aria-label={`Move ${photo.name} earlier`} title="Move earlier"
               disabled={orderLocked || index === 0} onClick={() => movePhoto(photo.id, index - 1)}><Icon name="up" size={15} /></button>
             <button type="button" className="small-button" aria-label={`Move ${photo.name} later`} title="Move later"
               disabled={orderLocked || index === photos.length - 1} onClick={() => movePhoto(photo.id, index + 1)}><Icon name="down" size={15} /></button>
             <button type="button" className="small-button test-setup-drag" aria-label={`Drag ${photo.name} to reorder`} title="Drag to reorder"
-              disabled={orderLocked} draggable={!orderLocked} onDragStart={event => {
-                if (orderLocked) { event.preventDefault(); return; }
-                drag.current = photo.id; setDraggedId(photo.id); setConfirmRemove(null);
-                event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", photo.id);
-              }} onDragEnd={endDrag}><Icon name="drag" size={15} /></button>
+              disabled={orderLocked} draggable={!orderLocked} onDragStart={event => beginDrag(event, photo.id)}
+              onDragEnd={endDrag}><Icon name="drag" size={15} /></button>
           </div>}
         </div>
         <p className="test-setup-filename" title={photo.name}>{photo.name}</p>

@@ -73,7 +73,7 @@ const photo = (id, caption = "") => ({ id, walkdownId: "skid-1", testRunId: "run
   width: 1200, height: 800, caption, createdBy: "inspector-1", createdAt: "2026-11-20T12:00:00Z" });
 const run = photos => ({ id: "run-1", walkdownId: "skid-1", name: "Control box I/O test", setupPhotos: photos });
 
-async function setup(t, props = {}, { stored = {} } = {}) {
+async function setup(t, props = {}) {
   const errors = [];
   const console = new VirtualConsole();
   console.on("jsdomError", error => errors.push(error.message));
@@ -84,9 +84,8 @@ async function setup(t, props = {}, { stored = {} } = {}) {
   const { window } = dom;
   Object.assign(window, {
     IS_REACT_ACT_ENVIRONMENT: true, calls: [], dirty: [], urlRequests: [], decodeJobs: [], deferDecode: false, decoded: 0, closedBitmaps: 0,
-    initialProps: { run: run([]), revision: 4, orderStorageKey: 'synthetic-photo-order', ...props },
+    initialProps: { run: run([]), revision: 4, ...props },
   });
-  for (const [key, value] of Object.entries(stored)) window.localStorage.setItem(key, value);
   window.MessageChannel = class {
     constructor() {
       this.port1 = { onmessage: null };
@@ -105,17 +104,14 @@ async function setup(t, props = {}, { stored = {} } = {}) {
   window.HTMLCanvasElement.prototype.toBlob = (callback, type) => callback(new window.Blob(["normalized-jpeg"], { type }));
   window.eval(bundle);
   await window.act(async () => window.mount());
-  let unmounted = false;
-  const unmount = async () => { if (!unmounted) { await window.act(async () => window.root.unmount()); unmounted = true; } };
   t.after(async () => {
-    await unmount();
+    await window.act(async () => window.root.unmount());
     window.close();
     assert.deepEqual(errors, [], "no React or DOM errors");
   });
   const document = window.document;
   return {
-    window, document, unmount,
-    stored: () => Object.fromEntries(Object.keys(window.localStorage).map(key => [key, window.localStorage.getItem(key)])),
+    window, document,
     query: selector => document.querySelector(selector),
     text: () => document.body.textContent.replace(/\s+/g, " "),
     button: label => [...document.querySelectorAll("button")].find(button => button.textContent.trim() === label || button.getAttribute('aria-label') === label),
@@ -278,38 +274,32 @@ test("the setup photo limit is checked before image processing or server writes"
 
 const displayedNames = h => Array.from(h.document.querySelectorAll('.test-setup-photo-body > .test-setup-filename'), e => e.textContent);
 
-test('photo order changes stay local until Save, preserve failed saves, and recover after reopening', async t => {
+test('moving a photo saves immediately and a failed save restores the saved order', async t => {
   const original = run([photo('a', 'First caption'), photo('b'), photo('c')]);
   const h = await setup(t, { run: original });
   assert.equal(h.button('Move a.jpg earlier').disabled, true);
   assert.equal(h.button('Move c.jpg later').disabled, true);
   await h.click(h.button('Move a.jpg later'));
   assert.deepEqual(displayedNames(h), ['b.jpg', 'a.jpg', 'c.jpg']);
-  assert.equal(h.window.calls.length, 0);
-  assert.equal(h.window.dirty.at(-1), true);
+  assert.equal(h.window.calls.length, 1);
   assert.equal(h.button('Add setup photos').disabled, true);
-  const stored = h.stored(); await h.unmount();
-  const reopened = await setup(t, { run: original }, { stored });
-  assert.deepEqual(displayedNames(reopened), ['b.jpg', 'a.jpg', 'c.jpg']);
-  await reopened.click(reopened.button('Save photo order'));
-  const call = reopened.window.calls[0];
+  const call = h.window.calls[0];
   assert.deepEqual(Array.from(call.expectedIds), ['a', 'b', 'c']);
   assert.deepEqual(Array.from(call.orderedIds), ['b', 'a', 'c']);
   assert.equal(call.revision, 4);
-  assert.equal(reopened.button('Move b.jpg later').disabled, true);
-  await reopened.settle(0, 'Photo order changed on another device');
-  assert.deepEqual(displayedNames(reopened), ['b.jpg', 'a.jpg', 'c.jpg']);
-  assert.deepEqual(reopened.stored(), stored);
-  await reopened.click(reopened.button('Save photo order'));
-  await reopened.settle(1);
-  assert.deepEqual(displayedNames(reopened), ['b.jpg', 'a.jpg', 'c.jpg']);
-  assert.deepEqual(reopened.stored(), {});
-  assert.equal(reopened.window.dirty.at(-1), false);
+  assert.equal(h.button('Move b.jpg later').disabled, true);
+  await h.settle(0, 'Photo order changed on another device');
+  assert.deepEqual(displayedNames(h), ['a.jpg', 'b.jpg', 'c.jpg']);
+  assert.match(h.text(), /Photo order changed on another device/);
+  await h.click(h.button('Move a.jpg later'));
+  await h.settle(1);
+  assert.deepEqual(displayedNames(h), ['b.jpg', 'a.jpg', 'c.jpg']);
+  assert.equal(h.window.dirty.at(-1), false);
   assert.deepEqual(original.setupPhotos.map(photo => photo.id), ['a', 'b', 'c']);
-  assert.match(reopened.text(), /First caption/);
+  assert.match(h.text(), /First caption/);
 });
 
-test('dragging a photo to another position uses the same pending save and discard behavior', async t => {
+test('dropping a photo thumbnail onto another position saves the new order without confirmation', async t => {
   const h = await setup(t, { run: run([photo('a'), photo('b'), photo('c')]) });
   const transfer = { effectAllowed: '', dropEffect: '', setData() {} };
   const fire = (element, name) => {
@@ -317,49 +307,39 @@ test('dragging a photo to another position uses the same pending save and discar
     Object.defineProperty(event, 'dataTransfer', { value: transfer });
     element.dispatchEvent(event);
   };
-  await h.window.act(async () => fire(h.button('Drag a.jpg to reorder'), 'dragstart'));
+  const thumbnail = h.query('.test-setup-thumbnail');
+  assert.equal(thumbnail.draggable, true);
+  await h.window.act(async () => fire(thumbnail, 'dragstart'));
   const last = h.document.querySelectorAll('.test-setup-photo')[2];
   await h.window.act(async () => { fire(last, 'dragover'); fire(last, 'drop'); });
   assert.deepEqual(displayedNames(h), ['b.jpg', 'c.jpg', 'a.jpg']);
-  assert.equal(h.window.calls.length, 0);
-  await h.click(h.button('Discard photo order'));
-  assert.deepEqual(displayedNames(h), ['a.jpg', 'b.jpg', 'c.jpg']);
-  assert.deepEqual(h.stored(), {});
+  assert.equal(h.window.calls.length, 1);
+  assert.deepEqual(Array.from(h.window.calls[0].orderedIds), ['b', 'c', 'a']);
+  assert.equal(h.button('Save photo order'), undefined);
+  assert.equal(h.button('Discard photo order'), undefined);
+  await h.settle(0);
+  assert.deepEqual(displayedNames(h), ['b.jpg', 'c.jpg', 'a.jpg']);
   assert.equal(h.window.dirty.at(-1), false);
 });
 
-test('changed or closed photo scopes retain pending order without writing over current evidence', async t => {
+test('a concurrently closed gallery shows the saved order while a move resolves', async t => {
   const original = run([photo('a'), photo('b'), photo('c')]);
   const h = await setup(t, { run: original });
   await h.click(h.button('Move a.jpg later'));
-  const stored = h.stored();
-  await h.configure({ run: run([photo('a'), photo('c')]) });
-  assert.match(h.text(), /saved setup photos or their order changed/);
-  assert.equal(h.button('Save photo order').disabled, true);
-  assert.equal(h.button('Move a.jpg later').disabled, true);
-  assert.deepEqual(displayedNames(h), ['a.jpg', 'c.jpg']);
-  assert.deepEqual(h.stored(), stored);
   await h.configure({ run: original, readOnly: true });
-  assert.deepEqual(displayedNames(h), ['a.jpg', 'b.jpg', 'c.jpg'], 'closed revision displays saved evidence order while retaining the pending cache');
-  assert.equal(h.button('Save photo order').disabled, true);
+  assert.deepEqual(displayedNames(h), ['a.jpg', 'b.jpg', 'c.jpg']);
   assert.equal(h.button('Move a.jpg later'), undefined);
-  assert.equal(h.window.calls.length, 0);
-  await h.click(h.button('Discard photo order'));
-  assert.deepEqual(h.stored(), {});
+  await h.settle(0, 'This revision is closed');
+  assert.deepEqual(displayedNames(h), ['a.jpg', 'b.jpg', 'c.jpg']);
 });
 
-test('late saves cannot reorder another revision and an already applied recovered order clears itself', async t => {
+test('a late photo order save cannot reorder another revision', async t => {
   const original = run([photo('a'), photo('b')]);
   const h = await setup(t, { run: original });
   await h.click(h.button('Move a.jpg later'));
-  const stored = h.stored();
-  await h.click(h.button('Save photo order'));
-  await h.configure({ revision: 5, orderStorageKey: 'next-revision-order' });
+  await h.configure({ revision: 5 });
   await h.settle(0);
   assert.deepEqual(displayedNames(h), ['a.jpg', 'b.jpg']);
-  assert.deepEqual(h.stored(), stored, 'late result cannot clear another scope or discard recovery of an uncertain save');
-  const reopened = await setup(t, { run: run([photo('b'), photo('a')]) }, { stored });
-  assert.deepEqual(displayedNames(reopened), ['b.jpg', 'a.jpg']);
-  assert.equal(reopened.window.dirty.at(-1), false);
-  assert.deepEqual(reopened.stored(), {});
+  assert.equal(h.window.calls[0].revision, 4);
+  assert.equal(h.window.dirty.at(-1), false);
 });

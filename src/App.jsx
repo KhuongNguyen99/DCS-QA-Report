@@ -27,7 +27,6 @@ import QualityControl from "./QualityControl.jsx";
 import RevisionPanel from "./RevisionPanel.jsx";
 import TestReportsPanel from "./TestReportsPanel.jsx";
 import PhotoGallery from "./PhotoGallery.jsx";
-import { photoOrderKey, readPhotoOrder, samePhotoOrder } from "./photo-order.js";
 import { testTimeRangeScope, readTestTimeRanges } from "./test-time-ranges.js";
 
 const EMPTY = { records: [], photos: [], comments: [], testRuns: [], inspector: null };
@@ -74,7 +73,7 @@ const date = (value) =>
       })
     : "";
 
-function Modal({ title, children, onClose, className = "", initialFocus, closeDisabled = false }) {
+function Modal({ title, children, onClose, className = "", initialFocus }) {
   const ref = useRef(null);
   useEffect(() => {
     const previous = document.activeElement;
@@ -91,7 +90,7 @@ function Modal({ title, children, onClose, className = "", initialFocus, closeDi
       className={`modal ${className}`}
       onCancel={(event) => {
         event.preventDefault();
-        if (!closeDisabled) onClose();
+        onClose();
       }}
     >
       <header className="modal-header">
@@ -100,7 +99,6 @@ function Modal({ title, children, onClose, className = "", initialFocus, closeDi
           type="button"
           className="icon-button"
           aria-label="Close dialog"
-          disabled={closeDisabled}
           onClick={onClose}
         >
           <Icon name="close" />
@@ -151,13 +149,6 @@ function App() {
   const [record, setRecord] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [testDraftDirty, setTestDraftDirty] = useState(false);
-  const [inspectionPhotoDirty, setInspectionPhotoDirty] = useState(false);
-  const [, refreshPhotoOrders] = useState(0);
-  useEffect(() => {
-    const changed = event => { if (!event.key || event.key.startsWith('jeevy-qa-photo-order:v1:')) refreshPhotoOrders(value => value + 1); };
-    window.addEventListener('storage', changed);
-    return () => window.removeEventListener('storage', changed);
-  }, []);
   const [timeRangeChanges, setTimeRangeChanges] = useState({});
   const changeTimeRange = useCallback((scope, runId, deviceId, range) => {
     if (!scope || !runId) return;
@@ -197,13 +188,8 @@ function App() {
     state.project?.walkdownId === selectedId &&
     !state.project?.nameRequired,
   );
-  const pendingPhotoTargets = connected ? TARGETS.filter(target => {
-    const { order } = readPhotoOrder(photoOrderKey(config.url, inspector?.id, selectedId, state.project.revision, `inspection:${target.key}`));
-    return order && !samePhotoOrder(photosFor(target.key, state).map(photo => photo.id), order.orderedIds);
-  }) : [];
-  const hasDraftPhotos = inspectionPhotoDirty || pendingPhotoTargets.length > 0;
   const switchBlocked = Boolean(
-    pending || reporting || camera || record || manualEntry || bulkUpload || testDraftDirty || hasDraftPhotos,
+    pending || reporting || camera || record || manualEntry || bulkUpload || testDraftDirty,
   );
   const reportRevision = state.project?.revision ?? selectedSkid?.revision ?? 1;
   const revisionStatus = state.project?.status;
@@ -437,11 +423,6 @@ function App() {
     setNotice(skidDialog === "new" ? "Skid report created" : "Skid name saved");
   }
   async function signOut() {
-    if (hasDraftPhotos) {
-      setError("Save or discard your pending photo order before signing out.");
-      if (pendingPhotoTargets[0]) openRecord(pendingPhotoTargets[0].kind, pendingPhotoTargets[0].id);
-      return;
-    }
     if (testDraftDirty) {
       setError("Save or discard your test run changes before signing out.");
       navigate("tests");
@@ -556,8 +537,6 @@ function App() {
       throw new Error("Post or clear your draft comments before approving this revision.");
     if (action === "approve" && testDraftDirty)
       throw new Error("Save or discard your test run changes before approving this revision.");
-    if (action === "approve" && hasDraftPhotos)
-      throw new Error("Save or discard your pending photo order before approving this revision.");
     const scope = backend.forRevision(review.revision);
     transitionRef.current = true;
     setPending((count) => count + 1);
@@ -795,9 +774,7 @@ function App() {
                   ? "Syncing…"
                   : pending
                     ? "Saving…"
-                    : hasDraftPhotos
-                      ? "Unsaved photo order"
-                      : testDraftDirty
+                    : testDraftDirty
                       ? "Unsaved test changes"
                       : signedIn
                         ? "All changes shared"
@@ -891,10 +868,6 @@ function App() {
               </button>
             </div>
           )}
-          {pendingPhotoTargets.length > 0 && <div className="message" role="status">
-            <Icon name="info" /><span>Photo order is pending for {pendingPhotoTargets.map(target => target.name).join(', ')}.</span>
-            <button type="button" className="small-button" onClick={() => openRecord(pendingPhotoTargets[0].kind, pendingPhotoTargets[0].id)}>Review photo order</button>
-          </div>}
           {!signedIn && !checking && view !== "workspace" && (
             <div className="message preview-message">
               <Icon name="cloud" />
@@ -1358,7 +1331,6 @@ function App() {
                   testRunCount={state.testRuns?.length || 0}
                   setupPhotoCount={(state.testRuns || []).reduce((count, run) => count + (run.setupPhotos?.length || 0), 0)}
                   hasDraftTests={testDraftDirty}
-                  hasDraftPhotos={hasDraftPhotos}
                   photoCount={state.photos.length}
                   commentCount={state.comments.length}
                   completedCount={completedTargets}
@@ -1499,7 +1471,6 @@ function App() {
               onSignIn={() => setAuthOpen(true)}
               onSignOut={signOut}
               hasDraftTests={testDraftDirty}
-              hasDraftPhotos={hasDraftPhotos}
             />
           )}
           <footer className="app-footer">
@@ -1568,7 +1539,6 @@ function App() {
           title={record.title}
           onClose={() => setRecord(null)}
           className="record-dialog"
-          closeDisabled={inspectionPhotoDirty}
         >
           <RecordPanel
             key={`${selectedId}:${reportRevision}:${record.key}`}
@@ -1610,8 +1580,6 @@ function App() {
             onDelete={(photo) =>
               mutate(() => writeBackend.deletePhoto(photo.id), "Photo removed")
             }
-            photoOrderDirty={hasDraftPhotos}
-            onPhotoOrderDirty={setInspectionPhotoDirty}
             onReorder={(ordered, expected, revision) => reorderInspectionPhotos(record.key, ordered, expected, revision)}
             onSignIn={() => setAuthOpen(true)}
           />
@@ -1968,7 +1936,7 @@ function RecordPanel({
   onComplete,
   onDelete,
   onSignIn,
-  photoOrderDirty = false, onPhotoOrderDirty, onReorder,
+  onReorder,
 }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -2050,8 +2018,7 @@ function RecordPanel({
       </section>
       <PhotoGallery kind="inspection" run={{ id: target.key, walkdownId: state.project?.walkdownId, setupPhotos: photos }}
         revision={state.project?.revision} readOnly={!connected || readOnly} pending={qualityDisabled || Boolean(busy)}
-        getPhotoUrl={backend?.getPhotoUrl} onDirtyChange={onPhotoOrderDirty}
-        orderStorageKey={photoOrderKey(config.url, state.inspector?.id, state.project?.walkdownId, state.project?.revision, `inspection:${target.key}`)}
+        getPhotoUrl={backend?.getPhotoUrl}
         onReorderPhotos={(_run, ordered, expected, revision) => onReorder(ordered, expected, revision)}
         onRemovePhoto={(_run, photo) => onDelete(photo)}
         canRemovePhoto={photo => connected && (state.inspector.isAdmin || state.inspector.id === photo.createdBy)}
@@ -2059,7 +2026,7 @@ function RecordPanel({
         <div>
           <button
             className="small-button"
-            disabled={!connected || readOnly || Boolean(busy) || photoOrderDirty}
+            disabled={!connected || readOnly || Boolean(busy) || qualityDisabled}
             onClick={() => input.current.click()}
           >
             <Icon name="upload" size={16} />
@@ -2067,7 +2034,7 @@ function RecordPanel({
           </button>
           <button
             className="small-button green"
-            disabled={!connected || readOnly || Boolean(busy) || photoOrderDirty}
+            disabled={!connected || readOnly || Boolean(busy) || qualityDisabled}
             onClick={onCamera}
           >
             <Icon name="camera" size={16} />
@@ -2324,7 +2291,6 @@ function Workspace({
   onSignIn,
   onSignOut,
   hasDraftTests = false,
-  hasDraftPhotos = false,
 }) {
   return (
     <div className="workspace-settings">
@@ -2357,7 +2323,7 @@ function Workspace({
           </div>
           <button
             className="button secondary"
-            disabled={hasDraftTests || hasDraftPhotos}
+            disabled={hasDraftTests}
             onClick={connected || session?.user ? onSignOut : onSignIn}
           >
             <Icon
@@ -2367,7 +2333,6 @@ function Workspace({
             {connected || session?.user ? "Sign out" : "Inspector sign-in"}
           </button>
           {hasDraftTests && <p className="help-text">Save or discard your changes in Test reports before signing out or changing the connection.</p>}
-          {hasDraftPhotos && <p className="help-text">Save or discard your pending photo order before signing out or changing the connection.</p>}
         </div>
       </section>
       <section className="card settings-card">
@@ -2376,7 +2341,7 @@ function Workspace({
           <span className="subtle-label">Administrator settings</span>
         </div>
         <div className="settings-content">
-          <fieldset disabled={hasDraftTests || hasDraftPhotos} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+          <fieldset disabled={hasDraftTests} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
             <ConfigForm config={config} onSave={setConfig} />
           </fieldset>
           <a

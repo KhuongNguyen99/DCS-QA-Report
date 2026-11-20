@@ -58,9 +58,7 @@ The overall comment belongs only to its test run. Approved snapshots lock both r
 
 A saved test run supports up to 30 setup photos, with captions of up to 1,000 characters. JPEG, PNG, WebP, and browser-decodable HEIC/HEIF files up to 20 MB each use the same image normalization and private storage as inspection photos. Image bytes are stored separately from the normalized CSV/parameter payload. The importing inspector or an administrator can add photos, change captions, or remove photos from a draft. Finish uploads and save or cancel caption edits before approving, switching skids, or signing out. If a batch stops on an error, successful uploads remain saved.
 
-Drag a photo's grip onto another photo to move it to that position, or use its earlier/later arrow buttons. Select **Save photo order** to apply the order to the shared report and PDF. The pending order is cached locally for the inspector, skid, revision, and test run, and returns after reopening the browser. **Discard photo order** restores the saved order. Save or discard the order before uploading, changing captions, or removing photos. Approved revisions keep their original image order; start a new revision to rearrange them.
-
-Inspection images on device, terminal, and equipment pages have the same ordering controls. Their order is saved separately for each item and is used by the QC PDF. Pending inspection orders recover after refresh; **Review photo order** opens the relevant item. Save or discard them before approval or signing out. Viewing and reordering images does not change who can remove the original evidence.
+Drag a photo onto another photo or use the earlier/later arrows. The app saves each move immediately and uses the saved order in the PDF. This works in test setup and in the inspection galleries for devices, terminals, and equipment. To change the order after a report is approved, start a new revision.
 
 Approved snapshots retain the exact setup-photo references and captions. Archived images remain available even if a later draft removes a photo or its entire test run. Reports created before this feature continue to export without an empty Setup section.
 
