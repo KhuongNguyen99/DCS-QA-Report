@@ -1,5 +1,5 @@
 import { jsPDF } from "jspdf";
-import { approvedReportDate, printableText } from "./report.js";
+import { approvedReportDate, fitImageInBox, printableText } from "./report.js";
 import { buildTestChart, formatSourceTime } from "./test-chart.js";
 import { importNoteClarification } from "./proneta-notes.js";
 
@@ -10,6 +10,82 @@ const COLOR = {
   fill: [242, 246, 248], blue: [24, 108, 161], green: [31, 105, 57], red: [170, 49, 43],
 };
 const RESULT_LABELS = new Set(["Passed", "Failed", "Not tested", "Not applicable"]);
+const MAX_SETUP_PHOTO_BYTES = 12 * 1024 * 1024;
+const SETUP_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+function validateSetupPhotos(run, project) {
+  if (run.setupPhotos === undefined) return;
+  if (!Array.isArray(run.setupPhotos) || run.setupPhotos.length > 30)
+    throw new Error("The saved test setup photo list is invalid. Reload the approved revision.");
+  const ids = new Set();
+  for (const photo of run.setupPhotos) {
+    if (!photo || typeof photo !== "object" || Array.isArray(photo)
+      || typeof photo.id !== "string" || !photo.id.trim() || ids.has(photo.id)
+      || typeof photo.name !== "string" || !photo.name.trim() || photo.name.length > 255
+      || typeof photo.path !== "string" || !photo.path.trim() || photo.path.length > 2048
+      || /^(?:[a-z][a-z\d+.-]*:|[/\\])/i.test(photo.path)
+      || photo.path.includes("\\") || photo.path.split("/").some((part) => part === ".." || part === ".")
+      || ![photo.width, photo.height].every((value) => Number.isInteger(value) && value > 0 && value <= 24000)
+      || typeof photo.caption !== "string" || photo.caption.length > 1000)
+      throw new Error("A saved setup photo has invalid metadata. Reload the approved revision.");
+    if (photo.walkdownId !== project.walkdownId)
+      throw new Error("The test setup contains a photo from another skid.");
+    if (photo.testRunId !== run.id)
+      throw new Error("The test setup contains a photo from another test run.");
+    ids.add(photo.id);
+  }
+}
+
+async function setupImageData(photo, backend) {
+  const name = printableText(photo.name);
+  let url;
+  try { url = await backend.getPhotoUrl(photo); }
+  catch (error) {
+    throw new Error(`Could not access setup photo "${name}": ${error.message || String(error)}`, { cause: error });
+  }
+  if (typeof url !== "string" || !url.trim())
+    throw new Error(`Could not access setup photo "${name}". Reload the report and try again.`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}. Reload the report and try again.`);
+    const type = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+    if (!SETUP_IMAGE_TYPES.has(type)) throw new Error("The file must be a JPEG, PNG, or WebP image.");
+    if (Number(response.headers.get("content-length")) > MAX_SETUP_PHOTO_BYTES)
+      throw new Error("The image exceeds the 12 MB limit.");
+    const reader = response.body?.getReader();
+    let bytes;
+    if (reader) {
+      const chunks = [];
+      let length = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          length += value.byteLength;
+          if (length > MAX_SETUP_PHOTO_BYTES) {
+            await reader.cancel();
+            throw new Error("The image exceeds the 12 MB limit.");
+          }
+          chunks.push(value);
+        }
+      } finally { reader.releaseLock(); }
+      bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    } else bytes = new Uint8Array(await response.arrayBuffer());
+    if (!bytes.length) throw new Error("The image is empty.");
+    if (bytes.length > MAX_SETUP_PHOTO_BYTES) throw new Error("The image exceeds the 12 MB limit.");
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 32768)
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+    return `data:${type};base64,${btoa(binary)}`;
+  } catch (error) {
+    const detail = controller.signal.aborted ? "The image download timed out. Try exporting again." : error.message || String(error);
+    throw new Error(`Could not load setup photo "${name}": ${detail}`, { cause: error });
+  } finally { clearTimeout(timeout); controller.abort(); }
+}
 
 function textStyle(doc, size = 10, bold = false, color = COLOR.ink) {
   doc.setFont("NotoSans", bold ? "bold" : "normal");
@@ -235,7 +311,40 @@ function reportWriter(doc) {
     paragraph(rangeNote,
       { size: 7.8, color: COLOR.muted, gap: 12, lineHeight: 11 });
   }
-  return { page, paragraph, heading, table, chart, ensure };
+  function setupPhoto(run, photo, data, properties, index, total) {
+    page(`${run.name || "Test run"} - Setup`);
+    paragraph(`Photo ${index + 1} of ${total} | ${photo.name}`, { size: 9, color: COLOR.muted });
+    const caption = photo.caption.trim();
+    textStyle(doc, 9);
+    const captionHeight = caption ? printableText(caption).split("\n")
+      .flatMap((line) => doc.splitTextToSize(line || " ", WIDTH)).length * 13.05 + 7 : 0;
+    const boxHeight = Math.min(360, PAGE.bottom - y - Math.min(captionHeight, 78) - 12);
+    const fitted = fitImageInBox(properties.width, properties.height, WIDTH, boxHeight);
+    doc.addImage(data, properties.fileType,
+      PAGE.margin + (WIDTH - fitted.width) / 2, y + (boxHeight - fitted.height) / 2,
+      fitted.width, fitted.height);
+    y += boxHeight + 12;
+    if (caption) paragraph(caption, { size: 9 });
+  }
+  return { page, paragraph, heading, table, chart, ensure, setupPhoto };
+}
+
+async function runSetup(writer, doc, run, backend, onProgress) {
+  const photos = run.setupPhotos || [];
+  for (let index = 0; index < photos.length; index += 1) {
+    const photo = photos[index];
+    onProgress(`Adding setup photo ${index + 1} of ${photos.length} for ${run.name || "test run"}...`);
+    const data = await setupImageData(photo, backend);
+    let properties;
+    try {
+      properties = doc.getImageProperties(data);
+      if (properties.width !== photo.width || properties.height !== photo.height)
+        throw new Error("The image dimensions differ from the saved setup photo.");
+    } catch (error) {
+      throw new Error(`Setup photo "${printableText(photo.name)}" could not be decoded for the PDF: ${error.message || String(error)}`, { cause: error });
+    }
+    writer.setupPhoto(run, photo, data, properties, index, photos.length);
+  }
 }
 
 function parameterTable(writer, parameters, { heading = true } = {}) {
@@ -395,7 +504,7 @@ function drawFooters(doc, project, closedAt) {
 }
 
 /** Export only the supplied closed QC revision. Never reads newer live run data. */
-export async function createTestReportPdf({ state, runId = null, onProgress = () => {} } = {}) {
+export async function createTestReportPdf({ state, runId = null, backend, onProgress = () => {} } = {}) {
   // Capture before the first await, so later UI edits cannot alter an in-flight export.
   const snapshot = structuredClone({ project: state?.project, testRuns: state?.testRuns });
   const closedAt = approvedReportDate(snapshot);
@@ -414,9 +523,16 @@ export async function createTestReportPdf({ state, runId = null, onProgress = ()
       throw new Error("The saved test run is missing its software name or version.");
     if (!Array.isArray(run.devices) || run.devices.some((device) => !device.name || !Array.isArray(device.channels)))
       throw new Error("The saved test run has incomplete device data.");
+    validateSetupPhotos(run, project);
     for (const channel of [...run.devices.flatMap((device) => device.channels), ...(run.unassignedChannels || [])])
       for (const series of channel.series || [])
         if (series.points?.length) buildTestChart(series, run.clock);
+  }
+  if (runs.some((run) => run.setupPhotos?.length)) {
+    if (typeof backend?.getPhotoUrl !== "function")
+      throw new Error("Connect to the private photo storage before exporting test setup photos.");
+    if (backend.walkdownId && backend.walkdownId !== project.walkdownId)
+      throw new Error("The photo connection belongs to another skid.");
   }
   onProgress("Loading test report fonts...");
   const [regular, bold] = await Promise.all([reportFont("NotoSans-Regular.ttf"), reportFont("NotoSans-Bold.ttf")]);
@@ -445,6 +561,7 @@ export async function createTestReportPdf({ state, runId = null, onProgress = ()
   for (const run of runs) {
     onProgress(`Building ${run.name || "test run"}...`);
     runSummary(writer, run);
+    await runSetup(writer, doc, run, backend, onProgress);
     for (const device of run.devices) {
       writer.page(device.name);
       writer.paragraph(`Test run: ${run.name || "Test run"} | Software: ${run.software.name} ${run.software.version}`, { size: 8.5, color: COLOR.muted });

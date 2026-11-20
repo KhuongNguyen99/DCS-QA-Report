@@ -31,8 +31,9 @@ before(async () => {
         window.pdfExports.push(JSON.parse(JSON.stringify(state)));
         return new Blob(['test-pdf'], { type: 'application/pdf' });
       }`,
-    'test-report': `export async function createTestReportPdf({ state, runId }) {
+    'test-report': `export async function createTestReportPdf({ state, runId, backend }) {
       if (state.project.status !== 'closed') throw new Error('Only closed revisions can export.');
+      if (typeof backend?.getPhotoUrl !== 'function') throw new Error('Private setup image access must be supplied.');
       window.testPdfExports.push({ state: JSON.parse(JSON.stringify(state)), runId });
       return new Blob(['test-run-pdf'], { type: 'application/pdf' });
     }`,
@@ -179,6 +180,18 @@ function createServer(initiallyClosed = false) {
           writable(revision); server.calls.push({ kind: "deleteTestRun", revision, id, runVersion });
           assert.equal(server.state.testRuns.find(run => run.id === id).runVersion, runVersion);
           server.state.testRuns = server.state.testRuns.filter(run => run.id !== id);
+          server.state.project.contentVersion += 1;
+        },
+        async updateTestSetupPhoto(runId, photoId, caption) {
+          writable(revision); server.calls.push({ kind: "setupCaption", revision, runId, photoId, caption });
+          const photo = server.state.testRuns.find(run => run.id === runId).setupPhotos.find(item => item.id === photoId);
+          photo.caption = caption; server.state.project.contentVersion += 1;
+          return copy(photo);
+        },
+        async deleteTestSetupPhoto(runId, photoId) {
+          writable(revision); server.calls.push({ kind: "removeSetup", revision, runId, photoId });
+          const run = server.state.testRuns.find(item => item.id === runId);
+          run.setupPhotos = run.setupPhotos.filter(item => item.id !== photoId);
           server.state.project.contentVersion += 1;
         },
       };
@@ -474,9 +487,51 @@ const testRun = () => ({
   sources: [], stations: [], devices: [], unassignedChannels: [], warnings: [],
 });
 
+test("App blocks approval for unsaved setup captions and preserves approved photos after a later removal", async t => {
+  const h = await setup(t);
+  const photo = { id: "setup-1", walkdownId: SKID, testRunId: testRun().id,
+    path: "private/test-setup.jpg", name: "Test setup", width: 800, height: 600,
+    caption: "Original caption", createdBy: INSPECTOR };
+  h.server.state.testRuns = [{ ...testRun(), setupPhotos: [photo] }];
+  await h.notify();
+  await h.nav("Test reports");
+  await h.click(h.button("Edit caption"));
+  await h.fill(h.document.querySelector('.test-setup-caption-editor textarea'), "Wiring and pneumatic connections checked");
+  assert.equal(h.document.querySelector("#skid-report").disabled, true);
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, true);
+  await h.nav("Test reports");
+  await h.click(h.button("Save caption"));
+  assert.deepEqual(h.server.calls.at(-1), { kind: "setupCaption", revision: 7, runId: testRun().id,
+    photoId: "setup-1", caption: "Wiring and pneumatic connections checked" });
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, false);
+  await h.click(h.button("Approve & close"));
+  assert.match(h.document.querySelector('[aria-label="Confirm report approval"]').textContent, /1 setup photos/);
+  await h.click(h.button("Confirm approval & close"));
+  await h.nav("Test reports");
+  assert.equal(h.button("Add setup photos"), undefined);
+  assert.equal(h.button("Edit caption"), undefined);
+  assert.equal(h.button("Remove photo"), undefined);
+  await h.nav("Report");
+  await h.click(h.button("New revision"));
+  await h.nav("Test reports");
+  await h.click(h.button("Remove photo"));
+  await h.click(h.button("Confirm removal"));
+  assert.equal(h.server.calls.at(-1).kind, "removeSetup");
+  assert.equal(h.server.calls.at(-1).revision, 8);
+  assert.equal(h.server.state.testRuns[0].setupPhotos.length, 0);
+  const archived = h.server.archives.get(7).testRuns[0].setupPhotos;
+  assert.equal(archived.length, 1);
+  assert.equal(archived[0].caption, "Wiring and pneumatic connections checked");
+});
+
 test("App keeps unsaved test edits across navigation, locks approval, and exports only the archived run", async t => {
   const h = await setup(t);
-  h.server.state.testRuns = [testRun()];
+  const setupPhoto = { id: "setup-1", walkdownId: SKID, testRunId: testRun().id,
+    path: "private/original-setup.jpg", name: "Original setup", width: 800, height: 600,
+    caption: "Approved pneumatic and feedback setup", createdBy: INSPECTOR };
+  h.server.state.testRuns = [{ ...testRun(), setupPhotos: [setupPhoto] }];
   await h.notify();
   await h.nav("Test reports");
   assert.equal(h.button("Export test PDF").disabled, true);
@@ -507,6 +562,7 @@ test("App keeps unsaved test edits across navigation, locks approval, and export
   await h.click(h.button("Export test PDF"));
   assert.equal(h.window.testPdfExports.at(-1).runId, testRun().id);
   assert.equal(h.window.testPdfExports.at(-1).state.project.revision, 7);
+  assert.deepEqual(copy(h.window.testPdfExports.at(-1).state.testRuns[0].setupPhotos), [setupPhoto]);
   assert.match(h.window.downloads.at(-1).name, /DCS-IO-Test-Report-Rev7-2026-11-19\.pdf$/);
   await h.nav("Report");
   await h.click(h.button("New revision"));
@@ -521,6 +577,7 @@ test("App keeps unsaved test edits across navigation, locks approval, and export
   assert.equal(h.window.testPdfExports.at(-1).runId, null, "history exports all runs from its closed snapshot");
   assert.equal(h.window.testPdfExports.at(-1).state.testRuns[0].name, "Reviewed valve test");
   assert.equal(h.window.testPdfExports.at(-1).state.project.revision, 7);
+  assert.deepEqual(copy(h.window.testPdfExports.at(-1).state.testRuns[0].setupPhotos), [setupPhoto], "Historical export retains setup photos after the live run is removed");
 });
 
 test("App preserves a test draft but blocks saving it after another inspector closes and advances the revision", async t => {

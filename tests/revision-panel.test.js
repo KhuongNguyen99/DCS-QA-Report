@@ -110,7 +110,7 @@ test("approval captures the reviewed revision/version and rejects a changed revi
   assert.equal(h.window.calls[0].kind, "approve");
   assert.deepEqual(JSON.parse(JSON.stringify(h.window.calls[0].value)), {
     walkdownId: draft.walkdownId, revision: 4, contentVersion: 10, skidName: "Skid 2",
-    photoCount: 7, commentCount: 2, completedCount: 3, testRunCount: 0,
+    photoCount: 7, commentCount: 2, completedCount: 3, testRunCount: 0, setupPhotoCount: 0,
   });
   await h.settle();
   assert.equal(h.document.querySelector('[aria-label="Confirm report approval"]'), null);

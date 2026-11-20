@@ -20,6 +20,7 @@ const sample = {
 
 function fixture(overrides = {}) {
   const calls = [];
+  const filters = [];
   const state = {
     project: {
       title: "450k Skid x7 - DCS",
@@ -48,6 +49,7 @@ function fixture(overrides = {}) {
     height: 150,
     created_at: "2026-11-16T00:00:00Z",
     created_by: userId,
+    ...overrides.photo,
   };
   const storage = {
     async upload(path) {
@@ -131,7 +133,8 @@ function fixture(overrides = {}) {
         select() {
           return query;
         },
-        eq() {
+        eq(column, value) {
+          filters.push([column, value]);
           return query;
         },
         is() {
@@ -146,7 +149,7 @@ function fixture(overrides = {}) {
   };
   const workspace = createBackend(config, { clientFactory: () => client });
   const backend = workspace.forWalkdown(walkdownId, 17);
-  return { workspace, backend, calls, photo, state, listing, walkdown };
+  return { workspace, backend, calls, filters, photo, state, listing, walkdown };
 }
 
 test("functional test runs retain provenance and are saved or removed only in their pinned revision", async () => {
@@ -155,7 +158,8 @@ test("functional test runs retain provenance and are saved or removed only in th
     clock: { basis: "source-local", timeZone: "Source clock (unspecified)", start: null, end: null, startMs: null, endMs: null },
     sources: [{ id: "source-1", name: "station.csv", kind: "results", size: 200, sha256: "a".repeat(64) }],
     stations: [], devices: [], unassignedChannels: [], warnings: ["No timed events were provided."] };
-  const saved = { ...payload, id, walkdownId, runVersion: 2, createdBy: userId };
+  const saved = { ...payload, id, walkdownId, runVersion: 2, createdBy: userId,
+    setupPhotos: [{ id: photoId, caption: "Saved separately", path: `${userId}/${photoId}.jpg` }] };
   const h = fixture({ rpcResults: { qa_save_test_run: saved } });
   assert.deepEqual(await h.backend.saveTestRun({ ...payload, id }), saved);
   assert.deepEqual(h.calls.at(-1), ["qa_save_test_run", {
@@ -174,6 +178,58 @@ test("functional test runs retain provenance and are saved or removed only in th
   await assert.rejects(h.backend.deleteTestRun(id), /Refresh the test run/);
   const denied = fixture({ rpcErrors: { qa_delete_test_run: { message: "Only the importing inspector can remove this test run." } } });
   await assert.rejects(denied.backend.deleteTestRun(id, 2), /Only the importing inspector/);
+});
+
+test("setup photo uploads use the saved run and pinned revision without creating an inspection record", async () => {
+  const runId = "66666666-6666-4666-8666-666666666666";
+  const saved = { id: photoId, walkdownId, testRunId: runId, path: `${userId}/${photoId}.jpg`, caption: "", name: "Setup", width: 100, height: 150 };
+  const h = fixture({ rpcResults: { qa_add_test_setup_photo: saved } });
+  assert.deepEqual(await h.backend.addTestSetupPhoto(runId, sample), saved);
+  assert.deepEqual(h.calls.map(call => call[0]), ["session", "qa_prepare_test_setup_photo", "upload", "qa_add_test_setup_photo"]);
+  const prepare = h.calls[1][1];
+  assert.equal(prepare.p_run_id, runId);
+  assert.equal(prepare.p_walkdown_id, walkdownId);
+  assert.equal(prepare.p_expected_revision, 17);
+  assert.ok(!Object.hasOwn(prepare, "p_record_key"));
+  assert.equal(h.calls.at(-1)[1].p_id, prepare.p_id);
+  assert.equal(h.calls.at(-1)[1].p_run_id, runId);
+  await h.backend.getPhotoUrl(saved);
+  assert.equal(h.calls.at(-1)[0], "signUrl");
+});
+
+test("setup photo upload failures clean up reservations and lost finalization responses recover within the same run", async () => {
+  const runId = "66666666-6666-4666-8666-666666666666";
+  const failed = fixture({ uploadError: { message: "Offline" } });
+  await assert.rejects(failed.backend.addTestSetupPhoto(runId, sample), /Offline/);
+  assert.deepEqual(failed.calls.slice(-2).map(call => call[0]), ["qa_cancel_photo", "remove"]);
+  const h = fixture({ rpcErrors: { qa_add_test_setup_photo: { message: "Response lost" } }, recoveredPhoto: true,
+    photo: { test_run_id: runId, record_key: null, caption: "Wiring setup" } });
+  const recovered = await h.backend.addTestSetupPhoto(runId, sample);
+  assert.equal(recovered.testRunId, runId);
+  assert.equal(recovered.caption, "Wiring setup");
+  assert.ok(h.filters.some(([key, value]) => key === "test_run_id" && value === runId));
+  assert.ok(!h.calls.some(call => ["qa_cancel_photo", "remove"].includes(call[0])));
+});
+
+test("setup captions and removal preserve revision scope and archived objects", async () => {
+  const runId = "66666666-6666-4666-8666-666666666666";
+  const h = fixture({ rpcResults: { qa_delete_test_setup_photo: null } });
+  await h.backend.updateTestSetupPhoto(runId, photoId, "  Air supply and feedback wiring  ");
+  assert.deepEqual(h.calls.at(-1), ["qa_update_test_setup_photo", {
+    p_walkdown_id: walkdownId, p_run_id: runId, p_id: photoId, p_caption: "Air supply and feedback wiring", p_expected_revision: 17,
+  }]);
+  await h.backend.deleteTestSetupPhoto(runId, photoId);
+  assert.equal(h.calls.at(-1)[0], "qa_delete_test_setup_photo");
+  assert.ok(!h.calls.some(call => call[0] === "remove"));
+  const fresh = fixture({ rpcResults: { qa_delete_test_setup_photo: "private/unarchived.jpg" } });
+  await fresh.backend.deleteTestSetupPhoto(runId, photoId);
+  assert.deepEqual(fresh.calls.at(-1), ["remove", ["private/unarchived.jpg"]]);
+  const count = h.calls.length;
+  await assert.rejects(h.backend.updateTestSetupPhoto(runId, photoId, "x".repeat(1001)), /1,000/);
+  await assert.rejects(h.backend.addTestSetupPhoto("wrong-run", sample), /valid imported test run/);
+  await assert.rejects(h.backend.deleteTestSetupPhoto(runId, "wrong-photo"), /existing setup photo/);
+  await assert.rejects(h.workspace.forWalkdown(walkdownId).addTestSetupPhoto(runId, sample), /current revision/);
+  assert.equal(h.calls.length, count);
 });
 
 test("functional test runs require software metadata and finite bounded serialized evidence", async () => {

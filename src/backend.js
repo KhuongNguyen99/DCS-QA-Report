@@ -66,7 +66,7 @@ function validateTestRunId(value) {
 function testRunPayload(run) {
   if (!run || typeof run !== "object" || Array.isArray(run))
     throw new Error("Import the test files before saving a run.");
-  const { id, walkdownId, runVersion, createdAt, createdBy, updatedAt, updatedBy, deletedAt, deletedBy, ...data } = run;
+  const { id, walkdownId, runVersion, createdAt, createdBy, updatedAt, updatedBy, deletedAt, deletedBy, setupPhotos, ...data } = run;
   if (data.schemaVersion !== 1 || typeof data.name !== "string" || !data.name.trim() || data.name.length > 160)
     throw new Error("Enter a test run name between 1 and 160 characters.");
   if (typeof data.software?.name !== "string" || !data.software.name.trim() || data.software.name.length > 120
@@ -172,6 +172,14 @@ function photoFromRow(row) {
     height: row.height,
     createdAt: row.created_at,
     createdBy: row.created_by,
+  };
+}
+
+function setupPhotoFromRow(row) {
+  return {
+    id: row.id, walkdownId: row.walkdown_id, testRunId: row.test_run_id,
+    path: row.path, name: row.name, width: row.width, height: row.height,
+    caption: row.caption || "", createdAt: row.created_at, createdBy: row.created_by,
   };
 }
 
@@ -320,6 +328,103 @@ export function createBackend(
     const writeRpc = (name, args, action) => rpc(name, {
       ...args, p_expected_revision: validateRevision(expectedRevision),
     }, action);
+    async function uploadPhoto(recordKey, testRunId, { blob, width, height, name = "Inspection photo" } = {}) {
+      const setup = Boolean(testRunId);
+      if (setup) validateTestRunId(testRunId);
+      else validateRecordKey(recordKey);
+      if (
+        !blob ||
+        typeof blob.arrayBuffer !== "function" ||
+        !PHOTO_TYPES[blob.type]
+      ) {
+        throw new Error("Choose a JPEG, PNG, or WebP image.");
+      }
+      if (
+        !Number.isFinite(blob.size) ||
+        blob.size <= 0 ||
+        blob.size > MAX_PHOTO_BYTES
+      ) {
+        throw new Error(
+          "The photo must be nonempty and no larger than 12 MB.",
+        );
+      }
+      if (
+        ![width, height].every(
+          (value) => Number.isInteger(value) && value > 0 && value <= 24000,
+        )
+      ) {
+        throw new Error("The photo has invalid image dimensions.");
+      }
+      validateRevision(expectedRevision);
+      const session = await getSession();
+      if (!session?.user?.id)
+        throw new Error("Sign in before adding evidence.");
+      const id = crypto.randomUUID();
+      const path = `${session.user.id}/${id}.${PHOTO_TYPES[blob.type]}`;
+      const storage = client.storage.from(BUCKET);
+      // Reserve evidence before upload. Storage policies deny deleting a reserved
+      // or ready photo until the checked cancellation/removal RPC allows it.
+      await writeRpc(
+        setup ? "qa_prepare_test_setup_photo" : "qa_prepare_photo",
+        {
+          p_id: id,
+          ...(setup ? { p_run_id: testRunId } : { p_record_key: recordKey }),
+          p_path: path,
+          p_name: String(name).trim().slice(0, 180) || "Inspection photo",
+          p_width: width,
+          p_height: height,
+        },
+        "Could not prepare the photo upload",
+      );
+      async function cancelUpload() {
+        const cancelled = await client.rpc("qa_cancel_photo", {
+          p_walkdown_id: walkdownId,
+          p_id: id,
+        });
+        if (cancelled.error) return cancelled;
+        return storage
+          .remove([path])
+          .catch((cleanupError) => ({ error: cleanupError }));
+      }
+      const { error: uploadError } = await storage
+        .upload(path, blob, { contentType: blob.type, upsert: false })
+        .catch((error) => ({ error }));
+      if (uploadError) {
+        // A network failure may occur after storage accepted the upload.
+        await cancelUpload().catch(() => {});
+        fail(uploadError, "Could not upload the photo");
+      }
+      const { data, error } = await client.rpc(setup ? "qa_add_test_setup_photo" : "qa_add_photo", {
+        p_walkdown_id: walkdownId,
+        ...(setup ? { p_run_id: testRunId } : {}),
+        p_id: id,
+        p_expected_revision: expectedRevision,
+      });
+      if (error) {
+        // Recover a lost RPC response without deleting an already registered photo.
+        let query = client
+          .from("qa_photos")
+          .select(setup ? `${PHOTO_COLUMNS},test_run_id,caption` : PHOTO_COLUMNS)
+          .eq("id", id)
+          .eq("walkdown_id", walkdownId)
+          .eq("upload_state", "ready")
+          .is("deleted_at", null);
+        if (setup) query = query.eq("test_run_id", testRunId);
+        const result = await query.maybeSingle();
+        if (!result.error && result.data) return setup ? setupPhotoFromRow(result.data) : photoFromRow(result.data);
+        const cleanup = await cancelUpload().catch((cleanupError) => ({
+          error: cleanupError,
+        }));
+        const suffix = cleanup.error
+          ? " The upload may remain in storage; refresh before retrying and ask the project administrator to check orphaned uploads."
+          : "";
+        throw new Error(
+          `Could not register the photo: ${error.message}.${suffix}`,
+          { cause: error },
+        );
+      }
+      return setup ? data : photoFromRow(data);
+    }
     return Object.freeze({
       walkdownId,
       expectedRevision,
@@ -367,101 +472,37 @@ export function createBackend(
           "Could not remove the test run");
       },
 
-      async addPhoto(
-        recordKey,
-        { blob, width, height, name = "Inspection photo" } = {},
-      ) {
-        validateRecordKey(recordKey);
-        if (
-          !blob ||
-          typeof blob.arrayBuffer !== "function" ||
-          !PHOTO_TYPES[blob.type]
-        ) {
-          throw new Error("Choose a JPEG, PNG, or WebP image.");
-        }
-        if (
-          !Number.isFinite(blob.size) ||
-          blob.size <= 0 ||
-          blob.size > MAX_PHOTO_BYTES
-        ) {
-          throw new Error(
-            "The photo must be nonempty and no larger than 12 MB.",
-          );
-        }
-        if (
-          ![width, height].every(
-            (value) => Number.isInteger(value) && value > 0 && value <= 24000,
-          )
-        ) {
-          throw new Error("The photo has invalid image dimensions.");
-        }
-        validateRevision(expectedRevision);
-        const session = await getSession();
-        if (!session?.user?.id)
-          throw new Error("Sign in before adding evidence.");
-        const id = crypto.randomUUID();
-        const path = `${session.user.id}/${id}.${PHOTO_TYPES[blob.type]}`;
-        const storage = client.storage.from(BUCKET);
-        // Reserve evidence before upload. Storage policies deny deleting a reserved
-        // or ready photo until the checked cancellation/removal RPC allows it.
-        await writeRpc(
-          "qa_prepare_photo",
-          {
-            p_id: id,
-            p_record_key: recordKey,
-            p_path: path,
-            p_name: String(name).trim().slice(0, 180) || "Inspection photo",
-            p_width: width,
-            p_height: height,
-          },
-          "Could not prepare the photo upload",
-        );
-        async function cancelUpload() {
-          const cancelled = await client.rpc("qa_cancel_photo", {
-            p_walkdown_id: walkdownId,
-            p_id: id,
-          });
-          if (cancelled.error) return cancelled;
-          return storage
-            .remove([path])
-            .catch((cleanupError) => ({ error: cleanupError }));
-        }
-        const { error: uploadError } = await storage
-          .upload(path, blob, { contentType: blob.type, upsert: false })
-          .catch((error) => ({ error }));
-        if (uploadError) {
-          // A network failure may occur after storage accepted the upload.
-          await cancelUpload().catch(() => {});
-          fail(uploadError, "Could not upload the photo");
-        }
-        const { data, error } = await client.rpc("qa_add_photo", {
-          p_walkdown_id: walkdownId,
-          p_id: id,
-          p_expected_revision: expectedRevision,
-        });
-        if (error) {
-          // Recover a lost RPC response without deleting an already registered photo.
-          const result = await client
-            .from("qa_photos")
-            .select(PHOTO_COLUMNS)
-            .eq("id", id)
-            .eq("walkdown_id", walkdownId)
-            .eq("upload_state", "ready")
-            .is("deleted_at", null)
-            .maybeSingle();
-          if (!result.error && result.data) return photoFromRow(result.data);
-          const cleanup = await cancelUpload().catch((cleanupError) => ({
-            error: cleanupError,
-          }));
-          const suffix = cleanup.error
-            ? " The upload may remain in storage; refresh before retrying and ask the project administrator to check orphaned uploads."
-            : "";
-          throw new Error(
-            `Could not register the photo: ${error.message}.${suffix}`,
-            { cause: error },
-          );
-        }
-        return photoFromRow(data);
+      async addPhoto(recordKey, photo) {
+        return uploadPhoto(recordKey, null, photo);
+      },
+
+      async addTestSetupPhoto(runId, photo) {
+        validateTestRunId(runId);
+        return uploadPhoto(null, runId, photo);
+      },
+
+      async updateTestSetupPhoto(runId, photoId, caption) {
+        validateTestRunId(runId);
+        validateEvidenceId(photoId, "setup photo");
+        if (typeof caption !== "string" || caption.length > 1000 || caption.includes("\u0000"))
+          throw new Error("Keep the setup photo caption within 1,000 characters.");
+        return writeRpc("qa_update_test_setup_photo", {
+          p_run_id: runId, p_id: photoId, p_caption: caption.trim(),
+        }, "Could not save the setup photo caption");
+      },
+
+      async deleteTestSetupPhoto(runId, photoId) {
+        validateTestRunId(runId);
+        validateEvidenceId(photoId, "setup photo");
+        const path = await writeRpc("qa_delete_test_setup_photo", {
+          p_run_id: runId, p_id: photoId,
+        }, "Could not remove the setup photo");
+        if (path === null) return;
+        if (typeof path !== "string" || !path)
+          throw new Error("The setup photo was removed, but its storage cleanup response was invalid.");
+        signedUrls.delete(path);
+        const { error } = await client.storage.from(BUCKET).remove([path]);
+        fail(error, "The setup photo was removed from this draft, but storage cleanup failed. Retry removal or contact the project administrator");
       },
 
       async addComment(recordKey, text) {

@@ -10,6 +10,36 @@ const fonts = {
 };
 const startMs = Date.UTC(2026, 10, 19, 19, 17);
 const CLOCK = { basis: "source-local", timeZone: "Source clock (unspecified)", startMs, endMs: startMs + 392_000 };
+const setupPng = {
+  wide: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAYAAAADCAIAAAA/Y+msAAAAGElEQVR4nGN8tkqEARWwJF4oRRNiYsAAAJeCA1IJTjslAAAAAElFTkSuQmCC", "base64"),
+  portrait: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAMAAAAGCAIAAACJh7NbAAAAHUlEQVR4nGN8tkqEgYGBgYGBJfFCKYTFxAAD+FkAsQ4DWAfKzuIAAAAASUVORK5CYII=", "base64"),
+};
+const setupPhoto = (id, overrides = {}) => ({
+  id, walkdownId: "skid-1", testRunId: "run-1", path: `inspector-1/${id}.png`,
+  name: `${id}.png`, width: 6, height: 3, caption: `Saved caption for ${id}`,
+  createdAt: "2026-11-19T12:00:00Z", createdBy: "inspector-1", ...overrides,
+});
+
+function photoPlacements(stream) {
+  return [...stream.matchAll(/([\d.]+) 0 0 ([\d.]+) ([\d.]+) ([\d.]+) cm\s*\/I\d+ Do/g)]
+    .map(([, width, height, x, y]) => ({ width: +width, height: +height, x: +x, y: +y }));
+}
+
+async function withSetupImages(callback, photoResponse = () => new Response(setupPng.wide, { headers: { "content-type": "image/png" } })) {
+  const original = globalThis.fetch;
+  const fetched = [], accessed = [];
+  globalThis.fetch = async (url, options) => {
+    fetched.push({ url: String(url), options });
+    const font = fonts[String(url).split("/").pop()];
+    return font ? new Response(font) : photoResponse(String(url), options);
+  };
+  const backend = { walkdownId: "skid-1", getPhotoUrl: async (photo) => {
+    accessed.push(structuredClone(photo));
+    return `/private/${photo.path}`;
+  } };
+  try { return await callback({ backend, fetched, accessed }); }
+  finally { globalThis.fetch = original; }
+}
 
 function runFixture(id = "run-1") {
   const point = (offset, value, extra = {}) => ({
@@ -282,6 +312,121 @@ test("explicit-offset logs label normalized graph coordinates as UTC and retain 
     assert.match(result.text, /original event timestamps retain their offsets/);
     assert.match(result.text, /2026-11-19T14:17:02-05:00/);
     assert.doesNotMatch(result.text, /Clock: Source clock \(timezone not recorded\)/);
+  });
+});
+
+test("setup pages use only the selected approved photo snapshot with uncropped images and revision footers", async () => {
+  const state = closedState();
+  const archived = runFixture("archived");
+  archived.setupPhotos = [
+    setupPhoto("wide", { testRunId: "archived", caption: "Approved overview caption" }),
+    setupPhoto("portrait", { testRunId: "archived", width: 3, height: 6, caption: "Approved detail caption" }),
+  ];
+  const newer = runFixture("newer");
+  newer.setupPhotos = [setupPhoto("unselected", { testRunId: "newer", caption: "Newer caption must not appear" })];
+  state.testRuns = [archived, newer];
+  await withSetupImages(async ({ backend, fetched, accessed }) => {
+    const progress = [];
+    const pending = createTestReportPdf({ state, runId: "archived", backend, onProgress: message => progress.push(message) });
+    archived.setupPhotos[0].caption = "Mutated current caption";
+    archived.setupPhotos[0].path = "inspector-1/mutated.png";
+    const result = await pdfContent(await pending);
+    assert.deepEqual(accessed.map(photo => photo.path), ["inspector-1/wide.png", "inspector-1/portrait.png"]);
+    assert.equal(accessed[0].caption, "Approved overview caption");
+    assert.doesNotMatch(result.text, /Mutated|Newer caption|unselected\.png/);
+    const photoPages = result.pages.map((text, page) => ({ text, page, images: photoPlacements(result.streams[page]) }))
+      .filter(page => page.images.length);
+    assert.equal(photoPages.length, 2);
+    const firstDevicePage = result.pages.findIndex(page => page.split("\n")[2] === "RTD-EXAMPLE");
+    for (let index = 0; index < photoPages.length; index += 1) {
+      const { text, page, images } = photoPages[index];
+      assert.match(text, /Run archived - Setup/);
+      assert.match(text, new RegExp(`Photo ${index + 1} of 2`));
+      assert.match(text, /Revision 2 \| Skid: Skid Example/);
+      assert.match(text, /Approved: 2026-11-20 11:30:00 UTC/);
+      assert.equal(images.length, 1);
+      assert.ok(page < firstDevicePage, "setup photos precede device pages");
+      const image = images[0];
+      assert.ok(Math.abs(image.width / image.height - (index === 0 ? 2 : 0.5)) < 0.00001);
+      assert.ok(image.x >= 43.19 && image.x + image.width <= 748.81);
+      assert.ok(612 - image.y <= 548.01, "the image stays above the footer");
+    }
+    assert.match(photoPages[0].text, /Approved overview caption/);
+    assert.match(photoPages[1].text, /Approved detail caption/);
+    assert.ok(fetched.filter(item => item.url.startsWith("/private/")).every(item => item.options.cache === "no-store"));
+    assert.equal(progress.at(-1), "Test report ready");
+  }, url => new Response(url.includes("portrait") ? setupPng.portrait : setupPng.wide, { headers: { "content-type": "image/png" } }));
+});
+
+test("setup photo scope and metadata are checked before assets load", async () => {
+  const original = globalThis.fetch;
+  let fetched = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error("No assets expected"); };
+  try {
+    const backend = { getPhotoUrl: async () => "/private/setup.png" };
+    for (const [photos, message] of [
+      [null, /photo list is invalid/],
+      [[setupPhoto("photo", { walkdownId: "other-skid" })], /another skid/],
+      [[setupPhoto("photo", { testRunId: "other-run" })], /another test run/],
+      [[setupPhoto("photo", { caption: "x".repeat(1001) })], /invalid metadata/],
+      [[setupPhoto("photo", { width: 0 })], /invalid metadata/],
+      [[setupPhoto("photo", { path: "https:\/\/example.invalid/image.png" })], /invalid metadata/],
+      [[setupPhoto("same"), setupPhoto("same")], /invalid metadata/],
+      [Array.from({ length: 31 }, (_, index) => setupPhoto(`photo-${index}`)), /photo list is invalid/],
+    ]) {
+      const state = closedState(); state.testRuns[0].setupPhotos = photos;
+      await assert.rejects(createTestReportPdf({ state, backend }), message);
+    }
+    const state = closedState(); state.testRuns[0].setupPhotos = [setupPhoto("photo")];
+    await assert.rejects(createTestReportPdf({ state }), /Connect to the private photo storage/);
+    await assert.rejects(createTestReportPdf({ state, backend: { ...backend, walkdownId: "other-skid" } }), /connection belongs to another skid/);
+    assert.equal(fetched, false);
+  } finally { globalThis.fetch = original; }
+});
+
+test("missing, oversized, or unreadable setup photos stop export instead of omitting evidence", async () => {
+  const state = closedState(); state.testRuns[0].setupPhotos = [setupPhoto("photo")];
+  const before = structuredClone(state);
+  let cancelled = false;
+  for (const [respond, message] of [
+    [() => new Response("missing", { status: 404 }), /setup photo "photo.png".*HTTP 404/],
+    [() => new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } }), /JPEG, PNG, or WebP/],
+    [() => new Response(setupPng.wide, { headers: { "content-type": "image/png", "content-length": String(12 * 1024 * 1024 + 1) } }), /12 MB limit/],
+    [() => new Response(new ReadableStream({
+      pull(controller) { controller.enqueue(new Uint8Array(1024 * 1024)); },
+      cancel() { cancelled = true; },
+    }), { headers: { "content-type": "image/png" } }), /12 MB limit/],
+    [() => new Response(new Uint8Array(), { headers: { "content-type": "image/png" } }), /image is empty/],
+    [() => new Response("not a PNG", { headers: { "content-type": "image/png" } }), /could not be decoded/],
+    [() => new Response(setupPng.portrait, { headers: { "content-type": "image/png" } }), /dimensions differ/],
+  ]) await withSetupImages(async ({ backend }) => {
+    await assert.rejects(createTestReportPdf({ state, backend }), message);
+  }, respond);
+  await withSetupImages(async () => {
+    await assert.rejects(createTestReportPdf({ state, backend: { getPhotoUrl: async () => { throw new Error("Access denied"); } } }), /Could not access setup photo.*Access denied/);
+  });
+  assert.equal(cancelled, true, "a body exceeding the byte limit is cancelled");
+  assert.deepEqual(state, before, "failed exports do not alter approved evidence");
+});
+
+test("long setup captions paginate fully without losing photos or crossing the footer", async () => {
+  const state = closedState();
+  state.testRuns[0].setupPhotos = [
+    setupPhoto("first", { caption: Array.from({ length: 55 }, (_, index) => `Caption-line-${index + 1}`).join("\n") }),
+    setupPhoto("second", { caption: "Following setup photo caption" }),
+  ];
+  const before = structuredClone(state);
+  await withSetupImages(async ({ backend }) => {
+    const result = await pdfContent(await createTestReportPdf({ state, backend }));
+    for (let index = 1; index <= 55; index++) assert.ok(result.text.includes(`Caption-line-${index}`));
+    assert.match(result.text, /Setup \(continued\)/);
+    assert.match(result.text, /Following setup photo caption/);
+    assert.equal(result.streams.flatMap(photoPlacements).length, 2);
+    for (const page of result.blocks) for (const block of page) {
+      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
+    }
+    assert.deepEqual(state, before);
   });
 });
 

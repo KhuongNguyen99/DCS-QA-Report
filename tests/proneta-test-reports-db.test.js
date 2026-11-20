@@ -7,6 +7,7 @@ const sql = (name) => readFile(new URL(`../supabase/${name}`, import.meta.url), 
 const schema = await sql("schema.sql");
 const qcMigration = await sql("qc-revisions.sql");
 const migration = await sql("proneta-test-reports.sql");
+const setupMigration = await sql("test-setup-photos.sql");
 const verification = await sql("VERIFY.sql");
 const deployScript = await readFile(new URL("../scripts/migrate-qc-revisions.mjs", import.meta.url), "utf8");
 const deploymentChecks = deployScript.match(/const result = await query\(`([\s\S]*?)`, true\);/)[1];
@@ -68,6 +69,14 @@ function runData({ timed = true } = {}) {
   };
 }
 
+async function setupPhoto(h, walkdownId, runId, revision, userId = admin) {
+  const id = crypto.randomUUID(), path = `${userId}/${id}.jpg`;
+  await h.rpc("qa_prepare_test_setup_photo", walkdownId, runId, id, path, "Synthetic setup.jpg", 1600, 900, revision);
+  await h.db.query("insert into storage.objects(bucket_id,name) values('qa-evidence',$1)", [path]);
+  const photo = await h.rpc("qa_add_test_setup_photo", walkdownId, runId, id, revision);
+  return { id, path, photo };
+}
+
 test("functional test imports preserve old snapshots and share explicit approval/revision locks", async (t) => {
   const beforeImports = schema.split("-- PRONETA test report layer;")[0]
     .replace("    'testRuns', qa_private.test_runs_state(p_walkdown_id),\n", "") + "commit;";
@@ -81,6 +90,7 @@ test("functional test imports preserve old snapshots and share explicit approval
   await h.db.exec(qcMigration);
   await h.db.exec(migration);
   await h.db.exec(migration);
+  await h.db.exec(setupMigration);
   await h.user();
   assert.deepEqual((await h.db.query("select snapshot from public.qa_report_revisions where walkdown_id=$1", [report.id])).rows[0].snapshot, oldSnapshot);
   assert.equal((await h.state(report.id)).testRuns, undefined, "legacy closed JSON remains byte-for-byte compatible");
@@ -112,6 +122,7 @@ test("functional test imports preserve old snapshots and share explicit approval
   await h.db.exec(schema);
   await h.db.exec(qcMigration);
   await h.db.exec(migration);
+  await h.db.exec(setupMigration);
   assert.equal(Object.values((await h.db.query(deploymentChecks)).rows[0]).every(value => value === true), true);
   await h.db.exec(verification);
   await h.user();
@@ -208,4 +219,113 @@ test("deployment verification works for a table-read role without private helper
   } finally {
     await h.db.exec("rollback");
   }
+});
+
+test("setup photos share closeout locks and frozen revisions without entering inspection evidence or source JSON", async (t) => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Setup photo revision skid");
+  const runId = crypto.randomUUID(), data = runData();
+  const saved = await h.rpc("qa_save_test_run", report.id, runId, data, 1, null);
+  const before = await h.state(report.id);
+  assert.equal(saved.setupPhotos, undefined, "runs without setup images retain their earlier JSON shape");
+  const image = await setupPhoto(h, report.id, runId, 1);
+  assert.equal(image.photo.testRunId, runId);
+  assert.equal(image.photo.caption, "");
+  const afterUpload = await h.state(report.id);
+  assert.deepEqual(afterUpload.photos, before.photos, "setup photos stay out of ordinary QC inspection photos");
+  assert.deepEqual(afterUpload.records, before.records, "adding a setup photo does not touch inspection status");
+  assert.equal(afterUpload.catalog.length, 39);
+  assert.equal(afterUpload.testRuns[0].setupPhotos.length, 1);
+  assert.equal(afterUpload.testRuns[0].runVersion, 1);
+  assert.ok(afterUpload.project.contentVersion > before.project.contentVersion);
+  assert.deepEqual(await h.rpc("qa_add_test_setup_photo", report.id, runId, image.id, 1), image.photo,
+    "a lost finalization response can retry without a second photo");
+  assert.equal((await h.state(report.id)).project.contentVersion, afterUpload.project.contentVersion);
+  await h.rpc("qa_update_test_setup_photo", report.id, runId, image.id, "Pneumatic test connections", 1);
+  const reviewed = await h.state(report.id);
+  await assert.rejects(h.rpc("qa_approve_revision", report.id, 1, afterUpload.project.contentVersion), /changed since you reviewed/);
+  assert.deepEqual((await h.db.query("select data from public.qa_test_runs where id=$1", [runId])).rows[0].data, data,
+    "private image paths and captions are server-derived, outside normalized imported data");
+  const pendingId = crypto.randomUUID(), pendingPath = `${admin}/${pendingId}.jpg`;
+  await h.rpc("qa_prepare_test_setup_photo", report.id, runId, pendingId, pendingPath, "Pending.jpg", 800, 600, 1);
+  const closed = await h.rpc("qa_approve_revision", report.id, 1, reviewed.project.contentVersion);
+  assert.equal(closed.testRuns[0].setupPhotos[0].caption, "Pneumatic test connections");
+  assert.equal(closed.photos.length, 0, "ordinary inspection photo counts remain unchanged");
+  const frozen = (await h.db.query("select snapshot from public.qa_report_revisions where walkdown_id=$1 and revision=1", [report.id])).rows[0].snapshot;
+  assert.equal((await h.db.query("select photo_id from public.qa_revision_photos where walkdown_id=$1", [report.id])).rows.length, 1);
+  await assert.rejects(h.rpc("qa_update_test_setup_photo", report.id, runId, image.id, "Late edit", 1), /approved and closed/);
+  await assert.rejects(h.rpc("qa_delete_test_setup_photo", report.id, runId, image.id, 1), /approved and closed/);
+  await assert.rejects(h.db.query("insert into storage.objects(bucket_id,name) values('qa-evidence',$1)", [pendingPath]), /row-level security/);
+
+  await h.db.exec("reset role");
+  await h.db.exec(schema);
+  await h.db.exec(qcMigration);
+  await h.db.exec(migration);
+  await h.db.exec(setupMigration);
+  await h.db.exec(setupMigration);
+  await h.db.exec("create role setup_deployment_reader bypassrls; grant pg_read_all_data to setup_deployment_reader; set role setup_deployment_reader");
+  assert.equal(Object.values((await h.db.query(deploymentChecks)).rows[0]).every(value => value === true), true,
+    "read-only deployment checks compare the full frozen setup-photo metadata");
+  const manualCheck = verification.match(/select w\.id as closed_report_with_changed_test_runs[\s\S]*?;/)[0];
+  assert.deepEqual((await h.db.query(manualCheck)).rows, []);
+  await h.user();
+  assert.deepEqual((await h.db.query("select snapshot from public.qa_report_revisions where walkdown_id=$1 and revision=1", [report.id])).rows[0].snapshot, frozen);
+  await h.rpc("qa_new_revision", report.id, 1);
+  assert.deepEqual((await h.state(report.id)).testRuns[0].setupPhotos, closed.testRuns[0].setupPhotos);
+  await assert.rejects(h.rpc("qa_add_test_setup_photo", report.id, runId, pendingId, 1), /different revision/);
+  await assert.rejects(h.rpc("qa_add_test_setup_photo", report.id, runId, pendingId, 2), /reservation was not found/);
+  await h.rpc("qa_update_test_setup_photo", report.id, runId, image.id, "Revised setup caption", 2);
+  assert.equal((await h.rpc("qa_load_revision", report.id, 1)).testRuns[0].setupPhotos[0].caption, "Pneumatic test connections");
+  assert.equal(await h.rpc("qa_delete_test_setup_photo", report.id, runId, image.id, 2), null, "archived files never receive a deletion path");
+  assert.equal((await h.state(report.id)).testRuns[0].setupPhotos, undefined);
+  assert.equal((await h.db.query("delete from storage.objects where name=$1 returning name", [image.path])).rows.length, 0,
+    "storage RLS independently prevents removing a file referenced by an approved revision");
+  assert.equal((await h.db.query("select name from storage.objects where name=$1", [image.path])).rows.length, 1,
+    "the archived image remains privately readable after removal from the current draft");
+  assert.deepEqual((await h.db.query("select snapshot from public.qa_report_revisions where walkdown_id=$1 and revision=1", [report.id])).rows[0].snapshot, frozen);
+});
+
+test("setup photo writes require the owning saved run, validated scope, bounded captions, and bounded reservations", async (t) => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Setup permissions skid");
+  const other = await h.rpc("qa_create_walkdown", "Another setup skid");
+  await h.user(second);
+  const runId = crypto.randomUUID(), otherRunId = crypto.randomUUID();
+  await h.rpc("qa_save_test_run", report.id, runId, runData(), 1, null);
+  await h.rpc("qa_save_test_run", report.id, otherRunId, runData(), 1, null);
+  const image = await setupPhoto(h, report.id, runId, 1, second);
+  await assert.rejects(h.rpc("qa_update_test_setup_photo", other.id, runId, image.id, "Wrong skid", 1), /Save an active test run/);
+  await assert.rejects(h.rpc("qa_update_test_setup_photo", report.id, otherRunId, image.id, "Wrong run", 1), /not found in this test run/);
+  await assert.rejects(h.rpc("qa_delete_test_setup_photo", report.id, otherRunId, image.id, 1), /not found in this test run/);
+  await assert.rejects(h.rpc("qa_add_test_setup_photo", report.id, otherRunId, image.id, 1), /reservation was not found/);
+  await assert.rejects(h.rpc("qa_add_photo", report.id, image.id, 1), /inspection photo reservation/);
+  await assert.rejects(h.rpc("qa_delete_photo", report.id, image.id, 1), /Inspection photo not found/);
+  await assert.rejects(h.rpc("qa_update_test_setup_photo", report.id, runId, image.id, "x".repeat(1001), 1), /at most 1,000/);
+  await assert.rejects(h.rpc("qa_update_test_setup_photo", report.id, runId, image.id, null, 1), /at most 1,000/);
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, runId, { ...runData(), setupPhotos: [image.photo] }, 1, 1), /managed separately by the server/);
+  await assert.rejects(h.db.query("update public.qa_photos set caption='Bypassed' where id=$1", [image.id]), /permission denied/);
+  await h.user(outsider);
+  await assert.rejects(h.rpc("qa_update_test_setup_photo", report.id, runId, image.id, "Outsider", 1), /approved project inspector/);
+  assert.equal((await h.db.query("select name from storage.objects where name=$1", [image.path])).rows.length, 0);
+  await h.user(admin);
+  const adminRunId = crypto.randomUUID();
+  await h.rpc("qa_save_test_run", report.id, adminRunId, runData(), 1, null);
+  const adminImage = await setupPhoto(h, report.id, runId, 1, admin);
+  await h.user(second);
+  await assert.rejects(h.rpc("qa_prepare_test_setup_photo", report.id, adminRunId, crypto.randomUUID(), "invalid/path.jpg", "Cannot edit.jpg", 100, 100, 1), /Only the importing inspector/);
+  assert.equal(await h.rpc("qa_delete_test_setup_photo", report.id, runId, adminImage.id, 1), adminImage.path,
+    "a run owner can remove images an administrator added to the run");
+  assert.equal((await h.db.query("delete from storage.objects where name=$1 returning name", [adminImage.path])).rows.length, 1);
+  await h.rpc("qa_update_test_setup_photo", report.id, runId, image.id, "", 1);
+  for (let index = 1; index < 30; index += 1) {
+    const id = crypto.randomUUID();
+    await h.rpc("qa_prepare_test_setup_photo", report.id, runId, id, `${second}/${id}.jpg`, "Reserved.jpg", 100, 100, 1);
+  }
+  const overflowId = crypto.randomUUID();
+  await assert.rejects(h.rpc("qa_prepare_test_setup_photo", report.id, runId, overflowId, `${second}/${overflowId}.jpg`, "Over limit.jpg", 100, 100, 1), /at most 30/);
+  await h.rpc("qa_delete_test_run", report.id, runId, 1, 1);
+  assert.equal((await h.db.query("select id from public.qa_photos where test_run_id=$1", [runId])).rows.length, 0,
+    "removing a run retires its setup photos and pending reservations");
+  await assert.rejects(h.rpc("qa_add_test_setup_photo", report.id, runId, image.id, 1), /Save an active test run/);
+  await assert.rejects(h.rpc("qa_prepare_test_setup_photo", report.id, runId, crypto.randomUUID(), "invalid/path.jpg", "Removed run.jpg", 100, 100, 1), /Save an active test run/);
 });

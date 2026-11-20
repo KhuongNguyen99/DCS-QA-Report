@@ -17,6 +17,7 @@ async function query(sql, readOnly = false) {
 
 await query(await readFile(new URL("../supabase/qc-revisions.sql", import.meta.url), "utf8"));
 await query(await readFile(new URL("../supabase/proneta-test-reports.sql", import.meta.url), "utf8"));
+await query(await readFile(new URL("../supabase/test-setup-photos.sql", import.meta.url), "utf8"));
 const result = await query(`
   select
     (select count(*) from public.qa_targets) = 39
@@ -57,7 +58,11 @@ const result = await query(`
     (select bool_and(has_function_privilege('authenticated', to_regprocedure(signature), 'EXECUTE')
       and not has_function_privilege('anon', to_regprocedure(signature), 'EXECUTE')) from unnest(array[
       'public.qa_save_test_run(uuid,uuid,jsonb,bigint,bigint)',
-      'public.qa_delete_test_run(uuid,uuid,bigint,bigint)']) signature) as test_run_access_verified,
+      'public.qa_delete_test_run(uuid,uuid,bigint,bigint)',
+      'public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint)',
+      'public.qa_add_test_setup_photo(uuid,uuid,uuid,bigint)',
+      'public.qa_update_test_setup_photo(uuid,uuid,uuid,text,bigint)',
+      'public.qa_delete_test_setup_photo(uuid,uuid,uuid,bigint)']) signature) as test_run_access_verified,
     -- The read-only API role has table access but cannot execute private helpers.
     -- Keep this aggregate aligned with test_run_info/test_runs_state without grants.
     not exists (select 1 from public.qa_walkdowns w join public.qa_report_revisions r
@@ -67,7 +72,13 @@ const result = await query(`
           'id', t.id, 'walkdownId', t.walkdown_id, 'runVersion', t.run_version,
           'createdAt', t.created_at, 'createdBy', t.created_by,
           'updatedAt', t.updated_at, 'updatedBy', t.updated_by
-        ) order by t.created_at, t.id), '[]'::jsonb)
+        ) || coalesce((select jsonb_build_object('setupPhotos', jsonb_agg(jsonb_build_object(
+            'id', p.id, 'walkdownId', p.walkdown_id, 'testRunId', p.test_run_id,
+            'path', p.path, 'name', p.name, 'width', p.width, 'height', p.height, 'caption', p.caption,
+            'createdAt', p.created_at, 'createdBy', p.created_by
+          ) order by p.created_at, p.id)) from public.qa_photos p
+          where p.test_run_id = t.id and p.walkdown_id = t.walkdown_id
+            and p.upload_state = 'ready' and p.deleted_at is null having count(*) > 0), '{}'::jsonb) order by t.created_at, t.id), '[]'::jsonb)
         from public.qa_test_runs t where t.walkdown_id = w.id and t.deleted_at is null))
       as closed_test_runs_preserved;
 `, true);

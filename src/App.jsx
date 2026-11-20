@@ -567,7 +567,7 @@ function App() {
       const generatedAt = approvedReportDate(snapshot);
       const blob = kind === "tests"
         ? await (await import("./test-report.js")).createTestReportPdf({
-          state: snapshot, runId, onProgress: setReporting,
+          state: snapshot, runId, backend, onProgress: setReporting,
         })
         : await createInspectionPdf({
           schedule, state: snapshot, backend, onProgress: setReporting,
@@ -602,6 +602,50 @@ function App() {
     if (expectedRevision !== reportRevision || activeEditor.current !== writeBackend)
       throw new Error("This report revision changed. Refresh before removing a test run.");
     return mutate(() => writeBackend.deleteTestRun(run.id, run.runVersion), "Test run removed from this draft");
+  }
+
+  function setupPhotoScope(run, expectedRevision) {
+    if (!writeBackend || expectedRevision !== reportRevision || activeEditor.current !== writeBackend
+      || (run.walkdownId && run.walkdownId !== selectedId))
+      throw new Error("This setup belongs to an earlier report revision. Reopen the current draft before editing photos.");
+    return writeBackend;
+  }
+
+  function updateSetupPhotos(runId, expectedRevision, walkdownId, update) {
+    setState(previous => previous.project?.walkdownId === walkdownId
+      && previous.project.revision === expectedRevision && previous.project.status === "draft"
+      ? { ...previous, testRuns: (previous.testRuns || []).map(run => run.id === runId
+        ? { ...run, setupPhotos: update(run.setupPhotos || []) } : run) }
+      : previous);
+  }
+
+  async function addTestSetupPhoto(run, photo, expectedRevision) {
+    const scope = setupPhotoScope(run, expectedRevision);
+    return mutate(async () => {
+      const saved = await scope.addTestSetupPhoto(run.id, photo);
+      updateSetupPhotos(run.id, expectedRevision, scope.walkdownId,
+        photos => [...photos.filter(item => item.id !== saved.id), saved]);
+      return saved;
+    }, "Setup photo saved to this revision");
+  }
+
+  async function updateTestSetupPhoto(run, photo, caption, expectedRevision) {
+    const scope = setupPhotoScope(run, expectedRevision);
+    return mutate(async () => {
+      const saved = await scope.updateTestSetupPhoto(run.id, photo.id, caption);
+      updateSetupPhotos(run.id, expectedRevision, scope.walkdownId,
+        photos => photos.map(item => item.id === saved.id ? saved : item));
+      return saved;
+    }, "Setup photo caption saved");
+  }
+
+  async function deleteTestSetupPhoto(run, photo, expectedRevision) {
+    const scope = setupPhotoScope(run, expectedRevision);
+    return mutate(async () => {
+      await scope.deleteTestSetupPhoto(run.id, photo.id);
+      updateSetupPhotos(run.id, expectedRevision, scope.walkdownId,
+        photos => photos.filter(item => item.id !== photo.id));
+    }, "Setup photo removed from this draft");
   }
 
   return (
@@ -1205,6 +1249,10 @@ function App() {
               exportProgress={reporting}
               onSave={saveTestRun}
               onDelete={deleteTestRun}
+              getPhotoUrl={backend.getPhotoUrl}
+              onAddSetupPhoto={addTestSetupPhoto}
+              onUpdateSetupPhoto={updateTestSetupPhoto}
+              onRemoveSetupPhoto={deleteTestSetupPhoto}
               onExport={(runId) => exportTestReport(reportRevision, runId)}
               onReview={() => navigate("report")}
               onDirtyChange={setTestDraftDirty}
@@ -1245,6 +1293,7 @@ function App() {
                   project={state.project}
                   revisions={state.revisions || []}
                   testRunCount={state.testRuns?.length || 0}
+                  setupPhotoCount={(state.testRuns || []).reduce((count, run) => count + (run.setupPhotos?.length || 0), 0)}
                   hasDraftTests={testDraftDirty}
                   photoCount={state.photos.length}
                   commentCount={state.comments.length}
@@ -1260,7 +1309,7 @@ function App() {
               )}
               {connected && ((state.testRuns?.length || 0) > 0 || testDraftDirty) && <div className="card test-report-link">
                 <div><strong>{state.testRuns?.length || 0} saved test runs in revision {reportRevision}</strong>
-                  <p>{testDraftDirty ? "You have unsaved test run changes. Save or discard them before approval." : "Software details, recorded results, parameters, and graphs share this report’s revision lock."}</p></div>
+                  <p>{testDraftDirty ? "You have unsaved test run changes. Save or discard them before approval." : "Setup photos, software details, recorded results, parameters, and graphs share this report’s revision lock."}</p></div>
                 <button type="button" className="button secondary" onClick={() => navigate("tests")}>Review test reports</button>
               </div>}
               <section className="stats-strip report-stats">

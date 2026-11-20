@@ -7,7 +7,7 @@ const approvedDate = (value) => new Date(value).toLocaleString(undefined, {
 
 export default function RevisionPanel({
   project, revisions = [], photoCount, commentCount, completedCount, targetCount,
-  testRunCount = 0, pending = false, hasDraftComments = false, hasDraftTests = false,
+  testRunCount = 0, setupPhotoCount = 0, pending = false, hasDraftComments = false, hasDraftTests = false,
   onApprove, onNewRevision, onExport, onExportTests,
 }) {
   const [review, setReview] = useState(null);
@@ -43,7 +43,7 @@ export default function RevisionPanel({
     setReview({
       walkdownId: project.walkdownId, revision: project.revision,
       contentVersion: project.contentVersion, skidName: project.skidName,
-      photoCount, commentCount, completedCount, testRunCount,
+      photoCount, commentCount, completedCount, testRunCount, setupPhotoCount,
     });
   }
 
@@ -73,7 +73,7 @@ export default function RevisionPanel({
       ) : (
         <div className="revision-body">
           <p>Review the saved photos, comments, and test reports, then approve and close this revision to export it.</p>
-          <span className="revision-summary">{photoCount} photos · {commentCount} comments · {completedCount}/{targetCount} items reviewed · {testRunCount} test runs</span>
+          <span className="revision-summary">{photoCount} photos · {commentCount} comments · {completedCount}/{targetCount} items reviewed · {testRunCount} test runs{setupPhotoCount > 0 && ` · ${setupPhotoCount} setup photos`}</span>
           {!review && <button type="button" className="button primary" disabled={blocked || hasDraftComments || hasDraftTests} onClick={beginReview}>
             <Icon name="check" size={17} />Approve &amp; close
           </button>}
@@ -84,8 +84,8 @@ export default function RevisionPanel({
       {review && (
         <div className="revision-confirmation" role="group" aria-label="Confirm report approval">
           <h3>Approve and close revision {review.revision}?</h3>
-          <p><strong>{review.skidName}</strong> — {review.photoCount} photos, {review.commentCount} comments, {review.completedCount}/{targetCount} items reviewed, {review.testRunCount} test runs.</p>
-          <p>Approval locks the inspection evidence and all saved test reports, including their software details, results, parameters, and graphs. Use New revision for any later changes.</p>
+          <p><strong>{review.skidName}</strong> — {review.photoCount} photos, {review.commentCount} comments, {review.completedCount}/{targetCount} items reviewed, {review.testRunCount} test runs{review.setupPhotoCount > 0 && ` with ${review.setupPhotoCount} setup photos`}.</p>
+          <p>Approval locks the inspection evidence and all saved test reports, including their setup photos, captions, software details, results, parameters, and graphs. Use New revision for any later changes.</p>
           {changed && <p className="field-error" role="alert">The report changed while you were reviewing. Cancel and review the updated report before approving.</p>}
           <div className="revision-actions">
             <button type="button" className="button secondary" disabled={blocked} onClick={() => setReview(null)}>Cancel</button>

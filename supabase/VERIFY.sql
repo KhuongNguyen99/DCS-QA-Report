@@ -107,7 +107,13 @@ where w.status = 'closed' and coalesce(r.snapshot->'testRuns', '[]'::jsonb)
     'id', t.id, 'walkdownId', t.walkdown_id, 'runVersion', t.run_version,
     'createdAt', t.created_at, 'createdBy', t.created_by,
     'updatedAt', t.updated_at, 'updatedBy', t.updated_by
-  ) order by t.created_at, t.id), '[]'::jsonb)
+  ) || coalesce((select jsonb_build_object('setupPhotos', jsonb_agg(jsonb_build_object(
+            'id', p.id, 'walkdownId', p.walkdown_id, 'testRunId', p.test_run_id,
+            'path', p.path, 'name', p.name, 'width', p.width, 'height', p.height, 'caption', p.caption,
+            'createdAt', p.created_at, 'createdBy', p.created_by
+          ) order by p.created_at, p.id)) from public.qa_photos p
+          where p.test_run_id = t.id and p.walkdown_id = t.walkdown_id
+            and p.upload_state = 'ready' and p.deleted_at is null having count(*) > 0), '{}'::jsonb) order by t.created_at, t.id), '[]'::jsonb)
   from public.qa_test_runs t where t.walkdown_id = w.id and t.deleted_at is null);
 select r.walkdown_id, r.revision as snapshot_with_invalid_test_run_scope
 from public.qa_report_revisions r cross join lateral jsonb_array_elements(coalesce(r.snapshot->'testRuns', '[]'::jsonb)) t

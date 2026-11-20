@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "./Icons.jsx";
+import TestSetupPhotos from "./TestSetupPhotos.jsx";
 import { parsePronetaFiles } from "./proneta-parser.js";
 import { importNoteClarification } from "./proneta-notes.js";
 import { buildTestChart, formatSourceTime, formatTestValue } from "./test-chart.js";
@@ -158,6 +159,7 @@ export function TestRunDetail({ run }) {
 export default function TestReportsPanel({
   project, runs = [], inspector, readOnly = false, pending = false, exportProgress = "",
   onSave, onDelete, onExport, onReview, onDirtyChange,
+  getPhotoUrl, onAddSetupPhoto, onUpdateSetupPhoto, onRemoveSetupPhoto,
 }) {
   const [selectedId, setSelectedId] = useState(null);
   const [draft, setDraft] = useState(null);
@@ -166,6 +168,7 @@ export default function TestReportsPanel({
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [setupDirty, setSetupDirty] = useState(false);
   const busyRef = useRef(false);
   const parseRef = useRef(0);
   const access = useRef(null);
@@ -176,18 +179,18 @@ export default function TestReportsPanel({
   const canEdit = run => !readOnly && Boolean(inspector?.id && (inspector.isAdmin || inspector.id === run.createdBy));
   const confirmsRun = run => confirmDelete?.id === run.id && confirmDelete.revision === project.revision
     && confirmDelete.walkdownId === project.walkdownId && confirmDelete.runVersion === run.runVersion;
-  useEffect(() => { onDirtyChange?.(Boolean(draft)); }, [draft, onDirtyChange]);
+  useEffect(() => { onDirtyChange?.(Boolean(draft) || setupDirty); }, [draft, setupDirty, onDirtyChange]);
   useEffect(() => () => { ++parseRef.current; onDirtyChange?.(false); }, [onDirtyChange]);
   useEffect(() => { setConfirmDelete(null); }, [readOnly, project.revision, project.walkdownId, selectedRun?.id, selectedRun?.runVersion]);
   useEffect(() => {
-    if (!draft) return;
+    if (!draft && !setupDirty) return;
     const preventDiscard = event => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", preventDiscard);
     return () => window.removeEventListener("beforeunload", preventDiscard);
-  }, [Boolean(draft)]);
+  }, [Boolean(draft), setupDirty]);
 
   function begin(run = null) {
-    if (readOnly || blocked || draft || (run && !canEdit(run))) return;
+    if (readOnly || blocked || setupDirty || draft || (run && !canEdit(run))) return;
     setError(""); setFiles([]); setAssignments({}); setConfirmDelete(null);
     setDraft({
       revision: project.revision, walkdownId: project.walkdownId,
@@ -243,7 +246,7 @@ export default function TestReportsPanel({
     finally { busyRef.current = false; setBusy(""); }
   }
   async function remove(run) {
-    if (!canEdit(run) || blocked || busyRef.current || !confirmsRun(run)) return;
+    if (!canEdit(run) || blocked || setupDirty || busyRef.current || !confirmsRun(run)) return;
     busyRef.current = true; setBusy("delete"); setError("");
     try { await onDelete(run, project.revision); setConfirmDelete(null); }
     catch (e) { setError(e.message); }
@@ -255,7 +258,7 @@ export default function TestReportsPanel({
     <div className="card test-intro">
       <div><span className="eyebrow">SOFTWARE TEST EVIDENCE</span><h2>I/O test reports</h2>
         <p>Import all PRONETA CSV results, event logs, and .mpr parameter files from one run together.</p></div>
-      {!readOnly && !draft && <button className="button primary" type="button" onClick={() => begin()} disabled={blocked}><Icon name="upload" />Import test run</button>}
+      {!readOnly && !draft && <button className="button primary" type="button" onClick={() => begin()} disabled={blocked || setupDirty}><Icon name="upload" />Import test run</button>}
       <button type="button" className="button secondary" onClick={onReview}>Revision {project.revision} · {project.status === "closed" ? "Approved & closed" : "Review & approve"}</button>
     </div>
     {exportProgress && <p className="test-export-progress" role="status"><span className="spinner" />{exportProgress}</p>}
@@ -285,22 +288,26 @@ export default function TestReportsPanel({
         <button type="button" className="button primary" disabled={!draft.data || blocked || readOnly || stale} onClick={save}>
           {busy === "parse" ? "Reading files…" : busy === "save" ? "Saving…" : "Save test run"}
         </button>
-        <small>Save the reviewed import before approving the skid revision.</small>
+        <small>Save the reviewed import, then add setup photos before approving the skid revision.</small>
       </div>
     </section>}
     {!draft && runs.length > 0 && <div className="test-run-toolbar">
-      <label>Saved test run<select value={selectedRun?.id || ""} onChange={event => { setSelectedId(event.target.value); setConfirmDelete(null); }}>{runs.map(run => <option key={run.id} value={run.id}>{run.name}</option>)}</select></label>
+      <label>Saved test run<select disabled={blocked || setupDirty} value={selectedRun?.id || ""} onChange={event => { setSelectedId(event.target.value); setConfirmDelete(null); }}>{runs.map(run => <option key={run.id} value={run.id}>{run.name}</option>)}</select></label>
       <div className="test-run-actions">
         {selectedRun && canEdit(selectedRun) && <>
-          <button type="button" className="small-button" disabled={blocked} onClick={() => begin(selectedRun)}>Edit run</button>
+          <button type="button" className="small-button" disabled={blocked || setupDirty} onClick={() => begin(selectedRun)}>Edit run</button>
           {confirmsRun(selectedRun) ? <>
             <span>Remove from this draft?</span><button className="small-button" type="button" disabled={blocked} onClick={() => setConfirmDelete(null)}>Cancel</button>
-            <button className="small-button test-remove" type="button" disabled={blocked} onClick={() => remove(selectedRun)}>Confirm removal</button>
-          </> : <button type="button" className="small-button test-remove" disabled={blocked} onClick={() => setConfirmDelete({ id: selectedRun.id, runVersion: selectedRun.runVersion, revision: project.revision, walkdownId: project.walkdownId })}>Remove run</button>}
+            <button className="small-button test-remove" type="button" disabled={blocked || setupDirty} onClick={() => remove(selectedRun)}>Confirm removal</button>
+          </> : <button type="button" className="small-button test-remove" disabled={blocked || setupDirty} onClick={() => setConfirmDelete({ id: selectedRun.id, runVersion: selectedRun.runVersion, revision: project.revision, walkdownId: project.walkdownId })}>Remove run</button>}
         </>}
         <button type="button" className="button primary" disabled={blocked || project.status !== "closed"} onClick={() => onExport(selectedRun?.id)}><Icon name="download" />{exportProgress ? "Exporting…" : "Export test PDF"}</button>
       </div>
     </div>}
+    {!draft && selectedRun && <TestSetupPhotos key={`${selectedRun.id}:${project.revision}`}
+      run={selectedRun} revision={project.revision} readOnly={!canEdit(selectedRun)} pending={blocked}
+      getPhotoUrl={getPhotoUrl} onAddPhoto={onAddSetupPhoto} onUpdatePhoto={onUpdateSetupPhoto}
+      onRemovePhoto={onRemoveSetupPhoto} onDirtyChange={setSetupDirty} />}
     {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${project.revision}`}</span></header><TestRunDetail key={preview.id || draft?.id} run={preview} /></section>}
     {!preview && !draft && <div className="card test-empty"><Icon name="report" size={36} /><h3>No test runs in this revision</h3><p>{readOnly ? "Start a new revision to import a test run." : "Import the files for your test, review the devices and parameters, then save the run."}</p></div>}
   </section>;
