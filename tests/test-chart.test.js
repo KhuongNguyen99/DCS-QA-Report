@@ -62,17 +62,66 @@ test("default axes exclude invalid readings, handle empty series and preserve sa
   assert.equal(digital.domain.max, 1);
 });
 
-test("different channel coverage retains identical shared time ticks and graph bounds", () => {
+test("different channel coverage automatically fits each graph inside the shared run clock", () => {
   const early = buildTestChart({ kind: "analog", unit: "mA", points: [point(0, 4), point(40_000, 20)] }, clock);
   const late = buildTestChart({ kind: "analog", unit: "°C", points: [point(310_000, 19.7), point(392_000, 20)] }, clock);
-  assert.deepEqual(early.xTicks, late.xTicks);
+  assert.notDeepEqual(early.xTicks, late.xTicks);
   assert.equal(early.domain.startMs, clock.startMs);
+  assert.ok(early.domain.endMs < startMs + 45_000, "an early series does not inherit another channel's long tail");
+  assert.ok(late.domain.startMs > startMs + 300_000, "a later series zooms past the unused run start");
   assert.equal(late.domain.endMs, clock.endMs);
   assert.equal(early.points[0].x, early.plot.left);
   assert.equal(late.points[1].x, late.plot.left + late.plot.width);
   assert.equal(early.points.length, 2, "no synthetic endpoints or previous values");
-  assert.ok(early.points[1].x < late.points[0].x, "original station timestamps are preserved");
-  assert.equal(early.extension.to.x, late.points[1].x, "the early series holds its last value to the common end");
+  assert.ok(early.points[1].x > early.plot.left + early.plot.width * 0.9);
+  assert.ok(late.points[0].x < late.plot.left + late.plot.width * 0.1);
+  assert.equal(early.extension.to.x, late.points[1].x, "held values reach each graph's right edge");
+  assert.equal(early.points[1].timeMs, startMs + 40_000);
+  assert.equal(late.points[0].timeMs, startMs + 310_000);
+});
+
+test("a single timestamp gets a readable time window bounded by the original run", () => {
+  const chart = buildTestChart({ kind: "analog", points: [point(150_000, 5)] }, clock);
+  assert.equal(chart.domain.startMs, startMs + 149_000);
+  assert.equal(chart.domain.endMs, startMs + 151_000);
+  assert.equal(chart.points[0].x, chart.plot.left + chart.plot.width / 2);
+  assert.equal(new Set(chart.xTicks.map(tick => tick.label)).size, chart.xTicks.length);
+  const first = buildTestChart({ kind: "analog", points: [point(0, 5)] }, clock);
+  const last = buildTestChart({ kind: "analog", points: [point(392_000, 5)] }, clock);
+  assert.equal(first.domain.startMs, clock.startMs);
+  assert.equal(last.domain.endMs, clock.endMs);
+  assert.equal(last.extension, null, "no held reading extends past the test run");
+});
+
+test("horizontal autoscaling keeps dated invalid events visible without changing evidence", () => {
+  const series = { kind: "analog", points: [
+    point(10_000, 4), point(20_000, null, { valid: false, rawValue: "overflow" }), { value: 1 },
+  ] };
+  const original = structuredClone(series);
+  const chart = buildTestChart(series, clock);
+  assert.ok(chart.domain.startMs < startMs + 10_000);
+  assert.ok(chart.domain.endMs > startMs + 20_000);
+  assert.ok(chart.invalidPoints[0].x > chart.points[0].x);
+  assert.ok(chart.invalidPoints[0].x <= chart.plot.left + chart.plot.width);
+  assert.equal(chart.invalidPoints[1].x, null);
+  assert.equal(chart.extension, null);
+  assert.deepEqual(series, original);
+  const empty = buildTestChart({ points: [] }, clock);
+  assert.equal(empty.domain.startMs, clock.startMs);
+  assert.equal(empty.domain.endMs, clock.endMs);
+  assert.throws(() => buildTestChart({ points: [point(-1, null, { valid: false })] }, clock), /outside/);
+});
+
+test("short time axes use distinct labels and preserve dates across midnight", () => {
+  const short = buildTestChart({ points: [point(100, 4), point(200, 5)] }, { startMs, endMs: startMs + 500 });
+  assert.equal(short.xTicks.length, 2);
+  assert.deepEqual(short.xTicks.map(tick => tick.label), ["19:17:00.000", "19:17:00.500"]);
+  const midnight = Date.UTC(2026, 10, 20);
+  const acrossDays = buildTestChart({ points: [
+    { timeMs: midnight - 1000, value: 4 }, { timeMs: midnight + 1000, value: 5 },
+  ] }, { startMs: midnight - 60_000, endMs: midnight + 60_000 });
+  assert.equal(acrossDays.xTicks[0].dateLabel, "2026-11-19");
+  assert.equal(acrossDays.xTicks.at(-1).dateLabel, "2026-11-20");
 });
 
 test("invalid values do not distort the range and duplicate timestamp observations remain visible data", () => {
@@ -103,7 +152,7 @@ test("digital and constant signals have usable axes without adding measured samp
   assert.equal(instant.extension, null);
 });
 
-test("analog connections preserve same-second changes and hold the final value to the shared right edge", () => {
+test("analog connections preserve same-second changes and hold the final value to the fitted right edge", () => {
   const series = { kind: "analog", points: [point(1000, 4), point(5000, 10), point(5000, 7)] };
   const original = structuredClone(series);
   const chart = buildTestChart(series, clock);

@@ -21,12 +21,13 @@ export function TestSeriesChart({ series, clock }) {
   try { chart = buildTestChart(series, clock); }
   catch (e) { return <p className="field-error">{e.message}</p>; }
   const { plot } = chart;
+  const graphClock = { ...clock, startMs: chart.domain.startMs, endMs: chart.domain.endMs };
   return (
     <figure className="test-chart">
       <figcaption><strong>{series.name}</strong><span>{chart.unit}</span></figcaption>
       <div className="test-chart-scroll">
         <svg viewBox={`0 0 ${chart.width} ${chart.height}`} role="img"
-          aria-label={`${series.name}: ${chart.observedCount} recorded values, ${describeTime(clock)}`}
+          aria-label={`${series.name}: ${chart.observedCount} recorded values, ${describeTime(graphClock)}`}
           data-time-start={chart.domain.startMs} data-time-end={chart.domain.endMs}>
           {chart.yTicks.map((tick, index) => <g key={`y-${index}`}>
             <line x1={plot.left} y1={tick.y} x2={plot.left + plot.width} y2={tick.y} className="test-gridline" />
@@ -41,7 +42,7 @@ export function TestSeriesChart({ series, clock }) {
             x1={segment.from.x} y1={segment.from.y} x2={segment.to.x} y2={segment.to.y} className="test-trace" />)}
           {chart.extension && <line x1={chart.extension.from.x} y1={chart.extension.from.y}
             x2={chart.extension.to.x} y2={chart.extension.to.y} className="test-held-value">
-            <title>Last recorded value held to the end of the shared run</title>
+            <title>Last recorded value held to the end of the graph</title>
           </line>}
           {chart.points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={3} className="test-observation">
             <title>{formatSourceTime(point.timeMs, true)}: {formatTestValue(point.value)} {series.unit} · source row {point.sourceRow}</title>
@@ -52,7 +53,7 @@ export function TestSeriesChart({ series, clock }) {
             </path>)}
         </svg>
       </div>
-      <p>{chart.observedCount} recorded change values{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : "Lines connect recorded readings"}; the dashed tail holds the last value to the run end. All graphs use the same run time span{clock.basis === "absolute" ? " in UTC" : ""}.</p>
+      <p>{chart.observedCount} recorded change values{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. The time axis automatically fits this series{clock.basis === "absolute" ? " in UTC" : ""}.</p>
       <details className="test-events"><summary>View recorded events ({series.points.length})</summary>
         <div className="test-table-scroll"><table>
           <thead><tr><th>Source time</th><th>Previous</th><th>Recorded value</th><th>Source row</th></tr></thead>
@@ -96,7 +97,7 @@ export function TestRunDetail({ run }) {
   return <div className="test-run-detail">
     <div className="test-run-facts">
       <div><span>Software</span><strong>{run.software?.name} {run.software?.version || "— version required"}</strong></div>
-      <div><span>Common graph span</span><strong>{describeTime(run.clock)}</strong><small>{run.clock?.basis === "absolute" ? "Graphs use UTC. Original event timestamps retain their source offsets." : run.clock?.timeZone || "Source clock, timezone not recorded"}</small></div>
+      <div><span>Run time span</span><strong>{describeTime(run.clock)}</strong><small>{run.clock?.basis === "absolute" ? "Graphs use UTC. Original event timestamps retain their source offsets." : run.clock?.timeZone || "Source clock, timezone not recorded"}</small></div>
       <div><span>Device results</span><strong>{counts.Passed || 0} passed · {counts.Failed || 0} failed · {counts["Not tested"] || 0} not tested</strong></div>
     </div>
     <p className="test-meaning">Passed/Failed comes from the recorded PRONETA wiring result. Graphs show logged signal changes in their original units.</p>

@@ -259,8 +259,8 @@ function reportWriter(doc) {
       width: WIDTH, height: 201, padding: { left: 57, right: 25, top: 20, bottom: 45 },
     });
     const title = `${series.name || "Recorded values"} - ${geometry.unit}`;
-    const observationNote = `${geometry.observedCount} observed change(s)${geometry.invalidCount ? `; ${geometry.invalidCount} invalid reading(s), marked below the plot when dated` : ""}. ${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the run end.`;
-    const rangeNote = `Shared run span: ${rangeLabel(clock)}. ${clockLabel(clock)}.`;
+    const observationNote = `${geometry.observedCount} observed change(s)${geometry.invalidCount ? `; ${geometry.invalidCount} invalid reading(s), marked below the plot when dated` : ""}. ${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the graph end.`;
+    const rangeNote = `Graph span: ${rangeLabel(geometry.domain)}. Shared run span: ${rangeLabel(clock)}. ${clockLabel(clock)}.`;
     const heightFor = (value, size, lineHeight, gap) => {
       textStyle(doc, size);
       return doc.splitTextToSize(printableText(value), WIDTH).length * lineHeight + gap;
@@ -411,7 +411,7 @@ function runSummary(writer, run) {
   writer.page(run.name || "Test run");
   writer.paragraph(`Software: ${run.software.name} | Version: ${run.software.version}`, { size: 11, bold: true });
   writer.paragraph(`Run time span: ${rangeLabel(run.clock)}`);
-  writer.paragraph(`Clock: ${clockLabel(run.clock)}. All graphs in this run use these same start and end times.`, { color: COLOR.muted });
+  writer.paragraph(`Clock: ${clockLabel(run.clock)}. Each graph automatically fits its recorded time range within this run.`, { color: COLOR.muted });
   writer.paragraph("Recorded wiring results are the tester's entries in PRONETA. Logged values alone do not establish a functional pass.", { color: COLOR.muted });
   writer.table([
     { label: "Device name", width: 300 },

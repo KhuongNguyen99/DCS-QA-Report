@@ -1,10 +1,10 @@
 /** PRONETA timestamps have no UTC offset. UTC is only a wall-clock coordinate. */
-export function formatSourceTime(timeMs, includeDate = false) {
+export function formatSourceTime(timeMs, includeDate = false, includeMilliseconds = false) {
   if (!Number.isFinite(timeMs)) return "Unknown time";
   const value = new Date(timeMs);
   if (!Number.isFinite(value.getTime())) return "Unknown time";
   const iso = value.toISOString();
-  const time = iso.slice(11, 19);
+  const time = iso.slice(11, includeMilliseconds ? 23 : 19);
   return includeDate ? `${iso.slice(0, 10)} ${time}` : time;
 }
 
@@ -17,9 +17,9 @@ export function formatTestValue(value) {
 }
 
 /**
- * Geometry shared by the SVG preview and vector PDF chart. Every call requires
- * the run-wide clock, never a channel's first/last point. Dots stay tied to the
- * observed after-values. Connections and the held final value are display-only
+ * Geometry shared by the SVG preview and vector PDF chart. The run-wide clock
+ * validates timestamps; each graph fits its own dated observations. Dots stay
+ * tied to observed after-values. Connections and the held value are display-only
  * geometry, so no synthetic readings enter the saved evidence or event count.
  */
 export function buildTestChart(series, clock, {
@@ -27,11 +27,25 @@ export function buildTestChart(series, clock, {
   padding = { left: 62, right: 22, top: 20, bottom: 48 },
   tickCount = 5,
 } = {}) {
-  const startMs = clock?.startMs;
-  const endMs = clock?.endMs;
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs)
+  const runStartMs = clock?.startMs;
+  const runEndMs = clock?.endMs;
+  if (!Number.isFinite(runStartMs) || !Number.isFinite(runEndMs) || runEndMs < runStartMs)
     throw new Error("A valid shared test-run time span is required for the graph.");
   if (!Array.isArray(series?.points)) throw new Error("The graph series has no observation list.");
+  let firstMs = Infinity, lastMs = -Infinity;
+  for (const point of series.points) {
+    if (!Number.isFinite(point.timeMs)) continue;
+    if (point.timeMs < runStartMs || point.timeMs > runEndMs)
+      throw new Error("An observation falls outside the shared test-run time span.");
+    firstMs = Math.min(firstMs, point.timeMs);
+    lastMs = Math.max(lastMs, point.timeMs);
+  }
+  let startMs = runStartMs, endMs = runEndMs;
+  if (firstMs !== Infinity) {
+    const margin = Math.max((lastMs - firstMs) * 0.04, 1000);
+    startMs = Math.max(runStartMs, firstMs - margin);
+    endMs = Math.min(runEndMs, lastMs + margin);
+  }
   const { left, right, top, bottom } = padding;
   if (![width, height, left, right, top, bottom].every(Number.isFinite)
     || width <= left + right || height <= top + bottom
@@ -50,8 +64,6 @@ export function buildTestChart(series, clock, {
       sequence.push(null);
       continue;
     }
-    if (point.timeMs < startMs || point.timeMs > endMs)
-      throw new Error("An observation falls outside the shared test-run time span.");
     if (point.timeMs < latestTime)
       throw new Error("Observations must be ordered by time before connecting the graph.");
     latestTime = point.timeMs;
@@ -110,7 +122,8 @@ export function buildTestChart(series, clock, {
   const extension = previous && previous.timeMs < endMs
     ? { from: coordinate(previous), to: { x: plot.left + plot.width, y: yFor(previous.value) } }
     : null;
-  const count = Math.max(2, Math.min(9, Math.floor(tickCount) || 5));
+  const count = Math.max(2, Math.min(9, Math.floor(tickCount) || 5, Math.floor((endMs - startMs) / 1000) + 1));
+  const milliseconds = endMs > startMs && (endMs - startMs) / (count - 1) < 1000;
   const spanningDays = formatSourceTime(startMs, true).slice(0, 10) !== formatSourceTime(endMs, true).slice(0, 10);
   const ticks = startMs === endMs ? [startMs]
     : Array.from({ length: count }, (_, index) => startMs + (endMs - startMs) * index / (count - 1));
@@ -121,9 +134,9 @@ export function buildTestChart(series, clock, {
     domain: { startMs, endMs, min, max },
     unit: series.unit || (series.kind === "digital" ? "State" : "Recorded value"),
     xTicks: ticks.map((timeMs) => ({
-      timeMs, x: xFor(timeMs), label: formatSourceTime(timeMs),
+      timeMs, x: xFor(timeMs), label: formatSourceTime(timeMs, false, milliseconds),
       dateLabel: spanningDays ? formatSourceTime(timeMs, true).slice(0, 10) : "",
-      fullLabel: formatSourceTime(timeMs, true),
+      fullLabel: formatSourceTime(timeMs, true, milliseconds),
     })),
     yTicks: yValues.map((value) => ({ value, y: yFor(value), label: formatTestValue(value) })),
     points, connections, extension,

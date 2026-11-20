@@ -179,7 +179,7 @@ test("test PDF rejects drafts, incomplete approval data, wrong skid, and missing
   } finally { globalThis.fetch = original; }
 });
 
-test("approved test PDF preserves results, active settings, raw invalid tokens, provenance, and common graph clocks", async () => {
+test("approved test PDF preserves evidence and run context while fitting each graph's time axis", async () => {
   await withFonts(async (requested) => {
     const state = closedState();
     const legacyNote = "synthetic-log.csv, line 10: duplicate I/O event retained; no observations were removed.";
@@ -204,10 +204,14 @@ test("approved test PDF preserves results, active settings, raw invalid tokens, 
     const graphPages = result.pages.filter((page) => page.includes("connect recorded changes"));
     assert.equal(graphPages.length, 2);
     for (const page of graphPages) {
-      for (const tick of ["19:17:00", "19:18:38", "19:20:16", "19:21:54", "19:23:32"]) assert.ok(page.includes(tick), tick);
-      assert.match(page, /dashed tail holds the last value to the run end/);
+      for (const time of ["19:17:00", "19:23:32"]) assert.ok(page.includes(time), "the full run context stays visible");
+      assert.match(page, /Graph span:/);
+      assert.match(page, /Shared run span:/);
+      assert.match(page, /dashed tail holds the last value to the graph end/);
       assert.match(page, /Source clock \(unspecified\)/);
     }
+    assert.ok(graphPages.some(page => page.includes("19:17:04")), "the short temperature series has a fitted axis");
+    assert.ok(graphPages.some(page => page.includes("19:21:56")), "the late digital series starts near its observations");
     result.pages.forEach((page, index) => {
       assert.ok(page.includes(`Page ${index + 1} of ${result.pages.length}`));
       assert.ok(page.includes("Revision 2 | Skid: Skid Example"));
@@ -459,14 +463,13 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
     };
     const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.01, `${actual} differs from ${expected}`);
     const same = (a, b) => { near(a.x, b.x); near(a.y, b.y); };
-    // Landscape report plot spans these fixed page positions; all cases keep
-    // the same run clock while their observations cover different intervals.
+    // Fixed page positions contain a separate fitted time range for each graph.
     const left = 100.2, right = 723.8, width = right - left;
     const analog = graphLines("Analog ramp");
     assert.equal(analog.length, 2);
     assert.deepEqual(analog[0].dash, []);
     assert.deepEqual(analog[1].dash, [4, 3]);
-    near(analog[0].from.x, left); near(analog[0].to.x, left + width / 2);
+    near(analog[0].from.x, left); near(analog[0].to.x, left + width / 1.04);
     assert.notEqual(analog[0].from.y, analog[0].to.y, "analog points are connected directly");
     same(analog[1].from, analog[0].to);
     near(analog[1].from.y, analog[1].to.y); near(analog[1].to.x, right);
@@ -474,7 +477,7 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
     const digital = graphLines("Digital steps");
     assert.equal(digital.length, 3);
     assert.deepEqual(digital.map(line => line.dash), [[], [], [4, 3]]);
-    near(digital[0].from.x, left + width / 4); near(digital[0].to.x, left + width / 2);
+    near(digital[0].from.x, left + width / 27); near(digital[0].to.x, left + width * 26 / 27);
     near(digital[0].from.y, digital[0].to.y);
     same(digital[1].from, digital[0].to); near(digital[1].from.x, digital[1].to.x);
     assert.notEqual(digital[1].from.y, digital[1].to.y, "digital state changes vertically");
@@ -482,8 +485,8 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
 
     const gap = graphLines("Invalid gap");
     assert.equal(gap.length, 2, "there is no connection across the invalid event");
-    near(gap[0].to.x, left + width / 4);
-    near(gap[1].from.x, left + width * 3 / 4);
+    near(gap[0].to.x, left + width / (3 * 1.04));
+    near(gap[1].from.x, left + width / 1.04);
     assert.deepEqual(gap[1].dash, [4, 3]); near(gap[1].to.x, right);
     const trailing = graphLines("Invalid final reading");
     assert.equal(trailing.length, 1, "an invalid final event prevents holding an earlier value");
