@@ -98,11 +98,17 @@ where not exists (select 1 from public.qa_revision_photos p where p.walkdown_id 
 
 -- Imported functional-test evidence shares the same immutable report snapshot.
 -- Old snapshots may have no testRuns property; this means no imported runs.
+-- Inline the private state helper's aggregate so table-read roles can verify it.
 select w.id as closed_report_with_changed_test_runs
 from public.qa_walkdowns w join public.qa_report_revisions r
   on r.walkdown_id = w.id and r.revision = w.revision
 where w.status = 'closed' and coalesce(r.snapshot->'testRuns', '[]'::jsonb)
-  is distinct from qa_private.test_runs_state(w.id);
+  is distinct from (select coalesce(jsonb_agg(t.data || jsonb_build_object(
+    'id', t.id, 'walkdownId', t.walkdown_id, 'runVersion', t.run_version,
+    'createdAt', t.created_at, 'createdBy', t.created_by,
+    'updatedAt', t.updated_at, 'updatedBy', t.updated_by
+  ) order by t.created_at, t.id), '[]'::jsonb)
+  from public.qa_test_runs t where t.walkdown_id = w.id and t.deleted_at is null);
 select r.walkdown_id, r.revision as snapshot_with_invalid_test_run_scope
 from public.qa_report_revisions r cross join lateral jsonb_array_elements(coalesce(r.snapshot->'testRuns', '[]'::jsonb)) t
 where (t->>'walkdownId')::uuid is distinct from r.walkdown_id

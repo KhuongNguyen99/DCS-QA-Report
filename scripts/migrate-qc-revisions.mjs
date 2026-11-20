@@ -58,10 +58,17 @@ const result = await query(`
       and not has_function_privilege('anon', to_regprocedure(signature), 'EXECUTE')) from unnest(array[
       'public.qa_save_test_run(uuid,uuid,jsonb,bigint,bigint)',
       'public.qa_delete_test_run(uuid,uuid,bigint,bigint)']) signature) as test_run_access_verified,
+    -- The read-only API role has table access but cannot execute private helpers.
+    -- Keep this aggregate aligned with test_run_info/test_runs_state without grants.
     not exists (select 1 from public.qa_walkdowns w join public.qa_report_revisions r
       on r.walkdown_id = w.id and r.revision = w.revision
       where w.status = 'closed' and coalesce(r.snapshot->'testRuns', '[]'::jsonb)
-        is distinct from qa_private.test_runs_state(w.id))
+        is distinct from (select coalesce(jsonb_agg(t.data || jsonb_build_object(
+          'id', t.id, 'walkdownId', t.walkdown_id, 'runVersion', t.run_version,
+          'createdAt', t.created_at, 'createdBy', t.created_by,
+          'updatedAt', t.updated_at, 'updatedBy', t.updated_by
+        ) order by t.created_at, t.id), '[]'::jsonb)
+        from public.qa_test_runs t where t.walkdown_id = w.id and t.deleted_at is null))
       as closed_test_runs_preserved;
 `, true);
 const row = Array.isArray(result) ? result[0] : result.data?.[0] ?? result.result?.[0] ?? result;

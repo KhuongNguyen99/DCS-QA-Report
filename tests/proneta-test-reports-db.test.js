@@ -174,3 +174,38 @@ test("functional test writes require source/software validity, ordered shared ti
   await assert.rejects(h.rpc("qa_save_test_run", report.id, crypto.randomUUID(), untimed, 1, null), /approved project inspector/);
   assert.equal((await h.db.query("select id from public.qa_test_runs")).rows.length, 0);
 });
+
+test("deployment verification works for a table-read role without private helper execution", async (t) => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Read-only deployment verification");
+  const data = runData();
+  await h.rpc("qa_save_test_run", report.id, crypto.randomUUID(), data, 1, null);
+  const removedId = crypto.randomUUID();
+  await h.rpc("qa_save_test_run", report.id, removedId, data, 1, null);
+  await h.rpc("qa_delete_test_run", report.id, removedId, 1, 1);
+  await h.rpc("qa_save_test_run", report.id, crypto.randomUUID(), { ...data, name: "Second saved run" }, 1, null);
+  const current = await h.state(report.id);
+  assert.equal(current.testRuns.length, 2);
+  await h.rpc("qa_approve_revision", report.id, 1, current.project.contentVersion);
+  await h.db.exec(`
+    reset role;
+    create role qc_deployment_reader bypassrls;
+    grant pg_read_all_data to qc_deployment_reader;
+    set role qc_deployment_reader;
+  `);
+  assert.equal((await h.db.query("select has_function_privilege(current_user, 'qa_private.test_runs_state(uuid)', 'EXECUTE') as allowed")).rows[0].allowed, false);
+  await assert.rejects(h.db.query("select qa_private.test_runs_state($1)", [report.id]), /permission denied/);
+  await h.db.exec("begin read only");
+  try {
+    const checks = (await h.db.query(deploymentChecks)).rows[0];
+    assert.equal(Object.keys(checks).length, 11);
+    assert.equal(Object.values(checks).every(value => value === true), true);
+    const manualCheck = verification.match(/select w\.id as closed_report_with_changed_test_runs[\s\S]*?;/)[0];
+    assert.deepEqual((await h.db.query(manualCheck)).rows, []);
+    const changedSnapshot = deploymentChecks.replace("r.snapshot->'testRuns'", "(r.snapshot #- '{testRuns,0,updatedBy}')->'testRuns'");
+    assert.equal((await h.db.query(changedSnapshot)).rows[0].closed_test_runs_preserved, false,
+      "verification compares complete frozen audit metadata, not just run counts");
+  } finally {
+    await h.db.exec("rollback");
+  }
+});
