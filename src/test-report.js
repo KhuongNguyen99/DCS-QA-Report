@@ -115,6 +115,10 @@ function resultLabel(value) {
   return RESULT_LABELS.has(value) ? value : "Not tested";
 }
 
+function resultColor(value) {
+  return value === "Passed" ? COLOR.green : value === "Failed" ? COLOR.red : COLOR.ink;
+}
+
 function stationName(run, id) {
   return run.stations?.find((station) => station.id === id)?.name || id || "Unknown station";
 }
@@ -256,7 +260,7 @@ function reportWriter(doc) {
         const count = Math.min(totalLines - offset, available);
         let x = PAGE.margin;
         cells.forEach((lines, index) => {
-          textStyle(doc, size, false, row[index] === "Passed" ? COLOR.green : row[index] === "Failed" ? COLOR.red : COLOR.ink);
+          textStyle(doc, size, false, resultColor(row[index]));
           lines.slice(offset, offset + count).forEach((line, lineIndex) =>
             doc.text(line, x + padding, y + padding + size + lineIndex * lineHeight));
           x += widths[index];
@@ -426,18 +430,19 @@ function channelDetails(writer, channel, run, { heading = true, charts, deviceNa
   const details = `${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}${channel.role ? ` | ${channel.role}` : ""}`;
   const name = channel.symbolicName || channelLabel(channel);
   const result = resultLabel(channel.status);
-  const wiring = `Recorded wiring result: ${result}${channel.rawStatus ? ` (source: ${channel.rawStatus})` : ""}`;
+  const { rawStatus } = channel;
+  const source = rawStatus && !/^\s*ok\s*$/i.test(rawStatus) ? ` (source: ${rawStatus})` : "";
+  const wiring = `Recorded wiring result: ${result}${source}`;
+  const color = resultColor(result);
   const populated = (channel.series || []).filter(series => series.points?.length);
   if (charts) {
     const label = heading && name !== deviceName ? name : "";
     const location = !populated.length ? details : heading && !label ? channelLabel(channel) : "";
-    writer.paragraph([label, location, wiring].filter(Boolean).join(" | "), { size: 8.5, gap: 4, lineHeight: 11 });
+    writer.paragraph([label, location, wiring].filter(Boolean).join(" | "), { size: 8.5, gap: 4, lineHeight: 11, color });
   } else {
     if (heading) writer.heading(name);
     if (!populated.length) writer.paragraph(details, { color: COLOR.muted });
-    writer.paragraph(wiring, {
-      bold: true, color: result === "Failed" ? COLOR.red : result === "Passed" ? COLOR.green : COLOR.ink,
-    });
+    writer.paragraph(wiring, { bold: true, color });
   }
   if (channel.comment) writer.paragraph(`Tester comment: ${channel.comment}`);
   parameterTable(writer, channel.parameters);
@@ -462,19 +467,6 @@ function seriesAudit(writer, series, run) {
     ], invalid.map((point) => [
       point.time || formatSourceTime(point.timeMs, true),
       `${point.previousRawValue ?? "Not recorded"} -> ${point.rawValue ?? "Not recorded"}`,
-      sourceLabel(run, point),
-    ]), { compact: true });
-  }
-  const removed = series.points.filter((point) => point.excluded === true);
-  if (removed.length) {
-    writer.heading(`Removed events - ${series.name || "Recorded values"}`, 10);
-    writer.table([
-      { label: "Original source time", width: 142 },
-      { label: "Before / after (original tokens)", width: 220 },
-      { label: "Source", width: WIDTH - 362 },
-    ], removed.map((point) => [
-      point.time || formatSourceTime(point.timeMs, true),
-      `${point.previousRawValue ?? (Number.isFinite(point.previousValue) ? String(point.previousValue) : "Not recorded")} -> ${point.rawValue ?? (Number.isFinite(point.value) ? String(point.value) : "Not recorded")}`,
       sourceLabel(run, point),
     ]), { compact: true });
   }
@@ -659,7 +651,10 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
     await runSetup(writer, doc, run, backend, onProgress);
     for (const device of run.devices) {
       writer.page(device.name);
-      if (device.channels.length > 1) writer.paragraph(`Device wiring result: ${resultLabel(device.status)}`, { bold: true });
+      if (device.channels.length > 1) {
+        const result = resultLabel(device.status);
+        writer.paragraph(`Device wiring result: ${result}`, { bold: true, color: resultColor(result) });
+      }
       const charts = [];
       for (const channel of device.channels) channelDetails(writer, channel, run, {
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,

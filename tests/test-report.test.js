@@ -118,7 +118,8 @@ async function pdfContent(blob) {
     const text = hex ? [...hex.matchAll(/.{4}/g)].map(([glyph]) => fonts.get(font)?.get(glyph.toUpperCase()) || "").join("")
       : block.match(/\((.*?)\)\s*Tj/)?.[1] || "";
     const xy = block.match(/([\d.+-]+) ([\d.+-]+) Td/);
-    return { text, x: xy ? Number(xy[1]) : null, y: xy ? 612 - Number(xy[2]) : null };
+    const color = block.match(/^([\d.]+) ([\d.]+) ([\d.]+) rg\r?$/m)?.slice(1).map(Number);
+    return { text, color, x: xy ? Number(xy[1]) : null, y: xy ? 612 - Number(xy[2]) : null };
   }));
   const pages = blocks.map((page) => page.map((block) => block.text).join("\n"));
   return { raw, text: pages.join("\n"), pages, streams, blocks };
@@ -219,7 +220,7 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.equal(photoPlacements(result.streams[0]).length, 1, "the QC cover logo is on the first page");
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
       "Siemens PRONETA Basic", "Version entered by tester", "RTD-EXAMPLE", "VALVE-EXAMPLE", "Recorded wiring result: Failed (source: Error)",
-      "Recorded wiring result: Passed (source: OK)", "0 (encoded selection)", "Celsius", "7FFFH", "synthetic-log.csv, row 3",
+      "Recorded wiring result: Passed", "0 (encoded selection)", "Celsius", "7FFFH", "synthetic-log.csv, row 3",
       "Module diagnostic setting", "Unused-channel setting", "Not applicable", "Synthetic warning retained for review.", "Unrecognized synthetic event"])
       assert.ok(result.text.includes(text), `Missing report text: ${text}`);
     const reportText = result.text.replace(/\s+/g, " ");
@@ -230,6 +231,13 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.ok(result.text.replace(/\s/g, "").includes("ab".repeat(32)));
     assert.ok(result.streams.slice(1).every(stream => photoPlacements(stream).length === 0), "charts remain vector shapes");
     assert.match(result.raw, /D:20261120113000\+00'00'/, "PDF metadata uses approval time, not export time");
+    assert.doesNotMatch(result.text, /\(source: OK\)/i);
+    const cells = result.blocks.flat();
+    for (const [label, rgb] of [["Passed", [31, 105, 57]], ["Failed", [170, 49, 43]]]) {
+      const matching = cells.filter(({ text }) => text === label || text.startsWith("Recorded wiring result: " + label));
+      assert.ok(matching.length >= 2, "the result appears in the summary and on its device page");
+      assert.ok(matching.every(({ color }) => color?.every((value, index) => Math.abs(value - rgb[index] / 255) < 0.005)));
+    }
     const graphPages = result.pages.filter(page => /\n(?:Temperature|Output state)\n/.test(page));
     assert.equal(graphPages.length, 2);
     assert.match(graphPages[0], /\n\u00b0C\n/);
@@ -293,7 +301,9 @@ test("export captures the approved payload before asynchronous font loading", as
     const state = closedState();
     state.testRuns[0].comment = "Approved overall review comment";
     state.testRuns[0].devices[0].comment = "Approved device review comment";
-    state.testRuns[0].devices[0].channels[0].series[0].points[1].excluded = true;
+    const excluded = state.testRuns[0].devices[0].channels[0].series[0].points[1];
+    excluded.rawValue = "EXCLUDED-AT-EXPORT";
+    excluded.excluded = true;
     const pending = createTestReportPdf({ state });
     state.project.revision = 99;
     state.project.skidName = "Mutated skid";
@@ -301,15 +311,14 @@ test("export captures the approved payload before asynchronous font loading", as
     state.testRuns[0].software.version = "Mutated software";
     state.testRuns[0].comment = "Mutated overall comment";
     state.testRuns[0].devices[0].comment = "Mutated device comment";
-    state.testRuns[0].devices[0].channels[0].series[0].points[1].excluded = false;
+    excluded.excluded = false;
     release();
     const result = await pdfContent(await pending);
     assert.match(result.text, /Revision 2/);
     assert.match(result.text, /RTD-EXAMPLE/);
     assert.match(result.text, /Approved overall review comment/);
     assert.match(result.text, /Approved device review comment/);
-    assert.match(result.text, /Removed events - Temperature/);
-    assert.doesNotMatch(result.text, /Mutated|Revision 99/);
+    assert.doesNotMatch(result.text, /Removed events|EXCLUDED-AT-EXPORT|Mutated|Revision 99/);
   } finally { globalThis.fetch = original; }
 });
 
@@ -846,7 +855,7 @@ test("invalid selected PDF time ranges fail before fonts or private photos load"
   } finally { globalThis.fetch = original; }
 });
 
-test("approved PDF reconnects retained readings and moves removed values into source audit tables", async () => {
+test("approved PDF reconnects retained readings without printing removed events", async () => {
   await withFonts(async () => {
     const state = closedState();
     const run = state.testRuns[0];
@@ -887,20 +896,13 @@ test("approved PDF reconnects retained readings and moves removed values into so
     assert.notEqual(plots[0][0].from.y, plots[0][0].to.y, "analog trace reconnects across the removed spike");
     assert.ok(plots[1].every(line => line.from.y === line.to.y), "removed digital change creates no remaining state transition");
     assert.notEqual(plots[2][0].from.y, plots[2][0].to.y, "a removed invalid row no longer breaks the retained trace");
-    for (const name of ["Analog removal", "Digital removal", "Invalid removal"])
-      assert.match(result.text, new RegExp(`Removed events - ${name}`));
-    assert.match(result.text, /Previous original -> Original 25/);
-    assert.match(result.text, /Previous original -> Original 20/);
-    assert.match(result.text, /Previous original -> REMOVED-INVALID/);
-    assert.match(result.text, /Source time 294000/);
-    assert.match(result.text, /synthetic-log.csv, row 296/);
-    assert.doesNotMatch(result.text, /Invalid or unplottable values|invalid reading\(s\)/, "removed invalid rows are audited without active-invalid warnings");
+    assert.doesNotMatch(result.text, /Removed events|Source time 294000|REMOVED-INVALID|Original 25|Invalid or unplottable values/);
     assert.equal(result.text.match(/One review for all retained graphs/g)?.length, 1);
     assert.deepEqual(state, original);
   });
 });
 
-test("removed-event audit tables paginate fully outside a manual view and retain original tokens and provenance", async () => {
+test("PDF omits excluded events outside a manual view and retains active invalid readings", async () => {
   await withFonts(async () => {
     const state = closedState();
     const run = state.testRuns[0];
@@ -924,17 +926,9 @@ test("removed-event audit tables paginate fully outside a manual view and retain
     const result = await pdfContent(await createTestReportPdf({ state, timeRanges: {
       [run.id]: { [device.id]: { startMs: startMs + 100_000, endMs: startMs + 200_000 } },
     } }));
-    assert.match(result.text, /Removed events - Audited signal/);
-    for (let index = 1; index <= 75; index++) {
-      const number = String(index).padStart(2, "0");
-      assert.match(result.text, new RegExp(`Audit-source-time-${number}`));
-      assert.match(result.text, new RegExp(`Before-token-${number} -> After-token-${number}`));
-      assert.match(result.text, new RegExp(`synthetic-log.csv, row ${index + 8000}`));
-    }
-    assert.ok(result.pages.filter(page => /Audit-source-time-/.test(page)).length > 1);
+    assert.doesNotMatch(result.text, /Removed events|Audit-source-time-|Before-token-|After-token-|synthetic-log\.csv, row 80\d\d/);
     assert.match(result.text, /Invalid or unplottable values - Audited signal/);
     assert.equal(result.text.match(/ACTIVE-INVALID-TOKEN/g)?.length, 1);
-    assert.equal(result.text.match(/After-token-23/g)?.length, 1, "a removed invalid event appears only in its audit row");
     for (const page of result.blocks) for (const block of page) {
       if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
