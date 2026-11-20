@@ -617,7 +617,8 @@ test("App exports the current device view range on approved reports even when br
   const start = Date.UTC(2026, 10, 19, 12);
   const run = { ...testRun(), clock: { basis: 'source-local', timeZone: 'Source clock', startMs: start, endMs: start + 60_000 },
     devices: [{ id: 'valve', name: 'VALVE', status: 'Passed', channels: [{ id: 'output', symbolicName: 'Output', status: 'Passed', parameters: [],
-      series: [{ id: 'state', name: 'Output state', kind: 'digital', points: [{ timeMs: start + 20_000, value: 1, valid: true }] }] }] }] };
+      series: [{ id: 'state', name: 'Output state', kind: 'digital',
+        points: [5000, 20_000, 50_000].map((offset, index) => ({ timeMs: start + offset, value: index % 2, valid: true })) }] }] }] };
   h.server.state.testRuns = [run];
   await h.notify();
   await h.nav('Report');

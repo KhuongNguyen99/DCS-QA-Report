@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildTestChart, formatSourceTime, formatTestValue, isTestTimeRange } from "../src/test-chart.js";
+import { buildTestChart, deviceChartTimeRange, formatSourceTime, formatTestValue, isTestTimeRange } from "../src/test-chart.js";
 
 const startMs = Date.UTC(2026, 10, 19, 19, 17);
 const clock = { startMs, endMs: startMs + 392_000 };
@@ -103,6 +103,33 @@ test("a single timestamp gets a readable time window bounded by the original run
   assert.equal(first.domain.startMs, clock.startMs);
   assert.equal(last.domain.endMs, clock.endMs);
   assert.equal(last.extension, null, "no held reading extends past the test run");
+});
+
+test("device slider bounds cover all populated automatic graph spans with outward millisecond rounding", () => {
+  const series = [
+    { kind: 'analog', points: [point(20_000, 4), point(80_007, 5)] },
+    { kind: 'digital', points: [point(100_000, 1), point(160_003, 0)] },
+  ];
+  const device = { channels: [{ series: [...series, { points: [] }, { points: [point(392_000, 1, { excluded: true })] }] }] };
+  const before = structuredClone(device);
+  const charts = series.map(item => buildTestChart(item, clock));
+  assert.deepEqual(deviceChartTimeRange(device, clock), {
+    startMs: Math.floor(charts[0].domain.startMs), endMs: Math.ceil(charts[1].domain.endMs),
+  });
+  assert.deepEqual(device, before);
+});
+
+test("device time bounds update for removals and retain dated warnings while empty graphs fall back safely", () => {
+  const points = [point(20_000, 1), point(60_000, null, { valid: false }), point(100_000, 1, { excluded: true })];
+  const device = { channels: [{ series: [{ points }, { points: [{ value: null, valid: false }] }] }] };
+  assert.deepEqual(deviceChartTimeRange(device, clock), timeRange(18_400, 61_600));
+  points[1].excluded = true;
+  assert.deepEqual(deviceChartTimeRange(device, clock), timeRange(19_000, 21_000));
+  points[0].excluded = true;
+  assert.deepEqual(deviceChartTimeRange(device, clock), clock);
+  assert.deepEqual(deviceChartTimeRange({ channels: [] }, clock), clock);
+  assert.deepEqual(deviceChartTimeRange({ channels: [{ series: [{ points: [point(-1, 1)] }] }] }, clock), clock);
+  assert.deepEqual(deviceChartTimeRange({ channels: [] }, { startMs, endMs: startMs }), { startMs, endMs: startMs });
 });
 
 test("horizontal autoscaling keeps dated invalid events visible without changing evidence", () => {

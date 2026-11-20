@@ -23,24 +23,11 @@ export function isTestTimeRange(range, clock) {
     && range.startMs < range.endMs && range.startMs >= clock.startMs && range.endMs <= clock.endMs);
 }
 
-/**
- * Geometry shared by the SVG preview and vector PDF chart. The run-wide clock
- * validates timestamps; each graph fits its observations unless a time range is selected. Dots stay
- * tied to observed after-values. Connections and the held value are display-only
- * geometry, so no synthetic readings enter the saved evidence or event count.
- */
-export function buildTestChart(series, clock, {
-  width = 700, height = 220,
-  padding = { left: 62, right: 22, top: 20, bottom: 48 },
-  tickCount = 5, timeRange = null,
-} = {}) {
+function automaticTimeRange(series, clock) {
   const runStartMs = clock?.startMs;
   const runEndMs = clock?.endMs;
   if (!Number.isFinite(runStartMs) || !Number.isFinite(runEndMs) || runEndMs < runStartMs)
     throw new Error("A valid shared test-run time span is required for the graph.");
-  const manualTimeRange = timeRange !== null;
-  if (manualTimeRange && !isTestTimeRange(timeRange, clock))
-    throw new Error("Choose an increasing whole-millisecond time range within the test run.");
   if (!Array.isArray(series?.points)) throw new Error("The graph series has no observation list.");
   let firstMs = Infinity, lastMs = -Infinity;
   for (const point of series.points) {
@@ -53,14 +40,41 @@ export function buildTestChart(series, clock, {
     firstMs = Math.min(firstMs, point.timeMs);
     lastMs = Math.max(lastMs, point.timeMs);
   }
-  let startMs = runStartMs, endMs = runEndMs;
-  if (manualTimeRange) {
-    startMs = timeRange.startMs; endMs = timeRange.endMs;
-  } else if (firstMs !== Infinity) {
-    const margin = Math.max((lastMs - firstMs) * 0.04, 1000);
-    startMs = Math.max(runStartMs, firstMs - margin);
-    endMs = Math.min(runEndMs, lastMs + margin);
+  if (firstMs === Infinity) return null;
+  const margin = Math.max((lastMs - firstMs) * 0.04, 1000);
+  return { startMs: Math.max(runStartMs, firstMs - margin), endMs: Math.min(runEndMs, lastMs + margin) };
+}
+
+export function deviceChartTimeRange(device, clock) {
+  let startMs = Infinity, endMs = -Infinity;
+  for (const channel of device?.channels || []) for (const series of channel.series || []) {
+    let range;
+    try { range = automaticTimeRange(series, clock); }
+    catch { continue; } // Invalid series display their own graph error.
+    if (!range) continue;
+    startMs = Math.min(startMs, range.startMs);
+    endMs = Math.max(endMs, range.endMs);
   }
+  return startMs === Infinity ? { startMs: clock?.startMs, endMs: clock?.endMs }
+    : { startMs: Math.floor(startMs), endMs: Math.ceil(endMs) };
+}
+
+/**
+ * Geometry shared by the SVG preview and vector PDF chart. The run-wide clock
+ * validates timestamps; each graph fits its observations unless a time range is selected. Dots stay
+ * tied to observed after-values. Connections and the held value are display-only
+ * geometry, so no synthetic readings enter the saved evidence or event count.
+ */
+export function buildTestChart(series, clock, {
+  width = 700, height = 220,
+  padding = { left: 62, right: 22, top: 20, bottom: 48 },
+  tickCount = 5, timeRange = null,
+} = {}) {
+  const manualTimeRange = timeRange !== null;
+  if (manualTimeRange && !isTestTimeRange(timeRange, clock))
+    throw new Error("Choose an increasing whole-millisecond time range within the test run.");
+  const automaticRange = automaticTimeRange(series, clock);
+  const { startMs, endMs } = timeRange || automaticRange || clock;
   const { left, right, top, bottom } = padding;
   if (![width, height, left, right, top, bottom].every(Number.isFinite)
     || width <= left + right || height <= top + bottom

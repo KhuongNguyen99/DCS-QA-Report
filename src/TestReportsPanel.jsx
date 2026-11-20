@@ -3,7 +3,7 @@ import Icon from "./Icons.jsx";
 import TestSetupPhotos from "./TestSetupPhotos.jsx";
 import { parsePronetaFiles } from "./proneta-parser.js";
 import { importNoteClarification } from "./proneta-notes.js";
-import { buildTestChart, isTestTimeRange, formatSourceTime, formatTestValue } from "./test-chart.js";
+import { buildTestChart, deviceChartTimeRange, isTestTimeRange, formatSourceTime, formatTestValue } from "./test-chart.js";
 import { testCommentDraftScope, readTestCommentDrafts, writeTestCommentDraft, removeTestCommentDraft } from "./test-comment-drafts.js";
 import { testTimeRangeScope, readDeviceTimeRange, saveDeviceTimeRange, resetDeviceTimeRange } from "./test-time-ranges.js";
 import { createTestEventEdit, setTestEventEdit, applyTestEventEdits } from "./test-event-edits.js";
@@ -197,6 +197,11 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
   const override = rangeOverrides[device?.id];
   const chosenRange = localRanges[viewKey] || (Object.hasOwn(rangeOverrides, device?.id)
     && (override === null || isTestTimeRange(override, run.clock)) ? { range: override, error: "" } : storedRange);
+  const automaticRange = deviceChartTimeRange(device, run.clock);
+  const sliderClock = { ...run.clock,
+    startMs: Math.min(automaticRange.startMs, chosenRange.range?.startMs ?? automaticRange.startMs),
+    endMs: Math.max(automaticRange.endMs, chosenRange.range?.endMs ?? automaticRange.endMs) };
+  const sliderKey = JSON.stringify([viewKey, sliderClock.startMs, sliderClock.endMs, chosenRange.range]);
   function changeTimeRange(range) {
     const error = range ? saveDeviceTimeRange(timeRangeScope, runId, device.id, run.clock, range)
       : resetDeviceTimeRange(timeRangeScope, runId, device.id);
@@ -231,7 +236,7 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
       <section className="test-device-content" aria-label="Device test results">
         {device ? <>
           <div className="test-device-heading"><h3>{device.name}</h3><TestStatus status={device.status} /></div>
-          <DeviceTimeAxis key={viewKey} clock={run.clock} timeRange={chosenRange.range}
+          <DeviceTimeAxis key={sliderKey} clock={sliderClock} timeRange={chosenRange.range}
             onChange={changeTimeRange} warning={chosenRange.error} />
           {(device.channels || []).map(channel => {
             const station = run.stations?.find(item => item.id === channel.stationId);

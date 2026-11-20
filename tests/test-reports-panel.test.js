@@ -752,6 +752,57 @@ async function applyRange(h, start, end) {
   await h.click(h.button("Apply time range"));
 }
 
+test("slider bounds follow the selected device's longest graph coverage and refresh after pending event edits", async t => {
+  const run = eventRun();
+  const other = structuredClone(run.devices[0]); other.id = 'other'; other.name = 'OTHER';
+  other.channels[0].series[1].points[2].timeMs = run.clock.endMs;
+  run.devices.push(other);
+  run.devices[0].channels[0].series[1].points.forEach((point, index) => { point.timeMs = startMs + [20_000, 40_000, 80_000][index]; });
+  run.devices[0].channels[1].series[0].points[0].timeMs = startMs + 60_000;
+  const h = await setup(t, { runs: [run] });
+  const bounds = () => ['rangeStart', 'rangeEnd'].map(name => {
+    const input = h.query(`input[name="${name}"]`);
+    return [Number(input.min) - startMs, Number(input.max) - startMs, input.valueAsNumber - startMs];
+  });
+  assert.deepEqual(bounds(), [[17_600, 82_400, 17_600], [17_600, 82_400, 82_400]]);
+  await h.click(h.button('Remove event from PD-EXAMPLE, source row 4'));
+  assert.deepEqual(bounds(), [[19_000, 61_000, 19_000], [19_000, 61_000, 61_000]]);
+  await h.click(h.button('Restore event from PD-EXAMPLE, source row 4'));
+  assert.deepEqual(bounds(), [[17_600, 82_400, 17_600], [17_600, 82_400, 82_400]]);
+  await h.click(h.button('Remove event from feedback state, source row 2'));
+  assert.deepEqual(bounds(), [[17_600, 82_400, 17_600], [17_600, 82_400, 82_400]], 'an empty graph does not force the run-wide span');
+  await h.click(h.button('OTHERPassed'));
+  assert.equal(Number(h.query('input[name="rangeEnd"]').max), run.clock.endMs);
+  await h.click(h.button('VALVE-EXAMPLEPassed'));
+  assert.deepEqual(bounds(), [[17_600, 82_400, 17_600], [17_600, 82_400, 82_400]]);
+  const stored = h.stored(); await h.unmount();
+  const reopened = await setup(t, { runs: [run] }, { stored });
+  assert.equal(reopened.query('input[name="rangeEnd"]').valueAsNumber, startMs + 82_400);
+  assert.equal(reopened.window.calls.length, 0);
+  assert.equal(reopened.window.dirty.at(-1), true);
+});
+
+test("saved manual intervals remain available beyond automatic bounds until Reset to auto", async t => {
+  const run = savedRun();
+  for (const channel of run.devices[0].channels) channel.series[0].points[0].timeMs = startMs + 40_000;
+  const scope = testTimeRangeScope('https://example.supabase.co', 'inspector-1', project.walkdownId, project.revision);
+  const range = { startMs: startMs + 5000, endMs: startMs + 100_000 };
+  const key = scope + encodeURIComponent(JSON.stringify([run.id, 'valve']));
+  const h = await setup(t, { runs: [run] }, { stored: { [key]: JSON.stringify(range) } });
+  assert.equal(h.query('input[name="rangeStart"]').valueAsNumber, range.startMs);
+  assert.equal(Number(h.query('input[name="rangeEnd"]').max), range.endMs);
+  for (const plot of h.document.querySelectorAll('svg[data-time-start]')) {
+    assert.equal(Number(plot.dataset.timeStart), range.startMs);
+    assert.equal(Number(plot.dataset.timeEnd), range.endMs);
+  }
+  assert.equal(h.window.dirty.at(-1), false);
+  await h.click(h.button('Reset to auto'));
+  assert.equal(Number(h.query('input[name="rangeStart"]').min), startMs + 39_000);
+  assert.equal(h.query('input[name="rangeEnd"]').valueAsNumber, startMs + 41_000);
+  assert.deepEqual(h.stored(), {});
+  assert.equal(h.window.calls.length, 0);
+});
+
 test("one manual device range aligns every graph without changing comments or creating a report edit", async t => {
   const run = savedRun({ comment: "Keep overall note" });
   run.devices[0].comment = "Keep device note";
