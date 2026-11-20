@@ -343,11 +343,12 @@ test("long selected parameters paginate completely above the footer", async () =
   });
 });
 
-test("configured settings matrix preserves switch states and encoded numeric selections", async () => {
+test("configured settings matrix displays verified selections and preserves unfamiliar codes", async () => {
   await withFonts(async () => {
     const state = closedState();
     const run = state.testRuns[0];
     const module = run.stations[0].modules[0];
+    module.orderNumber = "6ES7 134-6FF00-0AA1";
     module.parameters = [
       { name: "Diagnostics: Undervoltage", value: "1", rawValue: "1", enumId: "Diag:Undervoltage" },
       { name: "Potential group", value: "1", rawValue: "1", enumId: "BaseUnit" },
@@ -365,7 +366,9 @@ test("configured settings matrix preserves switch states and encoded numeric sel
     ];
     device.channels.push({ ...structuredClone(channel), id: "second-channel", channel: 1,
       sourceChannel: "Channel 2", symbolicName: "SECOND-EXAMPLE", parameters: [{ name: "Some flag", value: true }], series: [] });
-    run.unassignedChannels = [];
+    run.unassignedChannels = [{ ...structuredClone(channel), id: "legacy-channel", slot: 5,
+      parameters: [{ name: "Type/range of measurement", value: "265", rawValue: "265", enumId: "Measurement type/-area" }],
+      series: [] }];
     const result = await pdfContent(await createTestReportPdf({ state }));
     const summaryPage = result.pages.findIndex(page => page.includes("Software: Siemens PRONETA Basic"));
     const settings = result.pages.slice(1, summaryPage).join("\n");
@@ -374,16 +377,17 @@ test("configured settings matrix preserves switch states and encoded numeric sel
     for (const label of ["Channel settings", "Channel 1", "Channel 2", "RTD-EXAMPLE", "Diagnostics: No supply voltage L+",
       "Diagnostics: Wire break", "Check for wire break", "Potential group", "Type/range of measurement", "Smoothing"])
       assert.ok(settingsWords.includes(label), `Missing configured setting: ${label}`);
-    assert.match(settings, /^265$/m);
-    assert.match(settings, /^1$/m);
-    assert.equal((settings.match(/^0$/gm) || []).length, 1, "numeric zero stays numeric");
+    assert.match(settingsWords, /Potential group Start new power group/);
+    assert.match(settingsWords, /Voltage, \u00b110 V/);
+    assert.match(settings, /^None$/m);
+    assert.match(settings, /^265$/m, "the code stays visible without the module order number");
     assert.doesNotMatch(settingsWords, /Reaction to CPU STOP|\(encoded selection\)/i);
     assert.equal((settings.match(/\nOff\n/g) || []).length, 1, "disabled switch differs from a missing setting");
     const green = result.streams.slice(1, summaryPage).flatMap(pdfLines).filter(line => line.color.length === 3
       && line.color.every((value, index) => Math.abs(value - [31, 105, 57][index] / 255) < 0.005));
     assert.equal(green.length, 8, "four enabled switches are drawn as vector checkmarks");
     assert.doesNotMatch(result.text, /Empty module|Stations and module parameters|Set parameters/);
-    assert.equal(result.text.replace(/\s+/g, " ").match(/Type\/range of measurement/g)?.length, 1,
+    assert.equal(result.text.replace(/\s+/g, " ").match(/Type\/range of measurement/g)?.length, 2,
       "settings appear once at the run start");
   });
 });

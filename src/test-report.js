@@ -1,5 +1,6 @@
 import { jsPDF } from "jspdf";
 import { revisionNumber } from "./domain.js";
+import { pronetaSelectionLabel } from "./proneta-selection-labels.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
 import { buildTestChart, formatSourceTime, isTestTimeRange } from "./test-chart.js";
 
@@ -149,15 +150,16 @@ function clockLabel(clock) {
     : clock?.timeZone || "Source clock (unspecified)";
 }
 
-function selectedValue(parameter) {
-  let value = String(parameter.value ?? parameter.rawValue ?? "");
+function selectedValue(parameter, selection) {
+  let value = String(selection ?? "");
   if (parameter.unit && !value.includes(parameter.unit)) value += ` ${parameter.unit}`;
   return value || "Not specified";
 }
 
-function configuredValue(parameter) {
+function configuredValue(parameter, orderNumber) {
   if (!parameter) return "";
-  const value = parameter.value ?? parameter.rawValue;
+  const recorded = parameter.value ?? parameter.rawValue;
+  const value = pronetaSelectionLabel(orderNumber, parameter.enumId, recorded) ?? recorded;
   if (typeof value === "boolean") return value ? CHECKED : "Off";
   const normalized = String(value ?? "").trim().toLowerCase();
   if (["true", "enabled", "on", "yes"].includes(normalized)) return CHECKED;
@@ -165,7 +167,7 @@ function configuredValue(parameter) {
   const switchName = /^(?:(?:group )?diagnostics?:|check for\b|activated$|hardware interrupt\b|failure monitoring$|scalable measuring range$)/i.test(parameter.name || "");
   const bit = !parameter.dataType || /^(?:bit|bool|boolean)$/i.test(parameter.dataType);
   if (bit && switchName && (normalized === "1" || normalized === "0")) return normalized === "1" ? CHECKED : "Off";
-  return selectedValue(parameter);
+  return selectedValue(parameter, value);
 }
 
 async function reportFont(file) {
@@ -455,7 +457,7 @@ function configuredSettings(writer, run, showRunName) {
     if (module?.parameters?.length) {
       writer.table([
         { label: "Parameter", width: 360 }, { label: "Selected value", width: WIDTH - 360, align: "center" },
-      ], module.parameters.map((parameter) => [parameter.name, configuredValue(parameter)]),
+      ], module.parameters.map((parameter) => [parameter.name, configuredValue(parameter, module.orderNumber)]),
       { compact: true, caption: `${location} | Module settings` });
     }
     if (!channels.length) continue;
@@ -481,7 +483,7 @@ function configuredSettings(writer, run, showRunName) {
         { label: "Channel", width: 65 }, { label: "Device", width: 105 },
         ...subset.map((key) => ({ label: names.get(key), width: parameterWidth, align: "center" })),
       ], rows.map(({ channel, deviceName, settings }) => [channelLabel(channel), deviceName,
-        ...subset.map((key) => configuredValue(settings.get(key)))]),
+        ...subset.map((key) => configuredValue(settings.get(key), module?.orderNumber))]),
       { compact: true, caption: `${location} | Channel settings` });
     }
   }
