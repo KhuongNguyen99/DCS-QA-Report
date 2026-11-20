@@ -13,6 +13,7 @@ const RESULT_LABELS = new Set(["Passed", "Failed", "Not tested", "Not applicable
 const MAX_SETUP_PHOTO_BYTES = 12 * 1024 * 1024;
 const SETUP_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_COMMENT_LENGTH = 4000;
+const CHECKED = Symbol("configured switch enabled");
 
 function validateReportComment(value, label) {
   if (value !== undefined && (typeof value !== "string" || Array.from(value).length > MAX_COMMENT_LENGTH || value.includes("\0")))
@@ -156,6 +157,19 @@ function selectedValue(parameter) {
   return value || "Not specified";
 }
 
+function configuredValue(parameter) {
+  if (!parameter) return "";
+  const value = parameter.value ?? parameter.rawValue;
+  if (typeof value === "boolean") return value ? CHECKED : "Off";
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["true", "enabled", "on", "yes"].includes(normalized)) return CHECKED;
+  if (["false", "disabled", "off", "no"].includes(normalized)) return "Off";
+  const switchName = /^(?:(?:group )?diagnostics?:|check for\b|activated$|hardware interrupt\b|failure monitoring$|scalable measuring range$)/i.test(parameter.name || "");
+  const bit = !parameter.dataType || /^(?:bit|bool|boolean)$/i.test(parameter.dataType);
+  if (bit && switchName && (normalized === "1" || normalized === "0")) return normalized === "1" ? CHECKED : "Off";
+  return selectedValue(parameter);
+}
+
 async function reportFont(file) {
   const baseUrl = import.meta.env?.BASE_URL || "/";
   let response;
@@ -212,13 +226,15 @@ function reportWriter(doc) {
     ensure(size * 1.5 + 28);
     paragraph(value, { size, bold: true, gap: 7 });
   }
-  function table(columns, rows, { compact = false } = {}) {
+  function table(columns, rows, { compact = false, caption = "" } = {}) {
     if (!rows.length) return;
     const size = 8.2;
     const lineHeight = 11.3;
     const padding = compact ? 3 : 6;
     const widths = columns.map((column) => column.width);
+    const textX = (x, index) => x + (columns[index].align === "center" ? widths[index] / 2 : padding);
     const cellLines = (value, column) => {
+      if (value === CHECKED) return [""];
       textStyle(doc, size);
       return printableText(value).split("\n")
         .flatMap((line) => doc.splitTextToSize(line || " ", widths[column] - padding * 2));
@@ -226,14 +242,22 @@ function reportWriter(doc) {
     textStyle(doc, size, true);
     const headers = columns.map((column) => doc.splitTextToSize(printableText(column.label), column.width - padding * 2));
     const headerHeight = Math.max(...headers.map((lines) => lines.length)) * lineHeight + padding * 2;
+    textStyle(doc, 9.5, true);
+    const captionLines = caption ? doc.splitTextToSize(printableText(caption), WIDTH) : [];
+    const captionHeight = captionLines.length ? captionLines.length * 13 + 3 : 0;
     function tableHeader() {
-      ensure(headerHeight + lineHeight + padding * 2);
+      ensure(captionHeight + headerHeight + lineHeight + padding * 2);
+      if (captionLines.length) {
+        textStyle(doc, 9.5, true);
+        captionLines.forEach((line, index) => doc.text(line, PAGE.margin, y + 9.5 + index * 13));
+        y += captionHeight;
+      }
       doc.setFillColor(...COLOR.fill);
       doc.rect(PAGE.margin, y, WIDTH, headerHeight, "F");
       textStyle(doc, size, true, COLOR.muted);
       let x = PAGE.margin;
       headers.forEach((lines, index) => {
-        lines.forEach((line, row) => doc.text(line, x + padding, y + padding + size + row * lineHeight));
+        lines.forEach((line, row) => doc.text(line, textX(x, index), y + padding + size + row * lineHeight, { align: columns[index].align || "left" }));
         x += widths[index];
       });
       y += headerHeight;
@@ -244,7 +268,7 @@ function reportWriter(doc) {
       const totalLines = Math.max(1, ...cells.map((lines) => lines.length));
       const rowHeight = totalLines * lineHeight + padding * 2;
       // Move a normal row together. Oversized cells are split without losing text.
-      if (y + rowHeight > PAGE.bottom && rowHeight < PAGE.bottom - 125 - headerHeight) {
+      if (y + rowHeight > PAGE.bottom && rowHeight < PAGE.bottom - 125 - headerHeight - captionHeight) {
         page(sectionTitle, true);
         tableHeader();
       }
@@ -259,9 +283,17 @@ function reportWriter(doc) {
         const count = Math.min(totalLines - offset, available);
         let x = PAGE.margin;
         cells.forEach((lines, index) => {
+          if (row[index] === CHECKED && offset === 0) {
+            const center = x + widths[index] / 2;
+            const baseline = y + padding + size;
+            doc.setDrawColor(...COLOR.green);
+            doc.setLineWidth(1.5);
+            doc.line(center - 4, baseline - 3, center - 1, baseline);
+            doc.line(center - 1, baseline, center + 5, baseline - 6);
+          }
           textStyle(doc, size, false, resultColor(row[index]));
           lines.slice(offset, offset + count).forEach((line, lineIndex) =>
-            doc.text(line, x + padding, y + padding + size + lineIndex * lineHeight));
+            doc.text(line, textX(x, index), y + padding + size + lineIndex * lineHeight, { align: columns[index].align || "left" }));
           x += widths[index];
         });
         y += count * lineHeight + padding * 2;
@@ -399,29 +431,58 @@ async function runSetup(writer, doc, run, backend, onProgress) {
   }
 }
 
-function parameterTable(writer, parameters, { heading = true } = {}) {
-  if (!parameters?.length) return;
-  if (heading) writer.heading("Set parameters", 10);
-  // A record/group is common to many settings. Print it once and place two
-  // independent parameter/value pairs per row instead of repeating it per cell.
-  const groups = new Map();
-  for (const parameter of parameters) {
-    const label = [parameter.group, parameter.recordIndex == null ? "" : `Record ${parameter.recordIndex}`].filter(Boolean).join(" | ");
-    if (!groups.has(label)) groups.set(label, []);
-    groups.get(label).push(parameter);
-  }
-  for (const [label, group] of groups) {
-    if (label) writer.heading(label, 8.5);
-    const rows = [];
-    for (let index = 0; index < group.length; index += 2) {
-      const first = group[index];
-      const second = group[index + 1];
-      rows.push([first.name, selectedValue(first), second?.name || "", second ? selectedValue(second) : ""]);
+function configuredSettings(writer, run, showRunName) {
+  const modules = new Map();
+  const moduleFor = (stationId, slot) => {
+    const key = `${stationId ?? ""}\0${slot ?? ""}`;
+    if (!modules.has(key)) modules.set(key, { stationId, slot, module: null, channels: [] });
+    return modules.get(key);
+  };
+  for (const station of run.stations || [])
+    for (const module of station.modules || []) moduleFor(station.id, module.slot).module = module;
+  for (const device of run.devices)
+    for (const channel of device.channels)
+      if (channel.parameters?.length) moduleFor(channel.stationId, channel.slot).channels.push({ channel, deviceName: device.name });
+  for (const channel of run.unassignedChannels || [])
+    if (channel.parameters?.length) moduleFor(channel.stationId, channel.slot).channels.push({ channel, deviceName: channel.symbolicName || "Unassigned" });
+  const configured = [...modules.values()].filter(({ module, channels }) => module?.parameters?.length || channels.length);
+  if (!configured.length) return;
+  writer.page("Configured settings");
+  if (showRunName) writer.paragraph(run.name || "Test run", { bold: true });
+  for (const { stationId, slot, module, channels } of configured) {
+    const location = [stationName(run, stationId), `Slot ${slot ?? "unspecified"}`, module?.name].filter(Boolean).join(" | ");
+    if (module?.parameters?.length) {
+      writer.table([
+        { label: "Parameter", width: 360 }, { label: "Selected value", width: WIDTH - 360, align: "center" },
+      ], module.parameters.map((parameter) => [parameter.name, configuredValue(parameter)]),
+      { compact: true, caption: `${location} | Module settings` });
     }
-    writer.table([
-      { label: "Parameter", width: 218 }, { label: "Selected value", width: WIDTH / 2 - 218 },
-      { label: "Parameter", width: 218 }, { label: "Selected value", width: WIDTH / 2 - 218 },
-    ], rows, { compact: true });
+    if (!channels.length) continue;
+    const names = new Map();
+    const rows = channels.map(({ channel, deviceName }) => {
+      const settings = new Map();
+      const occurrences = new Map();
+      for (const parameter of channel.parameters) {
+        const count = (occurrences.get(parameter.name) || 0) + 1;
+        occurrences.set(parameter.name, count);
+        const key = `${parameter.name}\0${count}`;
+        if (!names.has(key)) names.set(key, count === 1 ? parameter.name : `${parameter.name} (${count})`);
+        settings.set(key, parameter);
+      }
+      return { channel, deviceName, settings };
+    });
+    const keys = [...names.keys()];
+    const columnsPerGroup = Math.ceil(keys.length / Math.ceil(keys.length / 7));
+    for (let start = 0; start < keys.length; start += columnsPerGroup) {
+      const subset = keys.slice(start, start + columnsPerGroup);
+      const parameterWidth = (WIDTH - 170) / subset.length;
+      writer.table([
+        { label: "Channel", width: 65 }, { label: "Device", width: 105 },
+        ...subset.map((key) => ({ label: names.get(key), width: parameterWidth, align: "center" })),
+      ], rows.map(({ channel, deviceName, settings }) => [channelLabel(channel), deviceName,
+        ...subset.map((key) => configuredValue(settings.get(key)))]),
+      { compact: true, caption: `${location} | Channel settings` });
+    }
   }
 }
 
@@ -444,7 +505,6 @@ function channelDetails(writer, channel, run, { heading = true, charts, deviceNa
     writer.paragraph(wiring, { bold: true, color });
   }
   if (channel.comment) writer.paragraph(`Tester comment: ${channel.comment}`);
-  parameterTable(writer, channel.parameters);
   if (charts) {
     charts.push(...populated.map(series => ({ series, details })));
   } else for (const series of populated) {
@@ -501,32 +561,9 @@ function runAppendices(writer, run) {
       `${channel.slot ?? "?"} / ${channelLabel(channel)}`, channel.symbolicName || "Unassigned", resultLabel(channel.status)]));
     for (const channel of run.unassignedChannels) {
       if (channel.series?.some((series) => series.points?.length)) channelDetails(writer, channel, run);
-      else if (channel.parameters?.length || channel.comment) {
+      else if (channel.comment) {
         writer.heading(`${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "?"} | ${channelLabel(channel)} | ${channel.symbolicName || "Unassigned"}`, 9);
-        if (channel.comment) writer.paragraph(`Tester comment: ${channel.comment}`, { size: 8 });
-        parameterTable(writer, channel.parameters, { heading: false });
-      }
-    }
-  }
-  if (run.stations?.length) {
-    writer.page(`${run.name || "Test run"} - Stations and module parameters`);
-    for (const station of run.stations) {
-      writer.heading(station.name || station.id);
-      const identifiers = [station.macAddress && `MAC: ${station.macAddress}`, station.serialNumber && `Serial: ${station.serialNumber}`].filter(Boolean).join(" | ");
-      if (identifiers) writer.paragraph(identifiers, { color: COLOR.muted });
-      writer.table([
-        { label: "Slot", width: 50 }, { label: "Module", width: 295 },
-        { label: "Order number", width: 205 }, { label: "Serial number", width: WIDTH - 550 },
-      ], (station.modules || []).map((module) => [module.slot, module.name, module.orderNumber || "", module.serialNumber || ""]));
-      const parameters = (station.modules || []).flatMap((module) => (module.parameters || []).map((parameter) => ({ ...parameter, slot: module.slot })));
-      if (parameters.length) {
-        writer.heading(`${station.name || station.id} - Module-wide parameters`, 11);
-        writer.table([
-          { label: "Slot", width: 40 }, { label: "Parameter", width: 278 },
-          { label: "Selected value", width: 184 }, { label: "Group / record", width: WIDTH - 502 },
-        ], parameters.map((parameter) => [parameter.slot, parameter.name, selectedValue(parameter),
-          [parameter.group, parameter.recordIndex == null ? "" : `Record ${parameter.recordIndex}`].filter(Boolean).join(" | ")]),
-        { compact: true });
+        writer.paragraph(`Tester comment: ${channel.comment}`, { size: 8 });
       }
     }
   }
@@ -621,6 +658,7 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
   }
   for (const run of runs) {
     onProgress(`Building ${run.name || "test run"}...`);
+    configuredSettings(writer, run, runs.length > 1);
     runSummary(writer, run, runs.length === 1 ? project.closedByName : undefined);
     await runSetup(writer, doc, run, backend, onProgress);
     for (const device of run.devices) {

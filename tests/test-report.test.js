@@ -215,6 +215,10 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.deepEqual(requested.sort(), ["NotoSans-Bold.ttf", "NotoSans-Regular.ttf", "jeevy-logo-black.png"]);
     assert.match(result.pages[0], /450k skid x7 - DCS\nTest Result - Skid Example\nRevision 2/);
     assert.match(result.pages[0], /November 20, 2026/);
+    assert.match(result.pages[1], /Configured settings/);
+    assert.ok(result.pages.findIndex(page => page.includes("Configured settings"))
+      < result.pages.findIndex(page => page.includes("Software: Siemens PRONETA Basic")));
+    assert.doesNotMatch(result.text, /Stations and module parameters|Set parameters/);
     assert.equal(photoPlacements(result.streams[0]).length, 1, "the QC cover logo is on the first page");
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
       "Siemens PRONETA Basic", "Version entered by tester", "RTD-EXAMPLE", "VALVE-EXAMPLE", "Recorded wiring result: Failed (source: Error)",
@@ -328,11 +332,71 @@ test("long selected parameters paginate completely above the footer", async () =
       assert.ok(result.text.includes(`Selected-${index}`));
     }
     for (let index = 1; index <= 160; index++) assert.ok(result.text.includes(`Long-value-piece-${index}`));
-    assert.ok(result.pages.some((page) => page.includes("(continued)")));
+    const continued = result.pages.filter(page => page.includes("Configured settings (continued)"));
+    assert.ok(continued.length > 0);
+    assert.ok(continued.filter(page => /Long-value-piece-|Parameter-\d/.test(page))
+      .every(page => page.includes("Station Example | Slot 3 | Analog example | Channel settings")));
     for (const page of result.blocks) for (const block of page) {
       if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
     }
+  });
+});
+
+test("configured settings matrix preserves switch states and encoded numeric selections", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const module = run.stations[0].modules[0];
+    module.parameters = [
+      { name: "Diagnostics: Undervoltage", value: "1", rawValue: "1", enumId: "Diag:Undervoltage" },
+      { name: "Potential group", value: "1", rawValue: "1", enumId: "BaseUnit" },
+    ];
+    run.stations[0].modules.push({ slot: 4, name: "Empty module", parameters: [] });
+    const device = run.devices[0];
+    const channel = device.channels[0];
+    channel.parameters = [
+      { name: "Diagnostics: No supply voltage L+", value: "1", rawValue: "1", enumId: "Diag:Load voltage" },
+      { name: "Diagnostics: Wire break", value: "0", rawValue: "0", enumId: "Diag:Wire break" },
+      { name: "Check for wire break", value: "1", rawValue: "1", enumId: "Test: wire break" },
+      { name: "Type/range of measurement", value: "265", rawValue: "265", enumId: "Measurement type/-area" },
+      { name: "Smoothing", value: "0", rawValue: "0", enumId: "Smoothing" },
+      { name: "Reaction to CPU STOP", value: "0", rawValue: "0", enumId: "Substitute value behaviour digital" },
+    ];
+    device.channels.push({ ...structuredClone(channel), id: "second-channel", channel: 1,
+      sourceChannel: "Channel 2", symbolicName: "SECOND-EXAMPLE", parameters: [{ name: "Some flag", value: true }], series: [] });
+    run.unassignedChannels = [];
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    const summaryPage = result.pages.findIndex(page => page.includes("Software: Siemens PRONETA Basic"));
+    const settings = result.pages.slice(1, summaryPage).join("\n");
+    const settingsWords = settings.replace(/\s+/g, " ");
+    assert.match(settingsWords, /Station Example \| Slot 3 \| Analog example/);
+    for (const label of ["Channel settings", "Channel 1", "Channel 2", "RTD-EXAMPLE", "Diagnostics: No supply voltage L+",
+      "Diagnostics: Wire break", "Check for wire break", "Potential group", "Type/range of measurement", "Smoothing", "Reaction to CPU STOP"])
+      assert.ok(settingsWords.includes(label), `Missing configured setting: ${label}`);
+    assert.match(settingsWords, /265 \(encoded selection\)/);
+    assert.match(settingsWords, /1 \(encoded selection\)/);
+    assert.equal((settingsWords.match(/0 \(encoded selection\)/g) || []).length, 2, "numeric zero selections stay numeric");
+    assert.equal((settings.match(/\nOff\n/g) || []).length, 1, "disabled switch differs from a missing setting");
+    const green = result.streams.slice(1, summaryPage).flatMap(pdfLines).filter(line => line.color.length === 3
+      && line.color.every((value, index) => Math.abs(value - [31, 105, 57][index] / 255) < 0.005));
+    assert.equal(green.length, 8, "four enabled switches are drawn as vector checkmarks");
+    assert.doesNotMatch(result.text, /Empty module|Stations and module parameters|Set parameters/);
+    assert.equal(result.text.replace(/\s+/g, " ").match(/Type\/range of measurement/g)?.length, 1,
+      "settings appear once at the run start");
+  });
+});
+
+test("runs without selected parameters omit the configured settings section", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    run.stations[0].modules[0].parameters = [];
+    for (const device of run.devices) for (const channel of device.channels) channel.parameters = [];
+    for (const channel of run.unassignedChannels) channel.parameters = [];
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    assert.doesNotMatch(result.text, /Configured settings|Stations and module parameters/);
+    assert.match(result.pages[1], /Software: Siemens PRONETA Basic/);
   });
 });
 
@@ -744,7 +808,7 @@ test("manual device ranges apply to every separate channel graph and preserve hi
     const result = await pdfContent(await createTestReportPdf({ state, timeRanges }));
     const titles = ["Temperature", "Manual command", "V-900-POS"];
     const pages = titles.map(title => {
-      const page = result.pages.findIndex(text => text.includes(title));
+      const page = result.pages.findIndex(text => text.includes(`\n${title}\n`));
       assert.ok(page >= 0, `Missing graph ${title}`);
       return page;
     });
