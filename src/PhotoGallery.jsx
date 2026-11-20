@@ -259,17 +259,7 @@ function ScopedPhotoGallery({
         draggable={!orderLocked} onDragStart={event => beginDrag(event, photo.id)} onDragEnd={endDrag}
         onClick={() => setViewedId(photo.id)}><SetupImage photo={photo} getPhotoUrl={getPhotoUrl} /></button>
       <div className="test-setup-photo-body">
-        <div className="test-setup-photo-position"><span>Photo {index + 1} of {photos.length}</span>
-          {canReorder && <div className="test-setup-order-controls">
-            <button type="button" className="small-button" aria-label={`Move ${photo.name} earlier`} title="Move earlier"
-              disabled={orderLocked || index === 0} onClick={() => movePhoto(photo.id, index - 1)}><Icon name="up" size={15} /></button>
-            <button type="button" className="small-button" aria-label={`Move ${photo.name} later`} title="Move later"
-              disabled={orderLocked || index === photos.length - 1} onClick={() => movePhoto(photo.id, index + 1)}><Icon name="down" size={15} /></button>
-            <button type="button" className="small-button test-setup-drag" aria-label={`Drag ${photo.name} to reorder`} title="Drag to reorder"
-              disabled={orderLocked} draggable={!orderLocked} onDragStart={event => beginDrag(event, photo.id)}
-              onDragEnd={endDrag}><Icon name="drag" size={15} /></button>
-          </div>}
-        </div>
+        <p className="test-setup-photo-position">Photo {index + 1} of {photos.length}</p>
         <p className="test-setup-filename" title={photo.name}>{photo.name}</p>
         {inspection && photo.createdAt && <p className="test-muted">{new Date(photo.createdAt).toLocaleString()}</p>}
         {editing?.photo.id === photo.id ? <div className="test-setup-caption-editor">

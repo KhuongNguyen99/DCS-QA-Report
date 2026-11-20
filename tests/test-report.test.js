@@ -8,6 +8,10 @@ const fonts = {
   "NotoSans-Regular.ttf": await readFile(new URL("../public/assets/NotoSans-Regular.ttf", import.meta.url)),
   "NotoSans-Bold.ttf": await readFile(new URL("../public/assets/NotoSans-Bold.ttf", import.meta.url)),
 };
+const logo = await readFile(new URL("../public/assets/jeevy-logo-black.png", import.meta.url));
+const assetResponse = name => name === "jeevy-logo-black.png"
+  ? new Response(logo, { headers: { "content-type": "image/png" } })
+  : fonts[name] ? new Response(fonts[name]) : null;
 const startMs = Date.UTC(2026, 10, 19, 19, 17);
 const CLOCK = { basis: "source-local", timeZone: "Source clock (unspecified)", startMs, endMs: startMs + 392_000 };
 const setupPng = {
@@ -30,8 +34,7 @@ async function withSetupImages(callback, photoResponse = () => new Response(setu
   const fetched = [], accessed = [];
   globalThis.fetch = async (url, options) => {
     fetched.push({ url: String(url), options });
-    const font = fonts[String(url).split("/").pop()];
-    return font ? new Response(font) : photoResponse(String(url), options);
+    return assetResponse(String(url).split("/").pop()) || photoResponse(String(url), options);
   };
   const backend = { walkdownId: "skid-1", getPhotoUrl: async (photo) => {
     accessed.push(structuredClone(photo));
@@ -145,14 +148,36 @@ function pdfLines(stream) {
   return result;
 }
 
+function readPlot(result, title) {
+  const page = result.blocks.findIndex(blocks => blocks.some(block => block.text === title));
+  assert.ok(page >= 0, `Missing graph ${title}`);
+  const heading = result.blocks[page].find(block => block.text === title);
+  const lines = pdfLines(result.streams[page]);
+  const hasColor = (line, rgb) => line.color.length === 3
+    && line.color.every((value, index) => Math.abs(value - rgb[index] / 255) < 0.005);
+  const grid = lines.filter(line => hasColor(line, [213, 222, 229])
+    && line.from.y === line.to.y && Math.abs(line.from.x - heading.x - 40) < 0.01
+    && 612 - line.from.y > heading.y && 612 - line.from.y < heading.y + 105);
+  assert.ok(grid.length >= 2, `Missing plot grid for ${title}`);
+  const left = grid[0].from.x;
+  const right = grid[0].to.x;
+  const bottom = Math.min(...grid.map(line => line.from.y));
+  const top = Math.max(...grid.map(line => line.from.y));
+  const inside = point => point.x >= left - 0.01 && point.x <= right + 0.01
+    && point.y >= bottom - 0.01 && point.y <= top + 0.01;
+  return { page, left, right, width: right - left, height: top - bottom,
+    traces: lines.filter(line => hasColor(line, [24, 108, 161]) && inside(line.from) && inside(line.to)) };
+}
+
 async function withFonts(callback) {
   const original = globalThis.fetch;
   const requested = [];
   globalThis.fetch = async (url) => {
     const name = String(url).split("/").pop();
     requested.push(name);
-    assert.ok(fonts[name], `Only report fonts should be fetched, got ${url}`);
-    return new Response(fonts[name]);
+    const response = assetResponse(name);
+    assert.ok(response, `Unexpected asset request: ${url}`);
+    return response;
   };
   try { return await callback(requested); }
   finally { globalThis.fetch = original; }
@@ -188,7 +213,10 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     const result = await pdfContent(await createTestReportPdf({ state }));
     assert.deepEqual(state, savedState, "Clarifying a legacy import note must not change approved evidence");
     assert.doesNotMatch(result.text, /Overall test run comment|Device comment/, "legacy runs do not invent engineer comments");
-    assert.deepEqual(requested.sort(), ["NotoSans-Bold.ttf", "NotoSans-Regular.ttf"]);
+    assert.deepEqual(requested.sort(), ["NotoSans-Bold.ttf", "NotoSans-Regular.ttf", "jeevy-logo-black.png"]);
+    assert.match(result.pages[0], /450k skid x7 - DCS\nTest Result - Skid Example\nRevision 2/);
+    assert.match(result.pages[0], /November 20, 2026/);
+    assert.equal(photoPlacements(result.streams[0]).length, 1, "the QC cover logo is on the first page");
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
       "Siemens PRONETA Basic", "Version entered by tester", "RTD-EXAMPLE", "VALVE-EXAMPLE", "Recorded wiring result: Failed (source: Error)",
       "Recorded wiring result: Passed (source: OK)", "0 (encoded selection)", "Celsius", "7FFFH", "synthetic-log.csv, row 3",
@@ -200,7 +228,7 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.match(reportText, /All observations were retained\./);
     assert.ok(reportText.indexOf("Earlier import notes use") < reportText.indexOf(legacyNote), "Clarification precedes the original notes");
     assert.ok(result.text.replace(/\s/g, "").includes("ab".repeat(32)));
-    assert.doesNotMatch(result.raw, /\/Subtype\s*\/Image/, "Charts must remain vector shapes");
+    assert.ok(result.streams.slice(1).every(stream => photoPlacements(stream).length === 0), "charts remain vector shapes");
     assert.match(result.raw, /D:20261120113000\+00'00'/, "PDF metadata uses approval time, not export time");
     const graphPages = result.pages.filter((page) => page.includes("connect recorded changes"));
     assert.equal(graphPages.length, 2);
@@ -259,7 +287,7 @@ test("export captures the approved payload before asynchronous font loading", as
   const gate = new Promise((resolve) => { release = resolve; });
   globalThis.fetch = async (url) => {
     await gate;
-    return new Response(fonts[String(url).split("/").pop()]);
+    return assetResponse(String(url).split("/").pop());
   };
   try {
     const state = closedState();
@@ -303,7 +331,7 @@ test("long selected parameters and notes paginate completely above the footer", 
     for (let index = 1; index <= 70; index++) assert.ok(result.text.includes(`Import-note-line-${index}`));
     assert.ok(result.pages.some((page) => page.includes("(continued)")));
     for (const page of result.blocks) for (const block of page) {
-      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
     }
   });
@@ -361,7 +389,7 @@ test("setup pages use only the selected approved photo snapshot with uncropped i
     assert.equal(accessed[0].caption, "Approved overview caption");
     assert.doesNotMatch(result.text, /Mutated|Newer caption|unselected\.png/);
     const photoPages = result.pages.map((text, page) => ({ text, page, images: photoPlacements(result.streams[page]) }))
-      .filter(page => page.images.length);
+      .filter(page => page.page > 0 && page.images.length);
     assert.equal(photoPages.length, 2);
     const firstDevicePage = result.pages.findIndex(page => page.split("\n")[2] === "RTD-EXAMPLE");
     for (let index = 0; index < photoPages.length; index += 1) {
@@ -419,7 +447,7 @@ test('PDF setup pages follow the saved array order instead of filename or creati
   ];
   await withSetupImages(async ({ backend, accessed }) => {
     const result = await pdfContent(await createTestReportPdf({ state, backend }));
-    const pages = result.pages.filter((text, index) => photoPlacements(result.streams[index]).length);
+    const pages = result.pages.filter((text, index) => index > 0 && photoPlacements(result.streams[index]).length);
     assert.deepEqual(accessed.map(photo => photo.id), ['z', 'a', 'm']);
     for (const [index, id] of ['z', 'a', 'm'].entries()) {
       assert.match(pages[index], new RegExp(`Photo ${index + 1} of 3`));
@@ -465,9 +493,9 @@ test("long setup captions paginate fully without losing photos or crossing the f
     for (let index = 1; index <= 55; index++) assert.ok(result.text.includes(`Caption-line-${index}`));
     assert.match(result.text, /Setup \(continued\)/);
     assert.match(result.text, /Following setup photo caption/);
-    assert.equal(result.streams.flatMap(photoPlacements).length, 2);
+    assert.equal(result.streams.slice(1).flatMap(photoPlacements).length, 2);
     for (const page of result.blocks) for (const block of page) {
-      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
     }
     assert.deepEqual(state, before);
@@ -575,29 +603,28 @@ test("PDF separates mixed-unit and same-unit signals within a device while print
     assert.match(result.text, /synthetic-log.csv, row 47/);
     assert.match(result.text, /Original source timestamp/);
     const titles = ["VLV-900-POS - mA", "PD-900 - mA", "Valve output - State", "Temperature evidence - degC"];
-    const graphPages = titles.map(title => {
-      const page = result.pages.findIndex(text => text.includes(title));
-      assert.ok(page >= 0, `Missing separate graph: ${title}`);
-      assert.match(result.pages[page], /Valve device/);
-      return page;
-    });
-    assert.equal(new Set(graphPages).size, 4, "each complete plot is laid out separately");
-    const spans = graphPages.map(page => result.pages[page].match(/Graph span:([\s\S]*?)Shared run span:/)?.[1].replace(/\s+/g, " ").trim());
+    const plots = titles.map(title => readPlot(result, title));
+    const graphPages = plots.map(plot => plot.page);
+    assert.equal(new Set(graphPages).size, 1, "a typical device keeps its separate graphs on one page");
+    const devicePage = result.pages[graphPages[0]];
+    assert.match(devicePage, /Valve device/);
+    assert.match(devicePage, /Engineering note covering every valve graph/);
+    const spans = [...devicePage.matchAll(/Graph span:([\s\S]*?)\.(?:\n|$)/g)]
+      .map(match => match[1].replace(/\s+/g, " ").trim());
     assert.equal(new Set(spans).size, 4, "every series fits its own observed time window");
     assert.match(spans[0], /2026-11-19 19:17:00 to 2026-11-19 19:18:44/);
     assert.match(spans[1], /2026-11-19 19:17:46 to 2026-11-19 19:19:34/);
-    const isBlue = line => line.color.length === 3 && line.color.every((value, index) => Math.abs(value - [24, 108, 161][index] / 255) < 0.005);
-    const traces = graphPages.map(page => pdfLines(result.streams[page]).filter(isBlue));
+    const traces = plots.map(plot => plot.traces);
     assert.deepEqual(traces.map(lines => lines.length), [2, 2, 3, 2], "individual plots preserve connections, digital steps, held tails, and invalid gaps");
     const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
     // Each plot independently covers its full mA, Celsius, or digital frame.
-    for (const index of [0, 1, 3]) near(Math.abs(traces[index][0].from.y - traces[index][0].to.y), 136);
-    near(Math.abs(traces[2][1].from.y - traces[2][1].to.y), 136);
-    near(traces[0][0].from.x, 100.2);
-    near(traces[0][0].to.x, 100.2 + 623.6 / 1.04);
-    near(traces[1][0].from.x, 100.2 + 623.6 / 27);
+    for (const index of [0, 1, 3]) near(Math.abs(traces[index][0].from.y - traces[index][0].to.y), plots[index].height);
+    near(Math.abs(traces[2][1].from.y - traces[2][1].to.y), plots[2].height);
+    near(traces[0][0].from.x, plots[0].left);
+    near(traces[0][0].to.x, plots[0].left + plots[0].width / 1.04);
+    near(traces[1][0].from.x, plots[1].left + plots[1].width / 27);
     for (const page of result.blocks) for (const block of page) {
-      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
     }
   });
@@ -695,7 +722,7 @@ test("long run and device comments paginate completely above the footer through 
     assert.ok(result.pages.some(page => page.includes("RTD-EXAMPLE (continued)") && /Device-comment-line-/.test(page)));
     assert.match(result.text, /Tester comment: Investigate the wiring before retest\./);
     for (const page of result.blocks) for (const block of page) {
-      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
     }
     assert.deepEqual(state, saved);
@@ -728,12 +755,12 @@ test("manual device ranges apply to every separate channel graph and preserve hi
     for (const page of pages) {
       const text = result.pages[page].replace(/\s+/g, " ");
       assert.ok(text.includes(`Graph span: ${expectedSpan}`));
-      assert.match(text, /Manual view: values outside this time range are not shown/);
+      assert.match(text, /Manual view: Graph span:/);
     }
     assert.match(result.pages[pages[0]], /0 of 2 observed change\(s\) shown/);
     assert.match(result.pages[pages[1]], /1 of 3 observed change\(s\) shown/);
     assert.match(result.pages[pages[2]], /2 of 4 observed change\(s\) shown/);
-    assert.match(result.text, /1 invalid reading\(s\) in source data/);
+    assert.match(result.text.replace(/\s+/g, " "), /1 invalid reading\(s\) in source data/);
     assert.match(result.text, /7FFFH/);
     assert.match(result.text, /synthetic-log.csv, row 3/);
     const otherPage = result.pages.find(page => page.includes("Output state - State") && page.includes("Graph span:"));
@@ -741,22 +768,21 @@ test("manual device ranges apply to every separate channel graph and preserve hi
     assert.doesNotMatch(otherPage, /Manual view:/);
     assert.match(otherPage, /19:21:56/);
     const isColor = (line, rgb) => line.color.length === 3 && line.color.every((value, index) => Math.abs(value - rgb[index] / 255) < 0.005);
-    const traces = pages.map(page => pdfLines(result.streams[page]).filter(line => isColor(line, [24, 108, 161])));
+    const plots = titles.map(title => readPlot(result, title));
+    const traces = plots.map(plot => plot.traces);
     const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
     assert.equal(traces[0].length, 1, "the last recorded temperature holds through this later view");
     assert.deepEqual(traces[0][0].dash, [4, 3]);
-    near(traces[0][0].from.x, 100.2); near(traces[0][0].to.x, 723.8);
+    near(traces[0][0].from.x, plots[0].left); near(traces[0][0].to.x, plots[0].right);
     assert.equal(traces[1].length, 3, "digital steps are clipped at both manual view edges");
     assert.equal(traces[2].length, 1);
-    near(traces[2][0].from.x, 100.2); near(traces[2][0].to.x, 723.8);
-    near(Math.abs(traces[2][0].from.y - traces[2][0].to.y), 136 * 10 / 25, "the full source mA scale stays unchanged");
-    for (const trace of traces.flat()) for (const point of [trace.from, trace.to])
-      assert.ok(point.x >= 100.19 && point.x <= 723.81, "manual chart vectors stay within the plot");
+    near(traces[2][0].from.x, plots[2].left); near(traces[2][0].to.x, plots[2].right);
+    near(Math.abs(traces[2][0].from.y - traces[2][0].to.y), plots[2].height * 10 / 25, "the full source mA scale stays unchanged");
     assert.equal(result.streams.flatMap(pdfLines).filter(line => isColor(line, [170, 49, 43])).length, 0, "invalid markers outside the view are not plotted");
     assert.equal(result.text.match(/Device review stays saved/g)?.length, 1);
     assert.equal(result.text.match(/Overall review stays saved/g)?.length, 1);
     for (const page of result.blocks) for (const block of page) {
-      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
     }
     assert.deepEqual(state, originalState);
@@ -789,7 +815,7 @@ test("manual PDF range options are captured before asynchronous font loading", a
   const original = globalThis.fetch;
   let release;
   const gate = new Promise(resolve => { release = resolve; });
-  globalThis.fetch = async url => { await gate; return new Response(fonts[String(url).split("/").pop()]); };
+  globalThis.fetch = async url => { await gate; return assetResponse(String(url).split("/").pop()); };
   try {
     const state = closedState();
     const timeRanges = { "run-1": { "device-1": { startMs: startMs + 1000, endMs: startMs + 3000 } } };
@@ -857,19 +883,15 @@ test("approved PDF reconnects retained readings and moves removed values into so
     const original = structuredClone(state);
     const timeRanges = { [run.id]: { [device.id]: { ...CLOCK } } };
     const result = await pdfContent(await createTestReportPdf({ state, timeRanges }));
-    const plots = ["Analog removal - mA", "Digital removal - State", "Invalid removal - mA"].map(title => {
-      const page = result.pages.findIndex(text => text.includes(title) && text.includes("Graph span:"));
-      assert.ok(page >= 0);
-      assert.match(result.pages[page], /2 of 2 observed change\(s\) shown/);
-      return pdfLines(result.streams[page]).filter(line => line.color.length === 3
-        && line.color.every((value, index) => Math.abs(value - [24, 108, 161][index] / 255) < 0.005));
-    });
+    const graphs = ["Analog removal - mA", "Digital removal - State", "Invalid removal - mA"].map(title => readPlot(result, title));
+    for (const { page } of graphs) assert.match(result.pages[page], /2 of 2 observed change\(s\) shown/);
+    const plots = graphs.map(graph => graph.traces);
     assert.deepEqual(plots.map(lines => lines.length), [2, 2, 2]);
     const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
-    for (const lines of plots) {
+    for (const { traces: lines, left, right, width } of graphs) {
       assert.deepEqual(lines.map(line => line.dash), [[], [4, 3]]);
-      near(lines[0].from.x, 100.2); near(lines[0].to.x, 412);
-      near(lines[1].from.x, 412); near(lines[1].to.x, 723.8);
+      near(lines[0].from.x, left); near(lines[0].to.x, left + width / 2);
+      near(lines[1].from.x, left + width / 2); near(lines[1].to.x, right);
       near(lines[1].from.y, lines[0].to.y); near(lines[1].from.y, lines[1].to.y);
     }
     assert.notEqual(plots[0][0].from.y, plots[0][0].to.y, "analog trace reconnects across the removed spike");
@@ -877,7 +899,7 @@ test("approved PDF reconnects retained readings and moves removed values into so
     assert.notEqual(plots[2][0].from.y, plots[2][0].to.y, "a removed invalid row no longer breaks the retained trace");
     for (const name of ["Analog removal", "Digital removal", "Invalid removal"])
       assert.match(result.text, new RegExp(`Removed events - ${name}`));
-    assert.match(result.text, /2 removed event\(s\), retained in the audit table/);
+    assert.match(result.text.replace(/\s+/g, " "), /2 removed event\(s\), retained in the audit table/);
     assert.match(result.text, /Previous original -> Original 25/);
     assert.match(result.text, /Previous original -> Original 20/);
     assert.match(result.text, /Previous original -> REMOVED-INVALID/);
@@ -929,7 +951,7 @@ test("removed-event audit tables paginate fully outside a manual view and retain
     assert.equal(result.text.match(/ACTIVE-INVALID-TOKEN/g)?.length, 1);
     assert.equal(result.text.match(/After-token-23/g)?.length, 1, "a removed invalid event appears only in its audit row");
     for (const page of result.blocks) for (const block of page) {
-      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
     }
     assert.deepEqual(state, original);

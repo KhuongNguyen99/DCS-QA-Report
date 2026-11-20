@@ -97,32 +97,34 @@ function newPage(doc, project, section) {
   return 61;
 }
 
-function drawFooters(doc, project, closedAt) {
+export function drawReportFooter(doc, project, closedAt, page, count) {
   const approvedDate = closedAt.toLocaleDateString("en-US", {
     month: "short", day: "numeric", year: "numeric", timeZone: "UTC",
   });
+  doc.setPage(page);
+  const pageLabel = `Page ${page} of ${count}`;
+  const footer = `Revision ${printableText(project.revision)} | Skid: ${printableText(project.skidName)}`;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7.9);
+  const availableWidth =
+    PAGE.width - PAGE.margin * 2 - doc.getTextWidth(pageLabel) - 18;
+  setText(doc, [80, 80, 80], 7.9);
+  const lines = doc.splitTextToSize(footer, availableWidth);
+  if (lines.length > 2)
+    throw new Error("Skid name is too long to fit in the report footer.");
+  doc.text(`Approved date: ${approvedDate}`, PAGE.margin, 599 - lines.length * 11);
+  lines.forEach((line, index) =>
+    doc.text(line, PAGE.margin, 599 - (lines.length - index - 1) * 11),
+  );
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(80, 80, 80);
+  doc.text(pageLabel, PAGE.width - PAGE.margin, 599, { align: "right" });
+}
+
+function drawFooters(doc, project, closedAt) {
   const count = doc.getNumberOfPages();
   for (let page = 1; page <= count; page += 1) {
-    doc.setPage(page);
-    const pageLabel = `Page ${page} of ${count}`;
-    const footer = `Revision ${printableText(project.revision)} | Skid: ${printableText(project.skidName)}`;
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.9);
-    const availableWidth =
-      PAGE.width - PAGE.margin * 2 - doc.getTextWidth(pageLabel) - 18;
-    setText(doc, [80, 80, 80], 7.9);
-    const lines = doc.splitTextToSize(footer, availableWidth);
-    if (lines.length > 2)
-      throw new Error("Skid name is too long to fit in the report footer.");
-    doc.text(`Approved date: ${approvedDate}`, PAGE.margin, 599 - lines.length * 11);
-    lines.forEach((line, index) =>
-      doc.text(line, PAGE.margin, 599 - (lines.length - index - 1) * 11),
-    );
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(80, 80, 80);
-    doc.text(pageLabel, PAGE.width - PAGE.margin, 599, {
-      align: "right",
-    });
+    drawReportFooter(doc, project, closedAt, page, count);
   }
 }
 
@@ -185,7 +187,11 @@ async function fetchFont(url, required) {
   return bytesToBase64(bytes);
 }
 
-function drawCover(doc, project, closedAt, logoImage) {
+export function loadReportLogo() {
+  return fetchImage(`${import.meta.env?.BASE_URL || "/"}assets/jeevy-logo-black.png`, "the Jeevy logo");
+}
+
+export function drawCover(doc, project, closedAt, logoImage, label = "QC Report") {
   drawPageHeader(doc, project, "Cover");
   doc.addImage(logoImage, "PNG", PAGE.margin, 39.6, 223.2, 74.88);
   doc.setFont("helvetica", "normal");
@@ -201,7 +207,7 @@ function drawCover(doc, project, closedAt, logoImage) {
     PAGE.margin,
     239,
   );
-  const subtitle = `QC Report - ${printableText(project.skidName)}`;
+  const subtitle = `${label} - ${printableText(project.skidName)}`;
   let size = 36;
   let lines;
   let subtitleEnd;
@@ -525,7 +531,7 @@ export async function createInspectionPdf({
   const baseUrl = import.meta.env?.BASE_URL || "/";
   const [layout, logo, regularFont, boldFont] = await Promise.all([
     fetchImage(`${baseUrl}assets/conduit-layout.png`, "the conduit layout"),
-    fetchImage(`${baseUrl}assets/jeevy-logo-black.png`, "the Jeevy logo"),
+    loadReportLogo(),
     fetchFont(`${baseUrl}assets/NotoSans-Regular.ttf`, true),
     fetchFont(`${baseUrl}assets/NotoSans-Bold.ttf`, true),
   ]);

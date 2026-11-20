@@ -274,12 +274,24 @@ test("the setup photo limit is checked before image processing or server writes"
 
 const displayedNames = h => Array.from(h.document.querySelectorAll('.test-setup-photo-body > .test-setup-filename'), e => e.textContent);
 
+async function dragPhoto(h, from, to) {
+  const cards = h.document.querySelectorAll('.test-setup-photo');
+  const transfer = { effectAllowed: '', dropEffect: '', setData() {} };
+  await h.window.act(async () => {
+    const thumbnail = cards[from].querySelector('.test-setup-thumbnail');
+    assert.equal(thumbnail.draggable, true);
+    for (const [target, name] of [[thumbnail, 'dragstart'], [cards[to], 'dragover'], [cards[to], 'drop']]) {
+      const event = new h.window.Event(name, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', { value: transfer });
+      target.dispatchEvent(event);
+    }
+  });
+}
+
 test('moving a photo saves immediately and a failed save restores the saved order', async t => {
   const original = run([photo('a', 'First caption'), photo('b'), photo('c')]);
   const h = await setup(t, { run: original });
-  assert.equal(h.button('Move a.jpg earlier').disabled, true);
-  assert.equal(h.button('Move c.jpg later').disabled, true);
-  await h.click(h.button('Move a.jpg later'));
+  await dragPhoto(h, 0, 1);
   assert.deepEqual(displayedNames(h), ['b.jpg', 'a.jpg', 'c.jpg']);
   assert.equal(h.window.calls.length, 1);
   assert.equal(h.button('Add setup photos').disabled, true);
@@ -287,11 +299,11 @@ test('moving a photo saves immediately and a failed save restores the saved orde
   assert.deepEqual(Array.from(call.expectedIds), ['a', 'b', 'c']);
   assert.deepEqual(Array.from(call.orderedIds), ['b', 'a', 'c']);
   assert.equal(call.revision, 4);
-  assert.equal(h.button('Move b.jpg later').disabled, true);
+  assert.equal(h.query('.test-setup-thumbnail').draggable, false);
   await h.settle(0, 'Photo order changed on another device');
   assert.deepEqual(displayedNames(h), ['a.jpg', 'b.jpg', 'c.jpg']);
   assert.match(h.text(), /Photo order changed on another device/);
-  await h.click(h.button('Move a.jpg later'));
+  await dragPhoto(h, 0, 1);
   await h.settle(1);
   assert.deepEqual(displayedNames(h), ['b.jpg', 'a.jpg', 'c.jpg']);
   assert.equal(h.window.dirty.at(-1), false);
@@ -301,22 +313,13 @@ test('moving a photo saves immediately and a failed save restores the saved orde
 
 test('dropping a photo thumbnail onto another position saves the new order without confirmation', async t => {
   const h = await setup(t, { run: run([photo('a'), photo('b'), photo('c')]) });
-  const transfer = { effectAllowed: '', dropEffect: '', setData() {} };
-  const fire = (element, name) => {
-    const event = new h.window.Event(name, { bubbles: true, cancelable: true });
-    Object.defineProperty(event, 'dataTransfer', { value: transfer });
-    element.dispatchEvent(event);
-  };
-  const thumbnail = h.query('.test-setup-thumbnail');
-  assert.equal(thumbnail.draggable, true);
-  await h.window.act(async () => fire(thumbnail, 'dragstart'));
-  const last = h.document.querySelectorAll('.test-setup-photo')[2];
-  await h.window.act(async () => { fire(last, 'dragover'); fire(last, 'drop'); });
+  await dragPhoto(h, 0, 2);
   assert.deepEqual(displayedNames(h), ['b.jpg', 'c.jpg', 'a.jpg']);
   assert.equal(h.window.calls.length, 1);
   assert.deepEqual(Array.from(h.window.calls[0].orderedIds), ['b', 'c', 'a']);
   assert.equal(h.button('Save photo order'), undefined);
   assert.equal(h.button('Discard photo order'), undefined);
+  assert.equal(h.query('.test-setup-order-controls'), null);
   await h.settle(0);
   assert.deepEqual(displayedNames(h), ['b.jpg', 'c.jpg', 'a.jpg']);
   assert.equal(h.window.dirty.at(-1), false);
@@ -325,10 +328,10 @@ test('dropping a photo thumbnail onto another position saves the new order witho
 test('a concurrently closed gallery shows the saved order while a move resolves', async t => {
   const original = run([photo('a'), photo('b'), photo('c')]);
   const h = await setup(t, { run: original });
-  await h.click(h.button('Move a.jpg later'));
+  await dragPhoto(h, 0, 1);
   await h.configure({ run: original, readOnly: true });
   assert.deepEqual(displayedNames(h), ['a.jpg', 'b.jpg', 'c.jpg']);
-  assert.equal(h.button('Move a.jpg later'), undefined);
+  assert.equal(h.query('.test-setup-thumbnail').draggable, false);
   await h.settle(0, 'This revision is closed');
   assert.deepEqual(displayedNames(h), ['a.jpg', 'b.jpg', 'c.jpg']);
 });
@@ -336,7 +339,7 @@ test('a concurrently closed gallery shows the saved order while a move resolves'
 test('a late photo order save cannot reorder another revision', async t => {
   const original = run([photo('a'), photo('b')]);
   const h = await setup(t, { run: original });
-  await h.click(h.button('Move a.jpg later'));
+  await dragPhoto(h, 0, 1);
   await h.configure({ revision: 5 });
   await h.settle(0);
   assert.deepEqual(displayedNames(h), ['a.jpg', 'b.jpg']);

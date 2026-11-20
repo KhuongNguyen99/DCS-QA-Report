@@ -546,23 +546,37 @@ test("App blocks approval for unsaved setup captions and preserves approved phot
   assert.equal(archived[0].caption, "Wiring and pneumatic connections checked");
 });
 
+async function movePhotoLater(h, name) {
+  const cards = Array.from(h.document.querySelectorAll('.test-setup-photo'));
+  const index = cards.findIndex(card => card.querySelector('.test-setup-filename').textContent === name);
+  assert.ok(index >= 0 && index + 1 < cards.length);
+  const thumbnail = cards[index].querySelector('.test-setup-thumbnail');
+  assert.equal(thumbnail.draggable, true);
+  await h.window.act(async () => {
+    for (const [target, type] of [[thumbnail, 'dragstart'], [cards[index + 1], 'drop']]) {
+      const event = new h.window.Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', { value: { setData() {} } });
+      target.dispatchEvent(event);
+    }
+  });
+}
+
 test('App saves setup photo order before approval and exports the original order from a later revision archive', async t => {
   const h = await setup(t);
   const photos = ['a', 'b', 'c'].map(id => ({ id: `setup-${id}`, name: `${id}.jpg`, walkdownId: SKID, testRunId: testRun().id,
     path: `private/${id}.jpg`, width: 800, height: 600, caption: `Caption ${id}`, createdBy: INSPECTOR }));
   h.server.state.testRuns = [{ ...testRun(), setupPhotos: photos }];
   await h.notify(); await h.nav('Test reports');
-  const moveLater = () => [...h.document.querySelectorAll('.test-setup-photo')].find(card => card.textContent.includes('a.jpg')).querySelector('[title="Move later"]');
-  await h.click(moveLater());
+  await movePhotoLater(h, 'a.jpg');
   assert.deepEqual(h.server.calls.at(-1), { kind: 'orderSetup', revision: 7, runId: testRun().id,
     orderedIds: ['setup-b', 'setup-a', 'setup-c'], expectedIds: ['setup-a', 'setup-b', 'setup-c'] });
   await h.nav('Report');
   await h.click(h.button('Approve & close')); await h.click(h.button('Confirm approval & close'));
   await h.nav('Test reports'); await h.click(h.button('Export test PDF'));
   assert.deepEqual(copy(h.window.testPdfExports.at(-1).state.testRuns[0].setupPhotos.map(photo => photo.id)), ['setup-b', 'setup-a', 'setup-c']);
-  assert.equal(h.document.querySelector('.test-setup-order-controls'), null);
+  assert.equal(h.document.querySelector('.test-setup-thumbnail').draggable, false);
   await h.nav('Report'); await h.click(h.button('New revision')); await h.nav('Test reports');
-  await h.click(moveLater());
+  await movePhotoLater(h, 'a.jpg');
   assert.deepEqual(copy(h.server.state.testRuns[0].setupPhotos.map(photo => photo.id)), ['setup-b', 'setup-c', 'setup-a']);
   await h.nav('Report'); await h.click(h.button('Export test reports revision 7'));
   assert.deepEqual(copy(h.window.testPdfExports.at(-1).state.testRuns[0].setupPhotos.map(photo => photo.id)), ['setup-b', 'setup-a', 'setup-c']);
@@ -574,7 +588,7 @@ const inspectionOrderPhotos = () => ['a', 'b', 'c'].map(id => ({ id: `inspection
 test('inspection image moves save immediately and remain frozen in archived PDF exports', async t => {
   const h = await setup(t, { photos: inspectionOrderPhotos() });
   await h.nav('QC overview'); await h.openDevice();
-  await h.click(h.button('Move a.jpg later'));
+  await movePhotoLater(h, 'a.jpg');
   assert.deepEqual(h.server.calls.at(-1), { kind: 'orderInspection', key: DEVICE, revision: 7,
     orderedIds: ['inspection-b', 'inspection-a', 'inspection-c'], expectedIds: ['inspection-a', 'inspection-b', 'inspection-c'] });
   await h.click(h.button('Close dialog'));
@@ -583,7 +597,7 @@ test('inspection image moves save immediately and remain frozen in archived PDF 
   await h.click(h.currentExport());
   assert.deepEqual(copy(h.window.pdfExports.at(-1).photos.map(photo => photo.id)), ['inspection-b', 'inspection-a', 'inspection-c']);
   await h.click(h.button('New revision')); await h.nav('QC overview'); await h.openDevice();
-  await h.click(h.button('Move a.jpg later')); await h.click(h.button('Close dialog'));
+  await movePhotoLater(h, 'a.jpg'); await h.click(h.button('Close dialog'));
   assert.deepEqual(copy(h.server.state.photos.map(photo => photo.id)), ['inspection-b', 'inspection-c', 'inspection-a']);
   await h.nav('Report'); await h.click(h.button('Export revision 7'));
   assert.deepEqual(copy(h.window.pdfExports.at(-1).photos.map(photo => photo.id)), ['inspection-b', 'inspection-a', 'inspection-c']);

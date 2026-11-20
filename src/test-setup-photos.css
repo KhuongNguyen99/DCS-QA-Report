@@ -12,11 +12,9 @@
 .test-setup-thumbnail:focus-visible { outline: 3px solid #39724e; outline-offset: -3px; }
 .test-setup-thumbnail img { width: 100%; height: 100%; object-fit: contain; }
 .test-setup-photo-body { padding: 12px; }
-.test-setup-photo-position { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: 11px; color: #61705b; }
-.test-setup-order-controls { display: flex; gap: 4px; }
-.test-setup-order-controls .small-button { padding: 6px; line-height: 0; }
-.test-setup-drag { cursor: grab; }
-.test-setup-drag:active { cursor: grabbing; }
+.test-setup-photo-position { margin-bottom: 8px; font-size: 11px; color: #61705b; }
+.test-setup-thumbnail[draggable="true"] { cursor: grab; }
+.test-setup-thumbnail[draggable="true"]:active { cursor: grabbing; }
 .test-setup-photo.is-dragging { opacity: .55; }
 .test-setup-photo.is-drop-target { outline: 3px solid #39724e; outline-offset: 2px; }
 .test-setup-filename { font-size: 11px; font-weight: 600; color: #61705b; overflow-wrap: anywhere; margin: 0 0 8px; }

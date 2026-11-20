@@ -1,5 +1,5 @@
 import { jsPDF } from "jspdf";
-import { approvedReportDate, fitImageInBox, printableText } from "./report.js";
+import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
 import { buildTestChart, formatSourceTime, isTestTimeRange } from "./test-chart.js";
 import { importNoteClarification } from "./proneta-notes.js";
 
@@ -175,29 +175,30 @@ function reportWriter(doc) {
     doc.text("Jeevy Fabrication", PAGE.margin, 16);
     doc.text("I/O test report", PAGE.width - PAGE.margin, 16, { align: "right" });
   }
-  function page(title = sectionTitle, first = false, continuation = false) {
-    if (!first) doc.addPage();
+  function page(title = sectionTitle, continuation = false) {
+    doc.addPage("letter", "landscape");
     sectionTitle = title;
     header();
     y = 55;
-    textStyle(doc, first ? 27 : 20, true);
-    const lines = doc.splitTextToSize(printableText(`${title}${continuation ? " (continued)" : ""}`), WIDTH);
-    for (const line of lines) {
+    textStyle(doc, 20, true);
+    const label = continuation ? `${title} (continued)` : title;
+    for (const line of doc.splitTextToSize(printableText(label), WIDTH)) {
       doc.text(line, PAGE.margin, y);
-      y += first ? 34 : 26;
+      y += 24;
     }
-    y += 8;
+    y += 4;
   }
   function ensure(height) {
-    if (y + height > PAGE.bottom) page(sectionTitle, false, true);
+    if (y + height > PAGE.bottom) page(sectionTitle, true);
   }
-  function paragraph(value, { size = 9, bold = false, color = COLOR.ink, gap = 7, lineHeight = size * 1.45 } = {}) {
+  function paragraph(value, { size = 9, bold = false, color = COLOR.ink, gap = 7, lineHeight = size * 1.45,
+    left = PAGE.margin, width = WIDTH } = {}) {
     textStyle(doc, size, bold, color);
-    const lines = printableText(value).split("\n").flatMap((line) => doc.splitTextToSize(line || " ", WIDTH));
+    const lines = printableText(value).split("\n").flatMap((line) => doc.splitTextToSize(line || " ", width));
     for (const line of lines) {
       ensure(lineHeight);
       textStyle(doc, size, bold, color);
-      doc.text(line, PAGE.margin, y + size);
+      doc.text(line, left, y + size);
       y += lineHeight;
     }
     y += gap;
@@ -239,14 +240,14 @@ function reportWriter(doc) {
       const rowHeight = totalLines * lineHeight + padding * 2;
       // Move a normal row together. Oversized cells are split without losing text.
       if (y + rowHeight > PAGE.bottom && rowHeight < PAGE.bottom - 125 - headerHeight) {
-        page(sectionTitle, false, true);
+        page(sectionTitle, true);
         tableHeader();
       }
       let offset = 0;
       while (offset < totalLines) {
         const available = Math.floor((PAGE.bottom - y - padding * 2) / lineHeight);
         if (available < 1) {
-          page(sectionTitle, false, true);
+          page(sectionTitle, true);
           tableHeader();
           continue;
         }
@@ -264,16 +265,19 @@ function reportWriter(doc) {
         doc.line(PAGE.margin, y, PAGE.width - PAGE.margin, y);
         offset += count;
         if (offset < totalLines) {
-          page(sectionTitle, false, true);
+          page(sectionTitle, true);
           tableHeader();
         }
       }
     }
     y += 12;
   }
-  function chart(series, clock, timeRange) {
+  function prepareChart(series, clock, timeRange, width) {
+    const compact = width < WIDTH;
     const geometry = buildTestChart(series, clock, {
-      width: WIDTH, height: 201, padding: { left: 57, right: 25, top: 20, bottom: 45 },
+      width, height: compact ? 91 : 201,
+      padding: compact ? { left: 40, right: 24, top: 8, bottom: 31 } : { left: 57, right: 25, top: 20, bottom: 45 },
+      tickCount: width < 250 ? 3 : compact ? 4 : 5,
       timeRange,
     });
     const title = `${series.name || "Recorded values"} - ${geometry.unit}`;
@@ -283,57 +287,83 @@ function reportWriter(doc) {
     const invalidNote = geometry.invalidCount
       ? `; ${geometry.invalidCount} invalid reading(s)${geometry.manualTimeRange ? " in source data; dated markers are shown only within this view" : ", marked below the plot when dated"}` : "";
     const removedNote = geometry.excludedCount ? `; ${geometry.excludedCount} removed event(s), retained in the audit table` : "";
-    const observationNote = `${observationCount}${invalidNote}${removedNote}. ${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the graph end.`;
-    const rangeNote = `${geometry.manualTimeRange ? "Manual view: values outside this time range are not shown. " : ""}Graph span: ${rangeLabel(geometry.domain)}. Shared run span: ${rangeLabel(clock)}. ${clockLabel(clock)}.`;
-    const heightFor = (value, size, lineHeight, gap) => {
-      textStyle(doc, size);
-      return doc.splitTextToSize(printableText(value), WIDTH).length * lineHeight + gap;
+    const observationNote = `${observationCount}${invalidNote}${removedNote}.`;
+    const connectionNote = `${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the graph end.`;
+    const rangeNote = `${geometry.manualTimeRange ? "Manual view: " : ""}Graph span: ${rangeLabel(geometry.domain)}.`;
+    const titleStyle = { size: 10, bold: true, gap: 3, lineHeight: 14.5 };
+    const noteStyle = { size: 7.8, color: COLOR.muted, gap: 3, lineHeight: 10.5 };
+    const trailingGap = 5;
+    const caption = compact ? observationNote : `${observationNote} ${connectionNote}`;
+    const range = compact ? rangeNote : `${rangeNote} Shared run span: ${rangeLabel(clock)}. ${clockLabel(clock)}.`;
+    const heightFor = (value, { size, bold, lineHeight, gap }) => {
+      textStyle(doc, size, bold);
+      return doc.splitTextToSize(printableText(value), width).length * lineHeight + gap;
     };
-    ensure(geometry.height + heightFor(title, 10, 14.5, 7)
-      + heightFor(observationNote, 7.8, 11, 5) + heightFor(rangeNote, 7.8, 11, 12));
-    heading(title, 10);
-    const originY = y;
+    const height = geometry.height + heightFor(title, titleStyle)
+      + heightFor(caption, noteStyle) + heightFor(range, noteStyle) + trailingGap;
+    return { height, draw(left) {
+      paragraph(title, { ...titleStyle, left, width });
+      drawChart(doc, geometry, left, y, compact);
+      y += geometry.height;
+      paragraph(caption, { ...noteStyle, left, width });
+      paragraph(range, { ...noteStyle, left, width });
+      y += trailingGap;
+    } };
+  }
+  function chartGrid(charts, clock, timeRange) {
+    const columns = charts.length === 3 || charts.length >= 5 ? 3 : charts.length >= 2 ? 2 : 1;
+    const gap = 18;
+    const width = (WIDTH - gap * (columns - 1)) / columns;
+    for (let start = 0; start < charts.length; start += columns) {
+      const row = charts.slice(start, start + columns).map(series => prepareChart(series, clock, timeRange, width));
+      ensure(Math.max(...row.map(chart => chart.height)));
+      const top = y;
+      let rowBottom = y;
+      row.forEach((chart, column) => {
+        y = top;
+        chart.draw(PAGE.margin + column * (width + gap));
+        rowBottom = Math.max(rowBottom, y);
+      });
+      y = rowBottom;
+    }
+  }
+  function drawChart(doc, geometry, left, originY, compact) {
     const { plot, points, invalidPoints, xTicks, yTicks, connections, extension } = geometry;
     doc.setLineWidth(0.35);
-    textStyle(doc, 7.5, false, COLOR.muted);
+    textStyle(doc, compact ? 7 : 7.5, false, COLOR.muted);
     for (const tick of yTicks) {
       doc.setDrawColor(...COLOR.line);
-      doc.line(PAGE.margin + plot.left, originY + tick.y, PAGE.margin + plot.left + plot.width, originY + tick.y);
-      doc.text(printableText(tick.label), PAGE.margin + plot.left - 7, originY + tick.y + 2.5, { align: "right" });
+      doc.line(left + plot.left, originY + tick.y, left + plot.left + plot.width, originY + tick.y);
+      doc.text(printableText(tick.label), left + plot.left - 7, originY + tick.y + 2.5, { align: "right" });
     }
     doc.setDrawColor(...COLOR.line);
     for (const tick of xTicks) {
-      doc.line(PAGE.margin + tick.x, originY + plot.top, PAGE.margin + tick.x, originY + plot.top + plot.height);
-      doc.text(tick.label, PAGE.margin + tick.x, originY + plot.top + plot.height + 19, { align: "center" });
-      if (tick.dateLabel) doc.text(tick.dateLabel, PAGE.margin + tick.x, originY + plot.top + plot.height + 29, { align: "center" });
+      doc.line(left + tick.x, originY + plot.top, left + tick.x, originY + plot.top + plot.height);
+      doc.text(tick.label, left + tick.x, originY + plot.top + plot.height + (compact ? 15 : 19), { align: "center" });
+      if (tick.dateLabel) doc.text(tick.dateLabel, left + tick.x, originY + plot.top + plot.height + (compact ? 24 : 29), { align: "center" });
     }
     doc.setDrawColor(...COLOR.blue);
     doc.setLineWidth(1.1);
     doc.setLineDashPattern([], 0);
     for (const { from, to } of connections) {
-      doc.line(PAGE.margin + from.x, originY + from.y, PAGE.margin + to.x, originY + to.y);
+      doc.line(left + from.x, originY + from.y, left + to.x, originY + to.y);
     }
     if (extension) {
       doc.setLineDashPattern([4, 3], 0);
-      doc.line(PAGE.margin + extension.from.x, originY + extension.from.y,
-        PAGE.margin + extension.to.x, originY + extension.to.y);
+      doc.line(left + extension.from.x, originY + extension.from.y,
+        left + extension.to.x, originY + extension.to.y);
       doc.setLineDashPattern([], 0);
     }
     doc.setFillColor(...COLOR.blue);
-    points.forEach((point) => doc.circle(PAGE.margin + point.x, originY + point.y, 1.8, "F"));
+    points.forEach((point) => doc.circle(left + point.x, originY + point.y, compact ? 1.4 : 1.8, "F"));
     doc.setDrawColor(...COLOR.red);
     doc.setLineWidth(0.8);
     for (const point of invalidPoints.filter((item) => item.x !== null)) {
-      const x = PAGE.margin + point.x;
+      const x = left + point.x;
       const markerY = originY + plot.top + plot.height + 6;
       doc.line(x - 1.8, markerY - 1.8, x + 1.8, markerY + 1.8);
       doc.line(x - 1.8, markerY + 1.8, x + 1.8, markerY - 1.8);
     }
-    y += geometry.height;
-    paragraph(observationNote,
-      { size: 7.8, color: COLOR.muted, gap: 5, lineHeight: 11 });
-    paragraph(rangeNote,
-      { size: 7.8, color: COLOR.muted, gap: 12, lineHeight: 11 });
   }
   function setupPhoto(run, photo, data, properties, index, total) {
     page(`${run.name || "Test run"} - Setup`);
@@ -350,7 +380,7 @@ function reportWriter(doc) {
     y += boxHeight + 12;
     if (caption) paragraph(caption, { size: 9 });
   }
-  return { page, paragraph, heading, table, chart, ensure, setupPhoto };
+  return { page, paragraph, heading, table, chartGrid, setupPhoto };
 }
 
 async function runSetup(writer, doc, run, backend, onProgress) {
@@ -397,51 +427,64 @@ function parameterTable(writer, parameters, { heading = true } = {}) {
   }
 }
 
-function channelDetails(writer, channel, run, { heading = true, timeRange } = {}) {
-  if (heading) writer.heading(channel.symbolicName || channelLabel(channel));
-  writer.paragraph(`${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}${channel.role ? ` | ${channel.role}` : ""}`, { color: COLOR.muted });
+function channelDetails(writer, channel, run, { heading = true, charts } = {}) {
+  const details = `${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}${channel.role ? ` | ${channel.role}` : ""}`;
+  const name = channel.symbolicName || channelLabel(channel);
   const result = resultLabel(channel.status);
-  writer.paragraph(`Recorded wiring result: ${result}${channel.rawStatus ? ` (source: ${channel.rawStatus})` : ""}`, {
-    bold: true, color: result === "Failed" ? COLOR.red : result === "Passed" ? COLOR.green : COLOR.ink,
-  });
+  const wiring = `Recorded wiring result: ${result}${channel.rawStatus ? ` (source: ${channel.rawStatus})` : ""}`;
+  if (charts) {
+    writer.paragraph(`${heading ? `${name} | ` : ""}${details} | ${wiring}`, { size: 8.5, gap: 4, lineHeight: 11 });
+  } else {
+    if (heading) writer.heading(name);
+    writer.paragraph(details, { color: COLOR.muted });
+    writer.paragraph(wiring, {
+      bold: true, color: result === "Failed" ? COLOR.red : result === "Passed" ? COLOR.green : COLOR.ink,
+    });
+  }
   if (channel.comment) writer.paragraph(`Tester comment: ${channel.comment}`);
   parameterTable(writer, channel.parameters);
-  if (!channel.series?.some((series) => series.points?.length)) {
+  const populated = (channel.series || []).filter(series => series.points?.length);
+  if (!populated.length) {
     writer.paragraph("No dated observations were imported for this channel.", { color: COLOR.muted });
   }
-  for (const series of channel.series || []) {
-    if (!series.points?.length) continue;
-    writer.chart(series, run.clock, timeRange);
-    const invalid = series.points.filter((point) => point.excluded !== true && (point.valid === false || !Number.isFinite(point.value) || !Number.isFinite(point.timeMs)
-      || (series.kind === "digital" && point.value !== 0 && point.value !== 1)
-      || (point.previousRawValue !== undefined && point.previousRawValue !== "" && point.previousValue === null)));
-    if (invalid.length) {
-      writer.heading(`Invalid or unplottable values - ${series.name || "Recorded values"}`, 10);
-      writer.paragraph("Original tokens are retained below. Invalid after-values are excluded from the vertical scale; an invalid previous token does not invalidate a valid recorded after-value.", { size: 8, color: COLOR.muted });
-      writer.table([
-        { label: "Source time", width: 142 },
-        { label: "Before / after (original tokens)", width: 220 },
-        { label: "Source", width: WIDTH - 362 },
-      ], invalid.map((point) => [
-        point.time || formatSourceTime(point.timeMs, true),
-        `${point.previousRawValue ?? "Not recorded"} -> ${point.rawValue ?? "Not recorded"}`,
-        sourceLabel(run, point),
-      ]));
-    }
-    const removed = series.points.filter((point) => point.excluded === true);
-    if (removed.length) {
-      writer.heading(`Removed events - ${series.name || "Recorded values"}`, 10);
-      writer.paragraph("These events were removed from the active graphs. Their original values and source references are retained below for review, including events outside the displayed time range.", { size: 8, color: COLOR.muted });
-      writer.table([
-        { label: "Original source time", width: 142 },
-        { label: "Before / after (original tokens)", width: 220 },
-        { label: "Source", width: WIDTH - 362 },
-      ], removed.map((point) => [
-        point.time || formatSourceTime(point.timeMs, true),
-        `${point.previousRawValue ?? (Number.isFinite(point.previousValue) ? String(point.previousValue) : "Not recorded")} -> ${point.rawValue ?? (Number.isFinite(point.value) ? String(point.value) : "Not recorded")}`,
-        sourceLabel(run, point),
-      ]));
-    }
+  if (charts) {
+    charts.push(...populated);
+  } else for (const series of populated) {
+    writer.chartGrid([series], run.clock);
+    seriesAudit(writer, series, run);
+  }
+}
+
+function seriesAudit(writer, series, run) {
+  const invalid = series.points.filter((point) => point.excluded !== true && (point.valid === false || !Number.isFinite(point.value) || !Number.isFinite(point.timeMs)
+    || (series.kind === "digital" && point.value !== 0 && point.value !== 1)
+    || (point.previousRawValue !== undefined && point.previousRawValue !== "" && point.previousValue === null)));
+  if (invalid.length) {
+    writer.heading(`Invalid or unplottable values - ${series.name || "Recorded values"}`, 10);
+    writer.paragraph("Original tokens are retained below. Invalid after-values are excluded from the vertical scale; an invalid previous token does not invalidate a valid recorded after-value.", { size: 8, color: COLOR.muted });
+    writer.table([
+      { label: "Source time", width: 142 },
+      { label: "Before / after (original tokens)", width: 220 },
+      { label: "Source", width: WIDTH - 362 },
+    ], invalid.map((point) => [
+      point.time || formatSourceTime(point.timeMs, true),
+      `${point.previousRawValue ?? "Not recorded"} -> ${point.rawValue ?? "Not recorded"}`,
+      sourceLabel(run, point),
+    ]), { compact: true });
+  }
+  const removed = series.points.filter((point) => point.excluded === true);
+  if (removed.length) {
+    writer.heading(`Removed events - ${series.name || "Recorded values"}`, 10);
+    writer.paragraph("These events were removed from the active graphs. Their original values and source references are retained below for review, including events outside the displayed time range.", { size: 8, color: COLOR.muted });
+    writer.table([
+      { label: "Original source time", width: 142 },
+      { label: "Before / after (original tokens)", width: 220 },
+      { label: "Source", width: WIDTH - 362 },
+    ], removed.map((point) => [
+      point.time || formatSourceTime(point.timeMs, true),
+      `${point.previousRawValue ?? (Number.isFinite(point.previousValue) ? String(point.previousValue) : "Not recorded")} -> ${point.rawValue ?? (Number.isFinite(point.value) ? String(point.value) : "Not recorded")}`,
+      sourceLabel(run, point),
+    ]), { compact: true });
   }
 }
 
@@ -530,7 +573,8 @@ function runAppendices(writer, run) {
 
 function drawFooters(doc, project, closedAt) {
   const count = doc.getNumberOfPages();
-  for (let page = 1; page <= count; page += 1) {
+  drawReportFooter(doc, project, closedAt, 1, count);
+  for (let page = 2; page <= count; page += 1) {
     doc.setPage(page);
     textStyle(doc, 7.5, false, COLOR.muted);
     const label = `Page ${page} of ${count}`;
@@ -588,22 +632,25 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
     if (backend.walkdownId && backend.walkdownId !== project.walkdownId)
       throw new Error("The photo connection belongs to another skid.");
   }
-  onProgress("Loading test report fonts...");
-  const [regular, bold] = await Promise.all([reportFont("NotoSans-Regular.ttf"), reportFont("NotoSans-Bold.ttf")]);
+  onProgress("Loading test report assets...");
+  const [regular, bold, logo] = await Promise.all([
+    reportFont("NotoSans-Regular.ttf"), reportFont("NotoSans-Bold.ttf"), loadReportLogo(),
+  ]);
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "letter", compress: true });
   doc.addFileToVFS("NotoSans-Regular.ttf", regular);
   doc.addFont("NotoSans-Regular.ttf", "NotoSans", "normal");
   doc.addFileToVFS("NotoSans-Bold.ttf", bold);
   doc.addFont("NotoSans-Bold.ttf", "NotoSans", "bold");
+  doc._reportBoldFont = true;
   doc.setCreationDate(`D:${closedAt.toISOString().replace(/[-:T]/g, "").slice(0, 14)}+00'00'`);
   doc.setProperties({
     title: `I/O test report - ${printableText(project.skidName)} - Revision ${project.revision}`,
     subject: `Approved QC revision ${project.revision}; recorded I/O wiring results and logged observations`,
     author: "Jeevy Fabrication", creator: "Jeevy DCS QC Report",
   });
+  drawCover(doc, { ...project, skidName: project.skidName.trim().replace(/\s+/g, " ") }, closedAt, logo, "Test Result");
   const writer = reportWriter(doc);
-  writer.page("I/O test report", true);
-  writer.paragraph(`QC report - ${project.skidName}`, { size: 21, bold: true, gap: 14 });
+  writer.page("I/O test report");
   writer.paragraph(`Revision ${project.revision} - Approved and closed`, { size: 13, bold: true });
   writer.paragraph(`Approved: ${dateLabel(closedAt)}${project.closedByName ? ` | By: ${project.closedByName}` : ""}`);
   writer.paragraph(`${runs.length} saved test run(s) included. This export reflects the locked QC revision.`, { color: COLOR.muted, gap: 18 });
@@ -621,10 +668,17 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       writer.paragraph(`Test run: ${run.name || "Test run"} | Software: ${run.software.name} ${run.software.version}`, { size: 8.5, color: COLOR.muted });
       if (device.channels.length > 1) writer.paragraph(`Recorded wiring result: ${resultLabel(device.status)}`, { bold: true });
       reportComment(writer, "Device comment", device.comment);
+      const charts = [];
       for (const channel of device.channels) channelDetails(writer, channel, run, {
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,
-        timeRange: deviceTimeRanges.get(device),
+        charts,
       });
+      if (charts.length > 1) writer.paragraph(
+        `Shared run span: ${rangeLabel(run.clock)}. ${clockLabel(run.clock)}. Dots show recorded readings. Dashed tails hold the last value.`,
+        { size: 7.8, color: COLOR.muted, gap: 5 },
+      );
+      writer.chartGrid(charts, run.clock, deviceTimeRanges.get(device));
+      for (const series of charts) seriesAudit(writer, series, run);
     }
     runAppendices(writer, run);
   }
