@@ -1,6 +1,6 @@
 import { jsPDF } from "jspdf";
 import { approvedReportDate, fitImageInBox, printableText } from "./report.js";
-import { buildTestChart, formatSourceTime } from "./test-chart.js";
+import { buildDeviceTestChart, buildTestChart, formatSourceTime } from "./test-chart.js";
 import { importNoteClarification } from "./proneta-notes.js";
 
 const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 548 };
@@ -254,12 +254,14 @@ function reportWriter(doc) {
     }
     y += 12;
   }
-  function chart(series, clock) {
-    const geometry = buildTestChart(series, clock, {
+  function chart(device, clock, stations) {
+    const geometry = buildDeviceTestChart(device, clock, {
       width: WIDTH, height: 201, padding: { left: 57, right: 25, top: 20, bottom: 45 },
+      stations,
     });
-    const title = `${series.name || "Recorded values"} - ${geometry.unit}`;
-    const observationNote = `${geometry.observedCount} observed change(s)${geometry.invalidCount ? `; ${geometry.invalidCount} invalid reading(s), marked below the plot when dated` : ""}. ${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the graph end.`;
+    if (!geometry) return;
+    const title = "Recorded values - shared time axis";
+    const observationNote = `${geometry.observedCount} observed change(s)${geometry.invalidCount ? `; ${geometry.invalidCount} invalid reading(s), marked below the plot when dated` : ""}. Lines and steps connect recorded changes; dashed tail holds the last value to the graph end.`;
     const rangeNote = `Graph span: ${rangeLabel(geometry.domain)}. Shared run span: ${rangeLabel(clock)}. ${clockLabel(clock)}.`;
     const heightFor = (value, size, lineHeight, gap) => {
       textStyle(doc, size);
@@ -269,37 +271,49 @@ function reportWriter(doc) {
       + heightFor(observationNote, 7.8, 11, 5) + heightFor(rangeNote, 7.8, 11, 12));
     heading(title, 10);
     const originY = y;
-    const { plot, points, invalidPoints, xTicks, yTicks, connections, extension } = geometry;
+    const { plot, xTicks, axes, traces } = geometry;
     doc.setLineWidth(0.35);
+    doc.setLineDashPattern([], 0);
     textStyle(doc, 7.5, false, COLOR.muted);
-    for (const tick of yTicks) {
-      doc.setDrawColor(...COLOR.line);
-      doc.line(PAGE.margin + plot.left, originY + tick.y, PAGE.margin + plot.left + plot.width, originY + tick.y);
-      doc.text(printableText(tick.label), PAGE.margin + plot.left - 7, originY + tick.y + 2.5, { align: "right" });
-    }
     doc.setDrawColor(...COLOR.line);
+    for (const tick of axes[0].yTicks) {
+      doc.line(PAGE.margin + plot.left, originY + tick.y, PAGE.margin + plot.left + plot.width, originY + tick.y);
+    }
+    for (const axis of axes) {
+      const x = PAGE.margin + axis.x;
+      const direction = axis.side === "left" ? -1 : 1;
+      const align = axis.side === "left" ? "right" : "left";
+      doc.line(x, originY + plot.top, x, originY + plot.top + plot.height);
+      doc.text(printableText(axis.unit), x + direction * 7, originY + plot.top - 8, { align });
+      for (const tick of axis.yTicks) {
+        doc.line(x, originY + tick.y, x + direction * 3, originY + tick.y);
+        doc.text(printableText(tick.label), x + direction * 7, originY + tick.y + 2.5, { align });
+      }
+    }
     for (const tick of xTicks) {
       doc.line(PAGE.margin + tick.x, originY + plot.top, PAGE.margin + tick.x, originY + plot.top + plot.height);
       doc.text(tick.label, PAGE.margin + tick.x, originY + plot.top + plot.height + 19, { align: "center" });
       if (tick.dateLabel) doc.text(tick.dateLabel, PAGE.margin + tick.x, originY + plot.top + plot.height + 29, { align: "center" });
     }
-    doc.setDrawColor(...COLOR.blue);
-    doc.setLineWidth(1.1);
-    doc.setLineDashPattern([], 0);
-    for (const { from, to } of connections) {
-      doc.line(PAGE.margin + from.x, originY + from.y, PAGE.margin + to.x, originY + to.y);
-    }
-    if (extension) {
-      doc.setLineDashPattern([4, 3], 0);
-      doc.line(PAGE.margin + extension.from.x, originY + extension.from.y,
-        PAGE.margin + extension.to.x, originY + extension.to.y);
+    for (const trace of traces) {
+      doc.setDrawColor(trace.color);
+      doc.setLineWidth(1.1);
+      doc.setLineDashPattern(trace.dash, 0);
+      for (const { from, to } of trace.connections) {
+        doc.line(PAGE.margin + from.x, originY + from.y, PAGE.margin + to.x, originY + to.y);
+      }
+      if (trace.extension) {
+        doc.setLineDashPattern([4, 3], 0);
+        doc.line(PAGE.margin + trace.extension.from.x, originY + trace.extension.from.y,
+          PAGE.margin + trace.extension.to.x, originY + trace.extension.to.y);
+      }
       doc.setLineDashPattern([], 0);
+      doc.setFillColor(trace.color);
+      trace.points.forEach((point) => doc.circle(PAGE.margin + point.x, originY + point.y, 1.8, "F"));
     }
-    doc.setFillColor(...COLOR.blue);
-    points.forEach((point) => doc.circle(PAGE.margin + point.x, originY + point.y, 1.8, "F"));
     doc.setDrawColor(...COLOR.red);
     doc.setLineWidth(0.8);
-    for (const point of invalidPoints.filter((item) => item.x !== null)) {
+    for (const point of traces.flatMap((trace) => trace.invalidPoints).filter((item) => item.x !== null)) {
       const x = PAGE.margin + point.x;
       const markerY = originY + plot.top + plot.height + 6;
       doc.line(x - 1.8, markerY - 1.8, x + 1.8, markerY + 1.8);
@@ -310,6 +324,32 @@ function reportWriter(doc) {
       { size: 7.8, color: COLOR.muted, gap: 5, lineHeight: 11 });
     paragraph(rangeNote,
       { size: 7.8, color: COLOR.muted, gap: 12, lineHeight: 11 });
+    heading("Legend", 9);
+    for (const trace of traces) {
+      textStyle(doc, 8.2);
+      const lines = printableText(trace.label).split("\n")
+        .flatMap((line) => doc.splitTextToSize(line || " ", WIDTH - 27));
+      for (let index = 0; index < lines.length; index += 1) {
+        ensure(11.6);
+        if (index === 0) {
+          // Filled rectangles preserve dash identity without adding data-line operators.
+          doc.setFillColor(trace.color);
+          let offset = 0, segment = 0;
+          const pattern = trace.dash.length ? trace.dash : [19];
+          while (offset < 19) {
+            const width = Math.min(pattern[segment % pattern.length], 19 - offset);
+            if (segment % 2 === 0) doc.rect(PAGE.margin + offset, y + 3, width, 5, "F");
+            offset += width;
+            segment += 1;
+          }
+        }
+        textStyle(doc, 8.2);
+        doc.text(lines[index], PAGE.margin + 27, y + 8.2);
+        y += 11.6;
+      }
+      y += 4;
+    }
+    y += 8;
   }
   function setupPhoto(run, photo, data, properties, index, total) {
     page(`${run.name || "Test run"} - Setup`);
@@ -387,7 +427,6 @@ function channelDetails(writer, channel, run, { heading = true } = {}) {
   }
   for (const series of channel.series || []) {
     if (!series.points?.length) continue;
-    writer.chart(series, run.clock);
     const invalid = series.points.filter((point) => point.valid === false || !Number.isFinite(point.value) || !Number.isFinite(point.timeMs)
       || (series.kind === "digital" && point.value !== 0 && point.value !== 1)
       || (point.previousRawValue !== undefined && point.previousRawValue !== "" && point.previousValue === null));
@@ -411,7 +450,7 @@ function runSummary(writer, run) {
   writer.page(run.name || "Test run");
   writer.paragraph(`Software: ${run.software.name} | Version: ${run.software.version}`, { size: 11, bold: true });
   writer.paragraph(`Run time span: ${rangeLabel(run.clock)}`);
-  writer.paragraph(`Clock: ${clockLabel(run.clock)}. Each graph automatically fits its recorded time range within this run.`, { color: COLOR.muted });
+  writer.paragraph(`Clock: ${clockLabel(run.clock)}. One graph per device shares a time axis across its recorded values. Different units keep separate scales. Each device graph fits its recorded time range within this run.`, { color: COLOR.muted });
   writer.paragraph("Recorded wiring results are the tester's entries in PRONETA. Logged values alone do not establish a functional pass.", { color: COLOR.muted });
   writer.table([
     { label: "Device name", width: 300 },
@@ -435,7 +474,11 @@ function runAppendices(writer, run) {
     ], run.unassignedChannels.map((channel) => [stationName(run, channel.stationId),
       `${channel.slot ?? "?"} / ${channelLabel(channel)}`, channel.symbolicName || "Unassigned", resultLabel(channel.status)]));
     for (const channel of run.unassignedChannels) {
-      if (channel.series?.some((series) => series.points?.length)) channelDetails(writer, channel, run);
+      if (channel.series?.some((series) => series.points?.length)) {
+        writer.heading(channel.symbolicName || channelLabel(channel));
+        writer.chart({ name: channel.symbolicName || "Unassigned channel", channels: [channel] }, run.clock, run.stations);
+        channelDetails(writer, channel, run, { heading: false });
+      }
       else if (channel.parameters?.length || channel.comment) {
         writer.heading(`${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "?"} | ${channelLabel(channel)} | ${channel.symbolicName || "Unassigned"}`, 9);
         if (channel.comment) writer.paragraph(`Tester comment: ${channel.comment}`, { size: 8 });
@@ -557,7 +600,7 @@ export async function createTestReportPdf({ state, runId = null, backend, onProg
     { label: "Test run", width: 260 }, { label: "Software / version", width: 290 },
     { label: "Named devices", width: WIDTH - 550 },
   ], runs.map((run) => [run.name || "Test run", `${run.software.name}\n${run.software.version}`, run.devices.length]));
-  writer.paragraph("Results, parameter selections, and logged changes are grouped by device name. Each run uses one common graph time span. Passed and Failed refer to the tester-recorded wiring result; a plotted value does not create a pass result.", { color: COLOR.muted });
+  writer.paragraph("Results, parameter selections, and logged changes are grouped by device name. One graph per device shares a time axis across its recorded values; different units keep separate scales. Passed and Failed refer to the tester-recorded wiring result; a plotted value does not create a pass result.", { color: COLOR.muted });
   for (const run of runs) {
     onProgress(`Building ${run.name || "test run"}...`);
     runSummary(writer, run);
@@ -566,6 +609,7 @@ export async function createTestReportPdf({ state, runId = null, backend, onProg
       writer.page(device.name);
       writer.paragraph(`Test run: ${run.name || "Test run"} | Software: ${run.software.name} ${run.software.version}`, { size: 8.5, color: COLOR.muted });
       if (device.channels.length > 1) writer.paragraph(`Recorded wiring result: ${resultLabel(device.status)}`, { bold: true });
+      writer.chart(device, run.clock, run.stations);
       for (const channel of device.channels) channelDetails(writer, channel, run, {
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,
       });

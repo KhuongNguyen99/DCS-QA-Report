@@ -79,7 +79,7 @@ async function setupPhoto(h, walkdownId, runId, revision, userId = admin) {
 
 test("functional test imports preserve old snapshots and share explicit approval/revision locks", async (t) => {
   const beforeImports = schema.split("-- PRONETA test report layer;")[0]
-    .replace("    'testRuns', qa_private.test_runs_state(p_walkdown_id),\n", "") + "commit;";
+    .replace(/    'testRuns', qa_private\.test_runs_state\(p_walkdown_id\),\r?\n/, "") + "commit;";
   const h = await database(t, beforeImports);
   const report = await h.rpc("qa_create_walkdown", "Functional test skid");
   const original = await h.state(report.id);

@@ -16,6 +16,29 @@ export function formatTestValue(value) {
   return Number(value.toPrecision(7)).toString();
 }
 
+function defaultValueRange(series) {
+  const unit = String(series.unit || "").replace(/\s+/g, "").toLowerCase();
+  const signalName = String(series.name || "").replace(/\s+/g, "");
+  return unit === "ma" && /(?:[-_]POS$|^(?:PD|DP)-)/i.test(signalName)
+    ? [0, 25] : unit === "°c" ? [20, 30] : null;
+}
+
+function valueRange(kind, points, defaultRange) {
+  if (kind === "digital") return { min: 0, max: 1 };
+  if (!points.length && !defaultRange) return { min: 0, max: 1 };
+  let min = defaultRange?.[0] ?? Infinity;
+  let max = defaultRange?.[1] ?? -Infinity;
+  for (const point of points) {
+    min = Math.min(min, point.value);
+    max = Math.max(max, point.value);
+  }
+  const margin = min === max ? Math.max(Math.abs(min) * 0.05, 0.1) : (max - min) * 0.08;
+  // Keep the standard frame unless a valid observation needs more room.
+  if (!defaultRange || min < defaultRange[0]) min -= margin;
+  if (!defaultRange || max > defaultRange[1]) max += margin;
+  return { min, max };
+}
+
 /**
  * Geometry shared by the SVG preview and vector PDF chart. The run-wide clock
  * validates timestamps; each graph fits its own dated observations. Dots stay
@@ -26,6 +49,7 @@ export function buildTestChart(series, clock, {
   width = 700, height = 220,
   padding = { left: 62, right: 22, top: 20, bottom: 48 },
   tickCount = 5,
+  sharedDomain = null,
 } = {}) {
   const runStartMs = clock?.startMs;
   const runEndMs = clock?.endMs;
@@ -45,6 +69,13 @@ export function buildTestChart(series, clock, {
     const margin = Math.max((lastMs - firstMs) * 0.04, 1000);
     startMs = Math.max(runStartMs, firstMs - margin);
     endMs = Math.min(runEndMs, lastMs + margin);
+  }
+  if (sharedDomain) {
+    const { startMs: start, endMs: end } = sharedDomain;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start
+      || start < runStartMs || end > runEndMs || start > firstMs || end < lastMs)
+      throw new Error("A shared graph time range must contain every dated observation within the run.");
+    startMs = start; endMs = end;
   }
   const { left, right, top, bottom } = padding;
   if (![width, height, left, right, top, bottom].every(Number.isFinite)
@@ -77,26 +108,13 @@ export function buildTestChart(series, clock, {
       sequence.push(candidate);
     }
   }
-  let min;
-  let max;
-  const unit = String(series.unit || "").replace(/\s+/g, "").toLowerCase();
-  const signalName = String(series.name || "").replace(/\s+/g, "");
-  const defaultRange = unit === "ma" && /(?:[-_]POS$|^(?:PD|DP)-)/i.test(signalName)
-    ? [0, 25] : unit === "°c" ? [20, 30] : null;
-  if (series.kind === "digital") {
-    min = 0; max = 1;
-  } else if (valid.length || defaultRange) {
-    min = defaultRange?.[0] ?? Infinity; max = defaultRange?.[1] ?? -Infinity;
-    for (const point of valid) {
-      min = Math.min(min, point.value);
-      max = Math.max(max, point.value);
-    }
-    const margin = min === max ? Math.max(Math.abs(min) * 0.05, 0.1) : (max - min) * 0.08;
-    // Keep the standard frame unless a valid observation needs more room.
-    if (!defaultRange || min < defaultRange[0]) min -= margin;
-    if (!defaultRange || max > defaultRange[1]) max += margin;
-  } else {
-    min = 0; max = 1;
+  let { min, max } = valueRange(series.kind, valid, defaultValueRange(series));
+  if (sharedDomain) {
+    const { min: lower, max: upper } = sharedDomain;
+    if (!Number.isFinite(lower) || !Number.isFinite(upper) || upper <= lower
+      || valid.some(point => point.value < lower || point.value > upper))
+      throw new Error("A shared graph value range must contain every valid observation.");
+    min = lower; max = upper;
   }
   const yFor = (value) => top + (max - value) / (max - min) * plot.height;
   const points = valid.map((point) => ({ ...point, y: yFor(point.value) }));
@@ -144,4 +162,69 @@ export function buildTestChart(series, clock, {
     observedCount: valid.length,
     invalidCount: invalid.length,
   };
+}
+
+/** Combine display geometry only; channel records and source series stay intact. */
+export function buildDeviceTestChart(device, clock, options = {}) {
+  const entries = (device.channels || []).flatMap(channel => (channel.series || [])
+    .filter(series => series.points?.length).map(series => ({ channel, series })));
+  if (!entries.length) return null;
+  const groups = new Map();
+  for (const entry of entries) {
+    const kind = entry.series.kind === "digital" ? "digital" : "analog";
+    const unit = kind === "digital" ? "State" : String(entry.series.unit || "").trim() || "Recorded value";
+    const key = `${kind}:${unit.replace(/\s+/g, "")}`;
+    if (!groups.has(key)) groups.set(key, { id: key, kind, unit, points: [], defaultRange: null });
+    entry.axisId = key;
+  }
+  const axes = [...groups.values()].sort((a, b) => (a.kind === "digital") - (b.kind === "digital"));
+  const width = options.width ?? 700;
+  const padding = options.padding ?? { left: 62, right: 22, top: 20, bottom: 48 };
+  const axisGap = Math.max(0, Math.min(64, (width - padding.left - padding.right - 200) / Math.max(1, axes.length - 1)));
+  const layout = { ...options, padding: { ...padding, right: padding.right + axisGap * (axes.length - 1) } };
+  let startMs = Infinity, endMs = -Infinity;
+  for (const entry of entries) {
+    const chart = buildTestChart(entry.series, clock, layout);
+    const axis = groups.get(entry.axisId);
+    for (const point of chart.points) axis.points.push(point);
+    axis.defaultRange ||= defaultValueRange(entry.series);
+    if (entry.series.points.some(point => Number.isFinite(point.timeMs))) {
+      startMs = Math.min(startMs, chart.domain.startMs);
+      endMs = Math.max(endMs, chart.domain.endMs);
+    }
+    entry.name = entry.series.name || entry.channel.symbolicName || "Recorded values";
+    entry.label = `${entry.name} (${axis.unit})`;
+  }
+  for (const axis of axes) Object.assign(axis, valueRange(axis.kind, axis.points, axis.defaultRange));
+  if (startMs === Infinity) { startMs = clock.startMs; endMs = clock.endMs; }
+  const shared = buildTestChart({ points: [] }, { ...clock, startMs, endMs }, layout);
+  const labels = new Map();
+  for (const entry of entries) labels.set(entry.label, (labels.get(entry.label) || 0) + 1);
+  const colors = ["#186ca1", "#1f6939", "#8c4aa5", "#b66b08", "#00818a", "#a33f61", "#596b28", "#66524a"];
+  const patterns = [[], [8, 3], [2, 3], [8, 3, 2, 3]];
+  const traces = entries.map((entry, index) => {
+    const axis = groups.get(entry.axisId);
+    const chart = buildTestChart(entry.series, clock, { ...layout, sharedDomain: { startMs, endMs, min: axis.min, max: axis.max } });
+    const { channel } = entry;
+    const station = options.stations?.find(item => item.id === channel.stationId)?.name || channel.stationId || "Station unspecified";
+    const label = labels.get(entry.label) > 1
+      ? `${entry.label} · ${station}, slot ${channel.slot ?? "?"}, channel ${channel.channel ?? "?"}`
+      : entry.label;
+    return { ...chart, ...entry, label, unit: axis.unit, kind: axis.kind,
+      id: `${channel.id || "channel"}:${entry.series.id || "series"}:${index}`,
+      color: colors[index % colors.length], dash: patterns[Math.floor(index / colors.length) % patterns.length] };
+  });
+  const chartAxes = axes.map((axis, index) => {
+    const values = axis.kind === "digital" ? [0, 1]
+      : Array.from({ length: 5 }, (_, tick) => axis.min + (axis.max - axis.min) * tick / 4);
+    return { id: axis.id, kind: axis.kind, unit: axis.unit, min: axis.min, max: axis.max,
+      side: index === 0 ? "left" : "right",
+      x: index === 0 ? shared.plot.left : shared.plot.left + shared.plot.width + (index - 1) * axisGap,
+      yTicks: values.map(value => ({ value, label: formatTestValue(value),
+        y: shared.plot.top + (axis.max - value) / (axis.max - axis.min) * shared.plot.height })) };
+  });
+  return { width: shared.width, height: shared.height, plot: shared.plot, domain: { startMs, endMs },
+    xTicks: shared.xTicks, axes: chartAxes, traces,
+    observedCount: traces.reduce((sum, trace) => sum + trace.observedCount, 0),
+    invalidCount: traces.reduce((sum, trace) => sum + trace.invalidCount, 0) };
 }

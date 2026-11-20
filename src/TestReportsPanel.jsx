@@ -3,7 +3,7 @@ import Icon from "./Icons.jsx";
 import TestSetupPhotos from "./TestSetupPhotos.jsx";
 import { parsePronetaFiles } from "./proneta-parser.js";
 import { importNoteClarification } from "./proneta-notes.js";
-import { buildTestChart, formatSourceTime, formatTestValue } from "./test-chart.js";
+import { buildDeviceTestChart, formatSourceTime, formatTestValue } from "./test-chart.js";
 import "./test-reports.css";
 
 const statusClass = (status) => status === "Passed" ? "passed" : status === "Failed" ? "failed" : "untested";
@@ -16,53 +16,73 @@ function TestStatus({ status }) {
   return <span className={`test-status ${statusClass(status)}`}>{status || "Not tested"}</span>;
 }
 
-export function TestSeriesChart({ series, clock }) {
+export function TestDeviceChart({ device, clock, stations }) {
   let chart;
-  try { chart = buildTestChart(series, clock); }
+  try { chart = buildDeviceTestChart(device, clock, { stations }); }
   catch (e) { return <p className="field-error">{e.message}</p>; }
+  if (!chart) return null;
   const { plot } = chart;
   const graphClock = { ...clock, startMs: chart.domain.startMs, endMs: chart.domain.endMs };
+  const eventCount = chart.traces.reduce((sum, trace) => sum + trace.series.points.length, 0);
   return (
     <figure className="test-chart">
-      <figcaption><strong>{series.name}</strong><span>{chart.unit}</span></figcaption>
+      <figcaption><strong>{device.name}</strong><span>{chart.traces.length} signal{chart.traces.length === 1 ? "" : "s"}</span></figcaption>
+      <ul className="test-chart-legend" aria-label="Signal legend">
+        {chart.traces.map(trace => <li key={trace.id}>
+          <svg className="test-legend-key" viewBox="0 0 32 10" aria-hidden="true">
+            <line x1={1} y1={5} x2={31} y2={5} stroke={trace.color} strokeWidth={2} strokeDasharray={trace.dash.join(" ")} />
+          </svg><span>{trace.label}</span>
+        </li>)}
+      </ul>
       <div className="test-chart-scroll">
         <svg viewBox={`0 0 ${chart.width} ${chart.height}`} role="img"
-          aria-label={`${series.name}: ${chart.observedCount} recorded values, ${describeTime(graphClock)}`}
+          aria-label={`${device.name}: ${chart.traces.length} signals, ${chart.observedCount} recorded values, ${describeTime(graphClock)}`}
           data-time-start={chart.domain.startMs} data-time-end={chart.domain.endMs}>
-          {chart.yTicks.map((tick, index) => <g key={`y-${index}`}>
-            <line x1={plot.left} y1={tick.y} x2={plot.left + plot.width} y2={tick.y} className="test-gridline" />
-            <text x={plot.left - 8} y={tick.y + 4} textAnchor="end">{tick.label}</text>
+          {chart.axes[0].yTicks.map((tick, index) => <line key={`grid-${index}`}
+            x1={plot.left} y1={tick.y} x2={plot.left + plot.width} y2={tick.y} className="test-gridline" />)}
+          {chart.axes.map(axis => <g key={axis.id} className="test-value-axis" data-unit={axis.unit}>
+            <line x1={axis.x} y1={plot.top} x2={axis.x} y2={plot.top + plot.height} className="test-axis-line" />
+            <text x={axis.x + (axis.side === "left" ? -8 : 8)} y={plot.top - 8}
+              textAnchor={axis.side === "left" ? "end" : "start"}>{axis.unit}</text>
+            {axis.yTicks.map((tick, index) => <text key={index}
+              x={axis.x + (axis.side === "left" ? -8 : 8)} y={tick.y + 4}
+              textAnchor={axis.side === "left" ? "end" : "start"}>{tick.label}</text>)}
           </g>)}
           {chart.xTicks.map((tick, index) => <g key={`x-${index}`}>
             <line x1={tick.x} y1={plot.top} x2={tick.x} y2={plot.top + plot.height} className="test-gridline" />
             <text x={tick.x} y={plot.top + plot.height + 21} textAnchor="middle">{tick.label}</text>
             {tick.dateLabel && <text x={tick.x} y={plot.top + plot.height + 37} textAnchor="middle">{tick.dateLabel}</text>}
           </g>)}
-          {chart.connections.map((segment, index) => <line key={`trace-${index}`}
-            x1={segment.from.x} y1={segment.from.y} x2={segment.to.x} y2={segment.to.y} className="test-trace" />)}
-          {chart.extension && <line x1={chart.extension.from.x} y1={chart.extension.from.y}
-            x2={chart.extension.to.x} y2={chart.extension.to.y} className="test-held-value">
-            <title>Last recorded value held to the end of the graph</title>
-          </line>}
-          {chart.points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={3} className="test-observation">
-            <title>{formatSourceTime(point.timeMs, true)}: {formatTestValue(point.value)} {series.unit} · source row {point.sourceRow}</title>
-          </circle>)}
-          {chart.invalidPoints.filter(point => point.x !== null).map((point, index) =>
-            <path key={`invalid-${index}`} d={`M${point.x - 4} ${plot.top + plot.height - 4}l8 8m-8 0l8 -8`} className="test-invalid-observation">
-              <title>{point.time}: invalid reading {point.rawValue}</title>
-            </path>)}
+          {chart.traces.map(trace => <g key={trace.id} className="test-signal" data-signal={trace.label}
+            style={{ "--test-trace-color": trace.color }}>
+            {trace.connections.map((segment, index) => <line key={`trace-${index}`}
+              x1={segment.from.x} y1={segment.from.y} x2={segment.to.x} y2={segment.to.y}
+              className="test-trace" strokeDasharray={trace.dash.join(" ")} />)}
+            {trace.extension && <line x1={trace.extension.from.x} y1={trace.extension.from.y}
+              x2={trace.extension.to.x} y2={trace.extension.to.y} className="test-held-value">
+              <title>{trace.label}: last recorded value held to the end of the graph</title>
+            </line>}
+            {trace.points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={3} className="test-observation">
+              <title>{trace.label}: {formatSourceTime(point.timeMs, true)}: {formatTestValue(point.value)} {trace.unit} · source row {point.sourceRow}</title>
+            </circle>)}
+            {trace.invalidPoints.filter(point => point.x !== null).map((point, index) =>
+              <path key={`invalid-${index}`} d={`M${point.x - 4} ${plot.top + plot.height - 4}l8 8m-8 0l8 -8`} className="test-invalid-observation">
+                <title>{trace.label}: {point.time || formatSourceTime(point.timeMs, true)}: invalid reading {point.rawValue}</title>
+              </path>)}
+          </g>)}
         </svg>
       </div>
-      <p>{chart.observedCount} recorded change values{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. The time axis automatically fits this series{clock.basis === "absolute" ? " in UTC" : ""}.</p>
-      <details className="test-events"><summary>View recorded events ({series.points.length})</summary>
+      <p>{chart.observedCount} recorded change values{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}. Lines connect analog readings; steps connect digital states. Dashed tails hold final values to the graph end. Signals share this device's time axis{clock.basis === "absolute" ? " in UTC" : ""}; different units use separate vertical scales.</p>
+      <details className="test-events"><summary>View recorded events ({eventCount})</summary>
         <div className="test-table-scroll"><table>
-          <thead><tr><th>Source time</th><th>Previous</th><th>Recorded value</th><th>Source row</th></tr></thead>
-          <tbody>{series.points.map((point, index) => <tr key={index}>
+          <thead><tr><th>Signal</th><th>Source time</th><th>Previous</th><th>Recorded value</th><th>Source row</th></tr></thead>
+          <tbody>{chart.traces.flatMap(trace => trace.series.points.map((point, index) => <tr key={`${trace.id}:${index}`}>
+            <td>{trace.label}</td>
             <td>{point.time || formatSourceTime(point.timeMs, true)}</td>
             <td>{point.previousRawValue ?? formatTestValue(point.previousValue)}</td>
             <td>{point.rawValue ?? formatTestValue(point.value)}{point.valid === false && " (invalid)"}</td>
             <td>{point.sourceRow}</td>
-          </tr>)}</tbody>
+          </tr>))}</tbody>
         </table></div>
       </details>
     </figure>
@@ -118,6 +138,7 @@ export function TestRunDetail({ run }) {
       <section className="test-device-content" aria-label="Device test results">
         {device ? <>
           <div className="test-device-heading"><h3>{device.name}</h3><TestStatus status={device.status} /></div>
+          <TestDeviceChart device={device} clock={run.clock} stations={run.stations} />
           {(device.channels || []).map(channel => {
             const station = run.stations?.find(item => item.id === channel.stationId);
             const module = station?.modules?.find(item => item.slot === channel.slot);
@@ -127,8 +148,7 @@ export function TestRunDetail({ run }) {
                   {channel.sourceChannel !== channel.channel && ` (CSV channel ${channel.sourceChannel})`} · {channel.role}</p>
                 {module?.name && <small>{module.name}</small>}</div><TestStatus status={channel.status} /></div>
               <p className="test-source-result">Recorded wiring status: <strong>{channel.rawStatus || "Not recorded"}</strong>{channel.comment ? ` · ${channel.comment}` : ""}</p>
-              {(channel.series || []).map(series => <TestSeriesChart key={series.id} series={series} clock={run.clock} />)}
-              {!channel.series?.length && <p className="test-muted">No signal changes were recorded for this channel in the supplied logs.</p>}
+              {!channel.series?.some(series => series.points?.length) && <p className="test-muted">No signal changes were recorded for this channel in the supplied logs.</p>}
               <Parameters parameters={channel.parameters} />
               {module?.parameters?.length > 0 && <Parameters parameters={module.parameters} title="Shared module parameters" />}
             </section>;

@@ -145,6 +145,23 @@ function pdfLines(stream) {
   return result;
 }
 
+function pdfFilledRects(stream) {
+  let color = [], rectangles = [];
+  const result = [];
+  for (const line of stream.split(/\r?\n/)) {
+    const tokens = line.trim().split(/\s+/);
+    const operator = tokens.at(-1);
+    if (operator === "rg" && tokens.length === 4) color = tokens.slice(0, 3).map(Number);
+    else if (operator === "re" && tokens.length === 5)
+      rectangles.push({ x: +tokens[0], y: 612 - Number(tokens[1]), width: +tokens[2], height: Math.abs(Number(tokens[3])) });
+    else if (["f", "F", "f*"].includes(operator)) {
+      result.push(...rectangles.map(rectangle => ({ ...rectangle, color: [...color] })));
+      rectangles = [];
+    } else if (["S", "n"].includes(operator)) rectangles = [];
+  }
+  return result;
+}
+
 async function withFonts(callback) {
   const original = globalThis.fetch;
   const requested = [];
@@ -495,5 +512,125 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
       && line.color.every((value, index) => Math.abs(value - [170, 49, 43][index] / 255) < 0.005));
     assert.ok(red.length > 0);
     assert.ok(red.every(line => line.dash.length === 0), "held-tail dash style must not leak into invalid-value markers");
+  });
+});
+
+test("PDF combines all device channels with matching legends and independent unit scales", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const point = (offset, value, extra = {}) => ({
+      timeMs: startMs + offset, time: "Original source timestamp", value, valid: value !== null,
+      rawValue: String(value), previousValue: 0, previousRawValue: "0", sourceId: "source-log", sourceRow: 21, ...extra,
+    });
+    const channel = (id, series) => ({
+      id, symbolicName: "Combined device", stationId: "station-1", slot: 3, sourceChannel: `Channel ${id}`,
+      status: "Not tested", parameters: [], series,
+    });
+    run.devices = [{ id: "combined", name: "Combined device", status: "Not tested", channels: [
+      channel(1, [{ id: "position", name: "VLV-900-POS", kind: "analog", unit: "mA", points: [point(0, 0), point(100_000, 25)] },
+        { id: "pressure", name: "PD-900", kind: "analog", unit: "mA", points: [point(50_000, 0), point(150_000, 25)] }]),
+      channel(2, [{ id: "state", name: "Valve output", kind: "digital", unit: "", points: [point(25_000, 1), point(125_000, 0)] }]),
+      channel(3, [{ id: "temperature", name: "Temperature evidence", kind: "analog", unit: "°C", points: [
+        point(100_000, 20), point(200_000, 30), point(210_000, null, { rawValue: "BAD-TEMP", sourceRow: 47 }), point(220_000, 24),
+      ] }]),
+    ] }];
+    run.unassignedChannels = [];
+    const saved = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    assert.deepEqual(state, saved, "combining plots must not rewrite approved observations");
+    assert.equal(result.text.match(/Graph span:/g)?.length, 1, "one device has exactly one graph");
+    assert.equal(result.text.match(/Recorded values - shared time axis/g)?.length, 1);
+    assert.equal(result.text.match(/\nLegend\n/g)?.length, 1);
+    assert.match(result.text.replace(/\s+/g, " "), /One graph per device shares a time axis/);
+    assert.match(result.text, /BAD-TEMP/);
+    assert.match(result.text, /synthetic-log.csv, row 47/);
+    assert.match(result.text, /Original source timestamp/);
+    const graphPage = result.pages.findIndex(page => page.includes("connect recorded changes"));
+    const pageBlocks = result.blocks[graphPage];
+    const axisLabels = pageBlocks.filter(block => ["mA", "degC", "State"].includes(block.text));
+    assert.deepEqual(axisLabels.map(block => block.text).sort(), ["mA", "degC", "State"].sort(), "same-unit traces share one axis");
+    assert.equal(new Set(axisLabels.map(block => block.x)).size, 3, "each unit has a separate vertical axis");
+    const legendSwatches = result.streams.flatMap(pdfFilledRects).filter(rect => rect.height === 5 && rect.width === 19);
+    assert.equal(legendSwatches.length, 4, "every trace has its own legend key");
+    const colorKey = color => color.join(",");
+    assert.equal(new Set(legendSwatches.map(rect => colorKey(rect.color))).size, 4);
+    const allLines = pdfLines(result.streams[graphPage]);
+    const traces = legendSwatches.map(rect => allLines.filter(line => colorKey(line.color) === colorKey(rect.color)));
+    assert.deepEqual(traces.map(lines => lines.length), [2, 2, 3, 2], "all traces and held tails share the plot; invalid temperatures break their trace");
+    const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
+    // mA 0..25, degrees Celsius 20..30, and digital 0..1 each fill their own scale.
+    near(traces[0][0].from.y, traces[1][0].from.y);
+    near(traces[0][0].to.y, traces[1][0].to.y);
+    near(traces[0][0].from.y, traces[3][0].from.y);
+    near(traces[0][0].to.y, traces[3][0].to.y);
+    near(traces[2][0].from.y, traces[0][0].to.y);
+    near(traces[2][1].to.y, traces[0][0].from.y);
+    near(traces[0][0].to.x, traces[3][0].from.x);
+    near(traces[1][0].from.x, (traces[0][0].from.x + traces[0][0].to.x) / 2);
+    for (const [index, name] of ["VLV-900-POS", "PD-900", "Valve output", "Temperature evidence"].entries()) {
+      const text = result.blocks.flat().find(block => block.text.includes(name));
+      assert.ok(text && Math.abs(text.y - legendSwatches[index].y - 5.2) < 0.01, `${name} is paired with its colored key`);
+    }
+  });
+});
+
+test("long combined legends retain every trace, identify reused colors by dashes, and paginate above the footer", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const device = run.devices[0];
+    run.devices = [device];
+    run.unassignedChannels = [];
+    device.channels[0].parameters = [];
+    device.channels[0].series = Array.from({ length: 36 }, (_, index) => ({
+      id: `legend-${index}`, name: `Legend-trace-${String(index + 1).padStart(2, "0")} ${"Retained source description ".repeat(8)}`,
+      kind: "analog", unit: "mA", points: [
+        { timeMs: startMs, value: index, valid: true }, { timeMs: startMs + 196_000, value: index + 1, valid: true },
+      ],
+    }));
+    const saved = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    assert.equal(result.text.match(/Graph span:/g)?.length, 1);
+    for (let index = 1; index <= 36; index++)
+      assert.equal(result.text.match(new RegExp(`Legend-trace-${String(index).padStart(2, "0")}`, "g"))?.length, 1);
+    const legendPages = result.pages.filter(page => /Legend-trace-/.test(page));
+    assert.ok(legendPages.length > 1, "legend continues onto extra pages");
+    assert.ok(legendPages.some(page => page.includes("(continued)")));
+    const swatches = result.streams.flatMap(pdfFilledRects).filter(rect => rect.height === 5 && rect.width <= 19);
+    assert.ok(swatches.some(rect => rect.width < 19), "cycled trace dashes also appear in the legend keys");
+    assert.ok(result.streams.flatMap(pdfLines).some(line => line.dash.length
+      && line.from.y !== line.to.y), "the graph retains dash identity for cycled colors");
+    for (const rect of swatches) assert.ok(rect.y + rect.height <= 548.1);
+    for (const page of result.blocks) for (const block of page) {
+      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
+    }
+    assert.deepEqual(state, saved);
+  });
+});
+
+test("unassigned channels retain their combined graphs and invalid-source details", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const channel = run.devices[0].channels[0];
+    channel.symbolicName = "Unassigned recorded input";
+    channel.series.push({ id: "unassigned-output", name: "Unassigned output", kind: "digital", unit: "", points: [
+      { timeMs: startMs, value: 0, valid: true }, { timeMs: startMs + 196_000, value: 1, valid: true },
+    ] });
+    run.devices = [];
+    run.unassignedChannels = [channel];
+    const saved = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    assert.equal(result.text.match(/Graph span:/g)?.length, 1);
+    assert.match(result.text, /Unassigned channels/);
+    assert.match(result.text, /Unassigned output/);
+    assert.match(result.text, /Temperature/);
+    assert.match(result.text, /7FFFH/);
+    assert.match(result.text, /synthetic-log.csv, row 3/);
+    const graphPage = result.pages.findIndex(page => page.includes("connect recorded changes"));
+    assert.match(result.pages[graphPage], /Unassigned channels/);
+    assert.deepEqual(state, saved);
   });
 });
