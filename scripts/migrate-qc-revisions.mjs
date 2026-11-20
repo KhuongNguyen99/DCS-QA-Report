@@ -101,3 +101,11 @@ const checks = ["catalog_preserved", "revisions_valid", "archives_protected", "l
 const failed = checks.filter((key) => row?.[key] !== true);
 if (failed.length) throw new Error(`QC revision verification failed: ${failed.join(", ")}`);
 console.log("QC revision and test-run migrations verified: existing reports preserved, closed revisions protected, and versioned write access enabled.");
+
+// Start Skid 1's new report numbering at the approved reset point.
+// The revision ID is still the key for archived reports, photos, and edits.
+await query(`
+  update public.qa_walkdowns
+  set revision_number_base = 243
+  where lower(skid_name) = 'skid 1' and revision = 243 and revision_number_base = 1;
+`);

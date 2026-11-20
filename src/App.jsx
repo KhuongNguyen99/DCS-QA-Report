@@ -9,7 +9,7 @@ import { createPortal } from "react-dom";
 import schedule from "./data/schedule.json";
 import { createBackend, validateBackendConfig } from "./backend.js";
 import { readConfig, saveConfig } from "./config.js";
-import { recordKey, groupDevices, findManualDevices, inspectionTargets } from "./domain.js";
+import { recordKey, groupDevices, findManualDevices, inspectionTargets, revisionNumber } from "./domain.js";
 import {
   photosFor,
   commentsFor,
@@ -192,6 +192,7 @@ function App() {
     pending || reporting || camera || record || manualEntry || bulkUpload || testDraftDirty,
   );
   const reportRevision = state.project?.revision ?? selectedSkid?.revision ?? 1;
+  const displayedRevision = revisionNumber(state.project ?? selectedSkid, reportRevision);
   const revisionStatus = state.project?.status;
   const editable = connected && revisionStatus === "draft";
   const writeBackend = useMemo(
@@ -253,6 +254,7 @@ function App() {
                   ...item,
                   skidName: loaded.project.skidName,
                   revision: loaded.project.revision,
+                  revisionNumberBase: loaded.project.revisionNumberBase,
                   status: loaded.project.status,
                   contentVersion: loaded.project.contentVersion,
                   nameRequired: loaded.project.nameRequired,
@@ -551,8 +553,8 @@ function App() {
         setLoading(false);
         setLastSync(new Date());
         setNotice(action === "approve"
-          ? `Revision ${saved.project.revision} approved and closed`
-          : `Revision ${saved.project.revision} is ready for editing`);
+          ? `Revision ${revisionNumber(saved.project)} approved and closed`
+          : `Revision ${revisionNumber(saved.project)} is ready for editing`);
         loadWorkspace().catch(() => {});
       }
     } catch (e) {
@@ -589,10 +591,10 @@ function App() {
         .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
         .replace(/[. ]+$/g, "");
       const reportName = kind === "tests" ? "DCS-IO-Test-Report" : "DCS-QC-Report";
-      anchor.download = `450k-Skid-x7-${skidFilename}-${reportName}-Rev${snapshot.project.revision}-${generatedAt.toISOString().slice(0, 10)}.pdf`;
+      anchor.download = `450k-Skid-x7-${skidFilename}-${reportName}-Rev${revisionNumber(snapshot.project)}-${generatedAt.toISOString().slice(0, 10)}.pdf`;
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 60000);
-      setNotice(`Approved revision ${snapshot.project.revision} exported`);
+      setNotice(`Approved revision ${revisionNumber(snapshot.project)} exported`);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -699,7 +701,7 @@ function App() {
           <span className="eyebrow">CURRENT SKID REPORT</span>
           <strong>{selectedSkid?.skidName || "450k Skid x7"}</strong>
           <span>
-            {connected ? `QC Revision ${reportRevision}` : "DCS · Field QC"}
+            {connected ? `QC Revision ${displayedRevision}` : "DCS · Field QC"}
           </span>
         </div>
         <nav aria-label="Main navigation">
@@ -942,7 +944,7 @@ function App() {
           {connected && revisionStatus === "closed" && view !== "report" && view !== "workspace" && (
             <div className="message revision-locked-notice">
               <Icon name="check" />
-              <div><strong>Revision {reportRevision} is approved and closed</strong><p>Open Report to export this revision or start a new one.</p></div>
+              <div><strong>Revision {displayedRevision} is approved and closed</strong><p>Open Report to export this revision or start a new one.</p></div>
               <button className="small-button" onClick={() => navigate("report")}>Open report</button>
             </div>
           )}
@@ -1309,7 +1311,7 @@ function App() {
                 </div>
                 <div>
                   <span className="eyebrow">
-                    450K SKID X7 · REVISION {reportRevision}
+                    450K SKID X7 · REVISION {displayedRevision}
                   </span>
                   <h2>
                     {selectedSkid?.skidName
@@ -1344,7 +1346,7 @@ function App() {
                 />
               )}
               {connected && ((state.testRuns?.length || 0) > 0 || testDraftDirty) && <div className="card test-report-link">
-                <div><strong>{state.testRuns?.length || 0} saved test runs in revision {reportRevision}</strong>
+                <div><strong>{state.testRuns?.length || 0} saved test runs in revision {displayedRevision}</strong>
                   <p>{testDraftDirty ? "You have unsaved test run changes. Save or discard them before approval." : "Setup photos, software details, recorded results, parameters, and graphs share this report’s revision lock."}</p></div>
                 <button type="button" className="button secondary" onClick={() => navigate("tests")}>Review test reports</button>
               </div>}
@@ -1477,7 +1479,7 @@ function App() {
             <span>Jeevy Fabrication · DCS Field QC</span>
             <span>
               {connected ? "Private shared workspace" : "Project preview"}
-              <i>·</i>Revision {reportRevision}
+              <i>·</i>Revision {displayedRevision}
               {connected && <> · {state.project.skidName}</>}
             </span>
           </footer>

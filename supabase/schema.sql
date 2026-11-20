@@ -606,6 +606,8 @@ end; $$;
 alter table public.qa_walkdowns drop constraint if exists qa_walkdowns_revision_check;
 alter table public.qa_walkdowns add constraint qa_walkdowns_revision_check check (revision >= 1);
 alter table public.qa_walkdowns alter column revision set default 1;
+alter table public.qa_walkdowns add column if not exists revision_number_base bigint not null default 1
+  check (revision_number_base between 1 and revision);
 alter table public.qa_walkdowns add column if not exists status text not null default 'draft' check (status in ('draft', 'closed'));
 alter table public.qa_walkdowns add column if not exists content_version bigint not null default 1 check (content_version >= 1);
 alter table public.qa_walkdowns add column if not exists closed_at timestamptz;
@@ -744,7 +746,7 @@ for each row execute function qa_private.keep_closed_revision();
 create or replace function qa_private.walkdown_info(p_walkdown_id uuid)
 returns jsonb language sql stable security definer set search_path = '' as $$
   select jsonb_build_object('id', id, 'skidName', skid_name, 'nameRequired', name_required,
-    'revision', revision, 'updatedAt', updated_at, 'createdAt', created_at,
+    'revision', revision, 'revisionNumberBase', revision_number_base, 'updatedAt', updated_at, 'createdAt', created_at,
     'status', status, 'contentVersion', content_version, 'closedAt', closed_at,
     'closedBy', closed_by, 'closedByName', closed_by_name)
   from public.qa_walkdowns where id = p_walkdown_id;
@@ -771,7 +773,7 @@ $install_test_runs_hook$;
 create or replace function qa_private.live_report_state(p_walkdown_id uuid)
 returns jsonb language sql stable security definer set search_path = '' as $$
   select jsonb_build_object(
-    'project', jsonb_build_object('title', '450k Skid x7 - DCS', 'revision', w.revision, 'scheduleRevision', 3,
+    'project', jsonb_build_object('title', '450k Skid x7 - DCS', 'revision', w.revision, 'revisionNumberBase', w.revision_number_base, 'scheduleRevision', 3,
       'updatedAt', w.updated_at, 'walkdownId', w.id, 'skidName', w.skid_name, 'nameRequired', w.name_required,
       'status', w.status, 'contentVersion', w.content_version, 'closedAt', w.closed_at,
       'closedBy', w.closed_by, 'closedByName', w.closed_by_name),
@@ -802,7 +804,8 @@ begin
   perform qa_private.require_walkdown(p_walkdown_id, false);
   -- Serialize this read with close/new so project metadata and evidence agree.
   perform pg_catalog.pg_advisory_xact_lock_shared(450007, pg_catalog.hashtext(p_walkdown_id::text));
-  select r.snapshot into result from public.qa_report_revisions r join public.qa_walkdowns w
+  select jsonb_set(r.snapshot, '{project,revisionNumberBase}', to_jsonb(w.revision_number_base))
+    into result from public.qa_report_revisions r join public.qa_walkdowns w
     on w.id = r.walkdown_id and w.revision = r.revision
     where w.id = p_walkdown_id and w.status = 'closed';
   if found then return result || jsonb_build_object('inspector', qa_private.current_inspector(), 'revisions', public.qa_list_revisions(p_walkdown_id)); end if;
@@ -826,7 +829,9 @@ returns jsonb language plpgsql security definer set search_path = '' as $$
 declare result jsonb;
 begin
   perform qa_private.require_walkdown(p_walkdown_id, false);
-  select snapshot into result from public.qa_report_revisions where walkdown_id = p_walkdown_id and revision = p_revision;
+  select jsonb_set(r.snapshot, '{project,revisionNumberBase}', to_jsonb(w.revision_number_base))
+    into result from public.qa_report_revisions r join public.qa_walkdowns w on w.id = r.walkdown_id
+    where r.walkdown_id = p_walkdown_id and r.revision = p_revision;
   if not found then raise exception 'Choose an approved and closed revision to export.'; end if;
   return result || jsonb_build_object('inspector', qa_private.current_inspector());
 end;
@@ -1408,7 +1413,7 @@ $$;
 create or replace function qa_private.live_report_state(p_walkdown_id uuid)
 returns jsonb language sql stable security definer set search_path = '' as $$
   select jsonb_build_object(
-    'project', jsonb_build_object('title', '450k Skid x7 - DCS', 'revision', w.revision, 'scheduleRevision', 3,
+    'project', jsonb_build_object('title', '450k Skid x7 - DCS', 'revision', w.revision, 'revisionNumberBase', w.revision_number_base, 'scheduleRevision', 3,
       'updatedAt', w.updated_at, 'walkdownId', w.id, 'skidName', w.skid_name, 'nameRequired', w.name_required,
       'status', w.status, 'contentVersion', w.content_version, 'closedAt', w.closed_at,
       'closedBy', w.closed_by, 'closedByName', w.closed_by_name),

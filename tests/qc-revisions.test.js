@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
+import { revisionNumber } from "../src/domain.js";
 
 const sql = (name) => readFile(new URL(`../supabase/${name}`, import.meta.url), "utf8");
 const schema = await sql("schema.sql");
@@ -354,4 +355,38 @@ test("inspection ordering backfills each legacy target and preserves approved ar
   await h.user();
   assert.deepEqual((await h.state(report.id)).photos.filter(photo => photo.recordKey === key).map(photo => photo.id), [c.id, a.id]);
   assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).photos, closed.photos);
+});
+
+test("Skid 1 resets its report numbering while retaining approved revisions and evidence", async t => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Skid 1");
+  const other = await h.rpc("qa_create_walkdown", "Skid 2");
+  await inspectionPhoto(h, report.id, "terminal:A");
+  const firstDraft = await h.state(report.id);
+  const first = await h.rpc("qa_approve_revision", report.id, 1, firstDraft.project.contentVersion);
+  await h.rpc("qa_new_revision", report.id, 1);
+  await h.db.exec("reset role");
+  await h.db.query("update public.qa_walkdowns set revision=243 where id=$1", [report.id]);
+  await h.user();
+  const draft = await h.state(report.id);
+  const closed = await h.rpc("qa_approve_revision", report.id, 243, draft.project.contentVersion);
+  await h.db.exec("reset role");
+  const reset = deploymentScript.match(/update public\.qa_walkdowns\s+set revision_number_base = 243[\s\S]*?;/)[0];
+  await h.db.exec(reset);
+  await h.db.exec(reset);
+  await h.user();
+
+  const current = await h.state(report.id);
+  assert.deepEqual(current, { ...closed, project: { ...closed.project, revisionNumberBase: 243 } });
+  assert.equal(revisionNumber(current.project), 1);
+  assert.deepEqual(current.revisions.map(item => item.revision), [243, 1]);
+  assert.equal(revisionNumber((await h.rpc("qa_load_revision", report.id, 243)).project), 1);
+  const earlier = await h.rpc("qa_load_revision", report.id, 1);
+  assert.equal(revisionNumber(earlier.project), 1);
+  assert.deepEqual(earlier.photos, first.photos);
+  const next = await h.rpc("qa_new_revision", report.id, 243);
+  assert.equal(next.project.revision, 244);
+  assert.equal(revisionNumber(next.project), 2);
+  assert.deepEqual(next.photos, closed.photos);
+  assert.equal((await h.state(other.id)).project.revisionNumberBase, 1);
 });

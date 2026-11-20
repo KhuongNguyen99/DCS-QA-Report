@@ -1,5 +1,5 @@
 import { jsPDF } from "jspdf";
-import { inspectionTargets } from "./domain.js";
+import { inspectionTargets, revisionNumber } from "./domain.js";
 import { commentsFor, photosFor, recordStatus } from "./inspection.js";
 
 const REPORT_TITLE = "450k Skid x7 - DCS";
@@ -523,7 +523,7 @@ export async function createInspectionPdf({
     );
   const project = {
     title: REPORT_TITLE,
-    revision: state.project.revision,
+    revision: revisionNumber(state.project),
     skidName: state.project.skidName.trim().replace(/\s+/g, " "),
   };
   const totalPhotos = state.photos.length;

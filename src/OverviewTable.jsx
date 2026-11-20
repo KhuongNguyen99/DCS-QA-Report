@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import Icon from "./Icons.jsx";
 import QualityControl from "./QualityControl.jsx";
-import { inspectionTargets } from "./domain.js";
+import { inspectionTargets, revisionNumber } from "./domain.js";
 import {
   photosFor,
   commentsFor,
@@ -90,7 +90,7 @@ export default function OverviewTable({
           {shown.length} of {targets.length} items
         </span>
         <span>
-          QC Revision {state.project?.revision ?? schedule.project.revision}
+          QC Revision {revisionNumber(state.project, state.project?.revision ?? schedule.project.revision)}
         </span>
       </div>
       <section className="card">

@@ -230,14 +230,11 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.ok(result.text.replace(/\s/g, "").includes("ab".repeat(32)));
     assert.ok(result.streams.slice(1).every(stream => photoPlacements(stream).length === 0), "charts remain vector shapes");
     assert.match(result.raw, /D:20261120113000\+00'00'/, "PDF metadata uses approval time, not export time");
-    const graphPages = result.pages.filter((page) => page.includes("connect recorded changes"));
+    const graphPages = result.pages.filter(page => /Temperature - degC|Output state - State/.test(page));
     assert.equal(graphPages.length, 2);
+    assert.match(graphPages[0], /Figure 1\. Station Example \| Slot 3 \| Channel 1 \| Analog input/);
     for (const page of graphPages) {
-      for (const time of ["19:17:00", "19:23:32"]) assert.ok(page.includes(time), "the full run context stays visible");
-      assert.match(page, /Graph span:/);
-      assert.match(page, /Shared run span:/);
-      assert.match(page, /dashed tail holds the last value to the graph end/);
-      assert.match(page, /Source clock \(unspecified\)/);
+      assert.doesNotMatch(page, /Test run:.*Software:|observed change\(s\)|Graph span:|Shared run span:|connect recorded changes/);
     }
     assert.ok(graphPages.some(page => page.includes("19:17:04")), "the short temperature series has a fitted axis");
     assert.ok(graphPages.some(page => page.includes("19:21:56")), "the late digital series starts near its observations");
@@ -309,7 +306,6 @@ test("export captures the approved payload before asynchronous font loading", as
     assert.match(result.text, /Approved overall review comment/);
     assert.match(result.text, /Approved device review comment/);
     assert.match(result.text, /Removed events - Temperature/);
-    assert.match(result.text, /1 removed event\(s\), retained in the audit table/);
     assert.doesNotMatch(result.text, /Mutated|Revision 99/);
   } finally { globalThis.fetch = original; }
 });
@@ -525,7 +521,7 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
     const result = await pdfContent(await createTestReportPdf({ state }));
     const isBlue = line => line.color.length === 3 && line.color.every((value, index) => Math.abs(value - [24, 108, 161][index] / 255) < 0.005);
     const graphLines = name => {
-      const page = result.pages.findIndex(text => text.includes(name) && text.includes("connect recorded changes"));
+      const page = result.pages.findIndex(text => text.includes(name) && /Figure \d+\./.test(text));
       assert.ok(page >= 0, `Missing graph for ${name}`);
       return pdfLines(result.streams[page]).filter(isBlue);
     };
@@ -592,9 +588,8 @@ test("PDF separates mixed-unit and same-unit signals within a device while print
     const saved = structuredClone(state);
     const result = await pdfContent(await createTestReportPdf({ state }));
     assert.deepEqual(state, saved, "separate plots must not rewrite approved observations or comments");
-    assert.equal(result.text.match(/Graph span:/g)?.length, 4, "every populated series has its own graph");
+    assert.equal(result.text.match(/Figure \d+\./g)?.length, 4, "every populated series has its own graph");
     assert.doesNotMatch(result.text, /Recorded values - shared time axis|\nLegend\n|Empty signal/);
-    assert.match(result.text.replace(/\s+/g, " "), /Each signal has a separate graph/);
     assert.equal(result.text.match(/\nDevice comment\n/g)?.length, 1);
     assert.equal(result.text.match(/Engineering note covering every valve graph/g)?.length, 1);
     assert.equal(result.text.match(/Overall test run comment/g)?.length, 1);
@@ -609,11 +604,8 @@ test("PDF separates mixed-unit and same-unit signals within a device while print
     const devicePage = result.pages[graphPages[0]];
     assert.match(devicePage, /Valve device/);
     assert.match(devicePage, /Engineering note covering every valve graph/);
-    const spans = [...devicePage.matchAll(/Graph span:([\s\S]*?)\.(?:\n|$)/g)]
-      .map(match => match[1].replace(/\s+/g, " ").trim());
-    assert.equal(new Set(spans).size, 4, "every series fits its own observed time window");
-    assert.match(spans[0], /2026-11-19 19:17:00 to 2026-11-19 19:18:44/);
-    assert.match(spans[1], /2026-11-19 19:17:46 to 2026-11-19 19:19:34/);
+    for (const time of ["19:18:44", "19:17:46", "19:19:34"]) assert.ok(devicePage.includes(time));
+    assert.ok(devicePage.indexOf("Device comment") > devicePage.indexOf("Figure 4."));
     const traces = plots.map(plot => plot.traces);
     assert.deepEqual(traces.map(lines => lines.length), [2, 2, 3, 2], "individual plots preserve connections, digital steps, held tails, and invalid gaps");
     const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
@@ -643,13 +635,13 @@ test("unassigned channels retain separate signal graphs and invalid-source detai
     run.unassignedChannels = [channel];
     const saved = structuredClone(state);
     const result = await pdfContent(await createTestReportPdf({ state }));
-    assert.equal(result.text.match(/Graph span:/g)?.length, 2);
+    assert.equal(result.text.match(/Figure \d+\./g)?.length, 2);
     assert.match(result.text, /Unassigned channels/);
     assert.match(result.text, /Unassigned output/);
     assert.match(result.text, /Temperature/);
     assert.match(result.text, /7FFFH/);
     assert.match(result.text, /synthetic-log.csv, row 3/);
-    const graphPage = result.pages.findIndex(page => page.includes("connect recorded changes"));
+    const graphPage = result.pages.findIndex(page => page.includes("Figure 1."));
     assert.match(result.pages[graphPage], /Unassigned channels/);
     assert.deepEqual(state, saved);
   });
@@ -746,26 +738,18 @@ test("manual device ranges apply to every separate channel graph and preserve hi
     const result = await pdfContent(await createTestReportPdf({ state, timeRanges }));
     const titles = ["Temperature - degC", "Manual command - State", "V-900-POS - mA"];
     const pages = titles.map(title => {
-      const page = result.pages.findIndex(text => text.includes(title) && text.includes("Graph span:"));
+      const page = result.pages.findIndex(text => text.includes(title));
       assert.ok(page >= 0, `Missing graph ${title}`);
       return page;
     });
-    assert.equal(result.text.match(/Manual view:/g)?.length, 3);
-    const expectedSpan = "2026-11-19 19:18:40 to 2026-11-19 19:20:20";
     for (const page of pages) {
-      const text = result.pages[page].replace(/\s+/g, " ");
-      assert.ok(text.includes(`Graph span: ${expectedSpan}`));
-      assert.match(text, /Manual view: Graph span:/);
+      assert.match(result.pages[page], /19:18:40/);
+      assert.match(result.pages[page], /19:20:20/);
     }
-    assert.match(result.pages[pages[0]], /0 of 2 observed change\(s\) shown/);
-    assert.match(result.pages[pages[1]], /1 of 3 observed change\(s\) shown/);
-    assert.match(result.pages[pages[2]], /2 of 4 observed change\(s\) shown/);
-    assert.match(result.text.replace(/\s+/g, " "), /1 invalid reading\(s\) in source data/);
     assert.match(result.text, /7FFFH/);
     assert.match(result.text, /synthetic-log.csv, row 3/);
-    const otherPage = result.pages.find(page => page.includes("Output state - State") && page.includes("Graph span:"));
+    const otherPage = result.pages.find(page => page.includes("Output state - State"));
     assert.ok(otherPage);
-    assert.doesNotMatch(otherPage, /Manual view:/);
     assert.match(otherPage, /19:21:56/);
     const isColor = (line, rgb) => line.color.length === 3 && line.color.every((value, index) => Math.abs(value - rgb[index] / 255) < 0.005);
     const plots = titles.map(title => readPlot(result, title));
@@ -799,14 +783,14 @@ test("manual PDF ranges remain scoped to their run and device and ignore unselec
     state.testRuns = [archived, newer];
     const selectedRanges = { archived: { "device-1": { startMs: startMs + 1000, endMs: startMs + 3000 }, "missing-device": "ignored" }, newer: null };
     const selected = await pdfContent(await createTestReportPdf({ state, runId: "archived", timeRanges: selectedRanges }));
-    assert.equal(selected.text.match(/Manual view:/g)?.length, 1);
+    const archivedPage = selected.pages.find(page => page.includes("Archived temperature - degC"));
+    assert.match(archivedPage, /19:17:01/);
+    assert.match(archivedPage, /19:17:03/);
     assert.doesNotMatch(selected.text, /Newer temperature/);
     const allRanges = { archived: selectedRanges.archived, "missing-run": { "device-1": "ignored" } };
     const all = await pdfContent(await createTestReportPdf({ state, timeRanges: allRanges }));
-    assert.equal(all.text.match(/Manual view:/g)?.length, 1, "a device ID shared by another run does not share its view range");
-    const newerPage = all.pages.find(page => page.includes("Newer temperature - degC") && page.includes("Graph span:"));
+    const newerPage = all.pages.find(page => page.includes("Newer temperature - degC"));
     assert.ok(newerPage);
-    assert.doesNotMatch(newerPage, /Manual view:/);
     assert.match(newerPage, /19:17:04/);
   });
 });
@@ -824,10 +808,11 @@ test("manual PDF range options are captured before asynchronous font loading", a
     timeRanges["run-1"]["device-1"].endMs = startMs + 200_000;
     release();
     const result = await pdfContent(await pending);
-    const graphPage = result.pages.find(page => page.includes("Temperature - degC") && page.includes("Graph span:"));
+    const graphPage = result.pages.find(page => page.includes("Temperature - degC"));
     assert.ok(graphPage);
-    assert.match(graphPage.replace(/\s+/g, " "), /Graph span: 2026-11-19 19:17:01 to 2026-11-19 19:17:03/);
-    assert.match(graphPage, /1 of 2 observed change\(s\) shown/);
+    assert.match(graphPage, /19:17:01/);
+    assert.match(graphPage, /19:17:03/);
+    assert.doesNotMatch(graphPage, /19:18:40|19:20:20/);
     assert.equal(state.testRuns[0].timeRanges, undefined, "view options never become approved test-run data");
   } finally { release(); globalThis.fetch = original; }
 });
@@ -884,7 +869,6 @@ test("approved PDF reconnects retained readings and moves removed values into so
     const timeRanges = { [run.id]: { [device.id]: { ...CLOCK } } };
     const result = await pdfContent(await createTestReportPdf({ state, timeRanges }));
     const graphs = ["Analog removal - mA", "Digital removal - State", "Invalid removal - mA"].map(title => readPlot(result, title));
-    for (const { page } of graphs) assert.match(result.pages[page], /2 of 2 observed change\(s\) shown/);
     const plots = graphs.map(graph => graph.traces);
     assert.deepEqual(plots.map(lines => lines.length), [2, 2, 2]);
     const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
@@ -899,7 +883,6 @@ test("approved PDF reconnects retained readings and moves removed values into so
     assert.notEqual(plots[2][0].from.y, plots[2][0].to.y, "a removed invalid row no longer breaks the retained trace");
     for (const name of ["Analog removal", "Digital removal", "Invalid removal"])
       assert.match(result.text, new RegExp(`Removed events - ${name}`));
-    assert.match(result.text.replace(/\s+/g, " "), /2 removed event\(s\), retained in the audit table/);
     assert.match(result.text, /Previous original -> Original 25/);
     assert.match(result.text, /Previous original -> Original 20/);
     assert.match(result.text, /Previous original -> REMOVED-INVALID/);
@@ -935,8 +918,6 @@ test("removed-event audit tables paginate fully outside a manual view and retain
     const result = await pdfContent(await createTestReportPdf({ state, timeRanges: {
       [run.id]: { [device.id]: { startMs: startMs + 100_000, endMs: startMs + 200_000 } },
     } }));
-    assert.match(result.text, /2 of 2 observed change\(s\) shown/);
-    assert.match(result.text, /75 removed event\(s\), retained in the audit table/);
     assert.match(result.text, /Removed events - Audited signal/);
     assert.match(result.text, /including events outside the displayed time range/);
     for (let index = 1; index <= 75; index++) {
@@ -946,7 +927,6 @@ test("removed-event audit tables paginate fully outside a manual view and retain
       assert.match(result.text, new RegExp(`synthetic-log.csv, row ${index + 8000}`));
     }
     assert.ok(result.pages.filter(page => /Audit-source-time-/.test(page)).length > 1);
-    assert.match(result.text, /1 invalid reading\(s\)/, "only retained invalid events count as active invalid readings");
     assert.match(result.text, /Invalid or unplottable values - Audited signal/);
     assert.equal(result.text.match(/ACTIVE-INVALID-TOKEN/g)?.length, 1);
     assert.equal(result.text.match(/After-token-23/g)?.length, 1, "a removed invalid event appears only in its audit row");

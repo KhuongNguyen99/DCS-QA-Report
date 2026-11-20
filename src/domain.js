@@ -182,3 +182,9 @@ export function matchDeviceLabels(text, devices, terminal = null) {
 
   return [...matches.values()];
 }
+
+// Keep revision IDs used by storage and write checks independent of the report number.
+export function revisionNumber(project, revision = project?.revision) {
+  const base = project?.revisionNumberBase ?? 1;
+  return revision >= base ? revision - base + 1 : revision;
+}

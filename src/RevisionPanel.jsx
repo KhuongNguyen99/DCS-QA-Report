@@ -1,5 +1,6 @@
 import React, { useRef, useState } from "react";
 import Icon from "./Icons.jsx";
+import { revisionNumber } from "./domain.js";
 
 const approvedDate = (value) => new Date(value).toLocaleString(undefined, {
   dateStyle: "medium", timeStyle: "short",
@@ -52,7 +53,7 @@ export default function RevisionPanel({
       <div className="revision-heading">
         <div>
           <span className="eyebrow">REPORT REVISION</span>
-          <h2>Revision {project.revision}</h2>
+          <h2>Revision {revisionNumber(project)}</h2>
         </div>
         <span className={`revision-status ${closed ? "closed" : "draft"}`}>
           {closed ? <Icon name="check" size={15} /> : <Icon name="report" size={15} />}
@@ -83,7 +84,7 @@ export default function RevisionPanel({
       )}
       {review && (
         <div className="revision-confirmation" role="group" aria-label="Confirm report approval">
-          <h3>Approve and close revision {review.revision}?</h3>
+          <h3>Approve and close revision {revisionNumber(project, review.revision)}?</h3>
           <p><strong>{review.skidName}</strong> — {review.photoCount} photos, {review.commentCount} comments, {review.completedCount}/{targetCount} items reviewed, {review.testRunCount} test runs{review.setupPhotoCount > 0 && ` with ${review.setupPhotoCount} setup photos`}.</p>
           <p>Approval locks the inspection evidence and all saved test reports, including their setup photos, captions, software details, results, parameters, and graphs. Use New revision for any later changes.</p>
           {changed && <p className="field-error" role="alert">The report changed while you were reviewing. Cancel and review the updated report before approving.</p>}
@@ -104,17 +105,18 @@ export default function RevisionPanel({
             {revisions.map((item) => (
               <li key={item.revision}>
                 <div>
-                  <strong>Revision {item.revision}</strong>
+                  <strong>Revision {revisionNumber(project, item.revision)}</strong>
+                  {item.revision < project.revisionNumberBase && <small>Previous numbering</small>}
                   <span>{item.skidName || project.skidName}</span>
                   <small>{item.closedByName || "Inspector"} · {approvedDate(item.closedAt)}</small>
                 </div>
                 <div className="revision-export-actions"><button type="button" className="small-button" disabled={blocked}
-                  aria-label={`Export revision ${item.revision}`}
+                  aria-label={`Export revision ${revisionNumber(project, item.revision)}${item.revision < project.revisionNumberBase ? ' (previous numbering)' : ''}`}
                   onClick={() => action(`export-${item.revision}`, () => onExport(item.revision))}>
                   <Icon name="download" size={15} />{busy === `export-${item.revision}` ? "Exporting…" : "Export PDF"}
                 </button>
                 {item.testRunCount > 0 && onExportTests && <button type="button" className="small-button" disabled={blocked}
-                  aria-label={`Export test reports revision ${item.revision}`}
+                  aria-label={`Export test reports revision ${revisionNumber(project, item.revision)}${item.revision < project.revisionNumberBase ? ' (previous numbering)' : ''}`}
                   onClick={() => action(`tests-${item.revision}`, () => onExportTests(item.revision))}>
                   <Icon name="download" size={15} />{busy === `tests-${item.revision}` ? "Exporting…" : "Export test PDF"}
                 </button>}</div>

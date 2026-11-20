@@ -1,4 +1,5 @@
 import { jsPDF } from "jspdf";
+import { revisionNumber } from "./domain.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
 import { buildTestChart, formatSourceTime, isTestTimeRange } from "./test-chart.js";
 import { importNoteClarification } from "./proneta-notes.js";
@@ -170,6 +171,7 @@ async function reportFont(file) {
 function reportWriter(doc) {
   let y = 54;
   let sectionTitle = "I/O test report";
+  let figureNumber = 0;
   function header() {
     textStyle(doc, 7.9, false, COLOR.muted);
     doc.text("Jeevy Fabrication", PAGE.margin, 16);
@@ -272,7 +274,7 @@ function reportWriter(doc) {
     }
     y += 12;
   }
-  function prepareChart(series, clock, timeRange, width) {
+  function prepareChart(series, clock, timeRange, width, details) {
     const compact = width < WIDTH;
     const geometry = buildTestChart(series, clock, {
       width, height: compact ? 91 : 201,
@@ -281,33 +283,19 @@ function reportWriter(doc) {
       timeRange,
     });
     const title = `${series.name || "Recorded values"} - ${geometry.unit}`;
-    const observationCount = geometry.manualTimeRange
-      ? `${geometry.visibleObservedCount} of ${geometry.observedCount} observed change(s) shown`
-      : `${geometry.observedCount} observed change(s)`;
-    const invalidNote = geometry.invalidCount
-      ? `; ${geometry.invalidCount} invalid reading(s)${geometry.manualTimeRange ? " in source data; dated markers are shown only within this view" : ", marked below the plot when dated"}` : "";
-    const removedNote = geometry.excludedCount ? `; ${geometry.excludedCount} removed event(s), retained in the audit table` : "";
-    const observationNote = `${observationCount}${invalidNote}${removedNote}.`;
-    const connectionNote = `${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the graph end.`;
-    const rangeNote = `${geometry.manualTimeRange ? "Manual view: " : ""}Graph span: ${rangeLabel(geometry.domain)}.`;
+    const legend = `Figure ${++figureNumber}. ${details}`;
     const titleStyle = { size: 10, bold: true, gap: 3, lineHeight: 14.5 };
-    const noteStyle = { size: 7.8, color: COLOR.muted, gap: 3, lineHeight: 10.5 };
-    const trailingGap = 5;
-    const caption = compact ? observationNote : `${observationNote} ${connectionNote}`;
-    const range = compact ? rangeNote : `${rangeNote} Shared run span: ${rangeLabel(clock)}. ${clockLabel(clock)}.`;
-    const heightFor = (value, { size, bold, lineHeight, gap }) => {
-      textStyle(doc, size, bold);
-      return doc.splitTextToSize(printableText(value), width).length * lineHeight + gap;
+    const legendStyle = { size: 8, color: COLOR.muted, gap: 10, lineHeight: 11 };
+    const heightFor = (value, style) => {
+      textStyle(doc, style.size, style.bold);
+      return doc.splitTextToSize(printableText(value), width).length * style.lineHeight + style.gap;
     };
-    const height = geometry.height + heightFor(title, titleStyle)
-      + heightFor(caption, noteStyle) + heightFor(range, noteStyle) + trailingGap;
+    const height = heightFor(title, titleStyle) + geometry.height + heightFor(legend, legendStyle);
     return { height, draw(left) {
       paragraph(title, { ...titleStyle, left, width });
       drawChart(doc, geometry, left, y, compact);
       y += geometry.height;
-      paragraph(caption, { ...noteStyle, left, width });
-      paragraph(range, { ...noteStyle, left, width });
-      y += trailingGap;
+      paragraph(legend, { ...legendStyle, left, width });
     } };
   }
   function chartGrid(charts, clock, timeRange) {
@@ -315,7 +303,8 @@ function reportWriter(doc) {
     const gap = 18;
     const width = (WIDTH - gap * (columns - 1)) / columns;
     for (let start = 0; start < charts.length; start += columns) {
-      const row = charts.slice(start, start + columns).map(series => prepareChart(series, clock, timeRange, width));
+      const row = charts.slice(start, start + columns)
+        .map(({ series, details }) => prepareChart(series, clock, timeRange, width, details));
       ensure(Math.max(...row.map(chart => chart.height)));
       const top = y;
       let rowBottom = y;
@@ -432,25 +421,26 @@ function channelDetails(writer, channel, run, { heading = true, charts } = {}) {
   const name = channel.symbolicName || channelLabel(channel);
   const result = resultLabel(channel.status);
   const wiring = `Recorded wiring result: ${result}${channel.rawStatus ? ` (source: ${channel.rawStatus})` : ""}`;
+  const populated = (channel.series || []).filter(series => series.points?.length);
+  const context = populated.length ? wiring : `${details} | ${wiring}`;
   if (charts) {
-    writer.paragraph(`${heading ? `${name} | ` : ""}${details} | ${wiring}`, { size: 8.5, gap: 4, lineHeight: 11 });
+    writer.paragraph(`${heading ? `${name} | ` : ""}${context}`, { size: 8.5, gap: 4, lineHeight: 11 });
   } else {
     if (heading) writer.heading(name);
-    writer.paragraph(details, { color: COLOR.muted });
+    if (!populated.length) writer.paragraph(details, { color: COLOR.muted });
     writer.paragraph(wiring, {
       bold: true, color: result === "Failed" ? COLOR.red : result === "Passed" ? COLOR.green : COLOR.ink,
     });
   }
   if (channel.comment) writer.paragraph(`Tester comment: ${channel.comment}`);
   parameterTable(writer, channel.parameters);
-  const populated = (channel.series || []).filter(series => series.points?.length);
   if (!populated.length) {
     writer.paragraph("No dated observations were imported for this channel.", { color: COLOR.muted });
   }
   if (charts) {
-    charts.push(...populated);
+    charts.push(...populated.map(series => ({ series, details })));
   } else for (const series of populated) {
-    writer.chartGrid([series], run.clock);
+    writer.chartGrid([{ series, details }], run.clock);
     seriesAudit(writer, series, run);
   }
 }
@@ -591,7 +581,7 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
   // Capture before the first await, so later UI edits cannot alter an in-flight export.
   const snapshot = structuredClone({ project: state?.project, testRuns: state?.testRuns, timeRanges });
   const closedAt = approvedReportDate(snapshot);
-  const project = snapshot.project;
+  const project = { ...snapshot.project, revision: revisionNumber(snapshot.project) };
   if (typeof project.skidName !== "string" || !project.skidName.trim())
     throw new Error("Name this skid before exporting its I/O test report.");
   if (!Array.isArray(snapshot.testRuns)) throw new Error("The closed revision's test runs are missing. Reload the revision before exporting.");
@@ -665,20 +655,15 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
     await runSetup(writer, doc, run, backend, onProgress);
     for (const device of run.devices) {
       writer.page(device.name);
-      writer.paragraph(`Test run: ${run.name || "Test run"} | Software: ${run.software.name} ${run.software.version}`, { size: 8.5, color: COLOR.muted });
       if (device.channels.length > 1) writer.paragraph(`Recorded wiring result: ${resultLabel(device.status)}`, { bold: true });
-      reportComment(writer, "Device comment", device.comment);
       const charts = [];
       for (const channel of device.channels) channelDetails(writer, channel, run, {
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,
         charts,
       });
-      if (charts.length > 1) writer.paragraph(
-        `Shared run span: ${rangeLabel(run.clock)}. ${clockLabel(run.clock)}. Dots show recorded readings. Dashed tails hold the last value.`,
-        { size: 7.8, color: COLOR.muted, gap: 5 },
-      );
       writer.chartGrid(charts, run.clock, deviceTimeRanges.get(device));
-      for (const series of charts) seriesAudit(writer, series, run);
+      reportComment(writer, "Device comment", device.comment);
+      for (const { series } of charts) seriesAudit(writer, series, run);
     }
     runAppendices(writer, run);
   }

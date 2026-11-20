@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "./Icons.jsx";
+import { revisionNumber } from "./domain.js";
 import PhotoGallery from "./PhotoGallery.jsx";
 import { parsePronetaFiles } from "./proneta-parser.js";
 import { importNoteClarification } from "./proneta-notes.js";
@@ -474,14 +475,14 @@ function ScopedTestReportsPanel({
       <div><span className="eyebrow">SOFTWARE TEST EVIDENCE</span><h2>I/O test reports</h2>
         <p>Import all PRONETA CSV results, event logs, and .mpr parameter files from one run together.</p></div>
       {!readOnly && !draft && <button className="button primary" type="button" onClick={() => begin()} disabled={blocked || setupDirty}><Icon name="upload" />Import test run</button>}
-      <button type="button" className="button secondary" onClick={onReview}>Revision {project.revision} · {project.status === "closed" ? "Approved & closed" : "Review & approve"}</button>
+      <button type="button" className="button secondary" onClick={onReview}>Revision {revisionNumber(project)} · {project.status === "closed" ? "Approved & closed" : "Review & approve"}</button>
     </div>
     {exportProgress && <p className="test-export-progress" role="status"><span className="spinner" />{exportProgress}</p>}
     {error && <p className="message error" role="alert">{error}</p>}
     {cacheError && <p className="message error" role="alert">{cacheError}</p>}
     {draft && <section className="card test-import-form" aria-label="Import test run">
       <h3>{draft.runVersion ? "Edit test run" : "Import a test run"}</h3>
-      {draft.recovered && <p role="status">Recovered pending {draft.eventEdits?.length ? "comments and event edits" : "comments"} for {draft.name || "this test run"}, revision {draft.revision}. They remain unsaved until Save test run.</p>}
+      {draft.recovered && <p role="status">Recovered pending {draft.eventEdits?.length ? "comments and event edits" : "comments"} for {draft.name || "this test run"}, revision {revisionNumber(project, draft.revision)}. They remain unsaved until Save test run.</p>}
       {draft.eventReplayError && <p className="field-error" role="alert">{draft.eventReplayError}</p>}
       {(readOnly || stale) && <p className="field-error" role="alert">This revision or test run was closed or changed. Your local preview is retained for review and copying. Discard this draft and reopen the current run before saving.</p>}
       {draft.recovered && draft.requiresFiles && !draft.data && <p role="status">Reselect the original source files to restore this import before saving: {draft.sources.map(source => source.name).join(", ") || "the files for this test run"}.</p>}
@@ -534,7 +535,7 @@ function ScopedTestReportsPanel({
       run={selectedRun} revision={project.revision} readOnly={!canEdit(selectedRun)} pending={blocked}
       getPhotoUrl={getPhotoUrl} onAddPhoto={onAddSetupPhoto} onUpdatePhoto={onUpdateSetupPhoto}
       onRemovePhoto={onRemoveSetupPhoto} onReorderPhotos={onReorderSetupPhotos} onDirtyChange={setSetupDirty} />}
-    {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${project.revision}`}</span></header>
+    {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${revisionNumber(project)}`}</span></header>
       <TestRunDetail key={preview.id || draft?.id} run={preview} onCommentChange={canComment ? changeComment : undefined}
         onEventExclusionChange={canComment ? changeEventExclusion : undefined}
         commentsDisabled={blocked || setupDirty} runId={previewRunId} timeRangeScope={rangeScope}
