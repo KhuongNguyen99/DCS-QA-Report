@@ -208,6 +208,7 @@ test("test PDF rejects drafts, incomplete approval data, wrong skid, and missing
 test("approved test PDF preserves evidence and run context while fitting each graph's time axis", async () => {
   await withFonts(async (requested) => {
     const state = closedState();
+    state.project.closedByTitle = "Project Manager";
     const run = state.testRuns[0];
     const channel = run.devices[0].channels[0];
     run.devices.push({ ...run.devices[0], id: "na-device", name: "N.A.", comment: "Skipped device comment" });
@@ -226,7 +227,7 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.match(result.pages[0], /Software: Siemens PRONETA Basic \| Version: Version entered by tester/);
     assert.match(result.pages[0], /Run time span: 2026-11-19 19:17:00 to 2026-11-19 19:23:32/);
     assert.match(result.pages[0], /Clock: Source clock \(unspecified\)/);
-    assert.match(result.pages[0], /Approved by: Inspector Example/);
+    assert.match(result.pages[0], /Approved by: Inspector Example, Project Manager/);
     assert.doesNotMatch(result.pages.slice(1).join("\n"), /Software:|Run time span:|Clock:|Approved by:/);
     assert.doesNotMatch(result.text, /Stations and module parameters|Set parameters/);
     assert.equal(photoPlacements(result.streams[0]).length, 1, "the QC cover logo is on the first page");

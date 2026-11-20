@@ -7,6 +7,11 @@ do $$ begin
   end if;
 end; $$;
 
+alter table public.qa_inspectors add column if not exists job_title text
+  check (length(trim(job_title)) between 1 and 100);
+update public.qa_inspectors set job_title = 'Project Manager'
+where email = 'khuong@jeevyfabrication.com' and job_title is null;
+
 alter table public.qa_walkdowns drop constraint if exists qa_walkdowns_revision_check;
 alter table public.qa_walkdowns add constraint qa_walkdowns_revision_check check (revision >= 1);
 alter table public.qa_walkdowns alter column revision set default 1;
@@ -233,8 +238,13 @@ returns jsonb language plpgsql security definer set search_path = '' as $$
 declare result jsonb;
 begin
   perform qa_private.require_walkdown(p_walkdown_id, false);
-  select jsonb_set(r.snapshot, '{project,revisionNumberBase}', to_jsonb(w.revision_number_base))
+  select jsonb_set(r.snapshot, '{project}', (r.snapshot->'project')
+    || jsonb_build_object('revisionNumberBase', w.revision_number_base)
+    || case when (r.snapshot->'project') ? 'closedByTitle' or i.job_title is null then '{}'::jsonb
+         else jsonb_build_object('closedByTitle', i.job_title) end)
     into result from public.qa_report_revisions r join public.qa_walkdowns w on w.id = r.walkdown_id
+    left join auth.users u on u.id = r.closed_by
+    left join public.qa_inspectors i on i.email = lower(u.email)
     where r.walkdown_id = p_walkdown_id and r.revision = p_revision;
   if not found then raise exception 'Choose an approved and closed revision to export.'; end if;
   return result || jsonb_build_object('inspector', qa_private.current_inspector());
@@ -243,7 +253,7 @@ $$;
 
 create or replace function public.qa_approve_revision(p_walkdown_id uuid, p_expected_revision bigint, p_expected_version bigint)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare report public.qa_walkdowns%rowtype; result jsonb; approver text;
+declare report public.qa_walkdowns%rowtype; result jsonb; approver text; approver_title text;
 begin
   perform qa_private.require_walkdown(p_walkdown_id, false);
   perform pg_catalog.pg_advisory_xact_lock(450007, pg_catalog.hashtext(p_walkdown_id::text));
@@ -258,14 +268,16 @@ begin
     and not exists (select 1 from storage.objects o where o.bucket_id = 'qa-evidence' and o.name = p.path)) then
     raise exception 'An evidence image is missing from storage. Restore or remove it before approving.';
   end if;
-  select display_name into approver from public.qa_inspectors i join auth.users u on i.email = lower(u.email) where u.id = auth.uid();
+  select i.display_name, i.job_title into approver, approver_title
+    from public.qa_inspectors i join auth.users u on i.email = lower(u.email) where u.id = auth.uid();
   -- In-flight reservations are not approved evidence. Cancel them atomically so
   -- a late upload/finalization cannot enter a subsequent revision unnoticed.
   update public.qa_photos set deleted_at = clock_timestamp(), deleted_by = auth.uid()
   where walkdown_id = p_walkdown_id and upload_state = 'pending' and deleted_at is null;
   update public.qa_walkdowns set status = 'closed', closed_at = clock_timestamp(), closed_by = auth.uid(),
     closed_by_name = approver, updated_at = clock_timestamp() where id = p_walkdown_id;
-  result := qa_private.live_report_state(p_walkdown_id);
+  result := jsonb_set(qa_private.live_report_state(p_walkdown_id), '{project,closedByTitle}',
+    coalesce(to_jsonb(approver_title), 'null'::jsonb));
   insert into public.qa_report_revisions(walkdown_id, revision, skid_name, closed_at, closed_by, closed_by_name, snapshot)
   select id, revision, skid_name, closed_at, closed_by, closed_by_name, result - 'inspector'
   from public.qa_walkdowns where id = p_walkdown_id;

@@ -674,7 +674,10 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       { text: `Clock: ${clockLabel(run.clock)}` },
     );
   }
-  if (project.closedByName) coverDetails.push({ text: `Approved by: ${project.closedByName}` });
+  if (project.closedByName) {
+    const approver = [project.closedByName, project.closedByTitle].filter(Boolean).join(", ");
+    coverDetails.push({ text: `Approved by: ${approver}` });
+  }
   const detailsHeight = coverDetails.reduce((height, { text, bold }) => {
     textStyle(doc, coverStyle.size, bold);
     return height + paragraphLines(doc, text).length * coverStyle.lineHeight + coverStyle.gap;

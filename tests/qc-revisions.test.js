@@ -119,7 +119,8 @@ test("approval locks immutable revisions and archived evidence; new revision pin
   assert.equal(closed.project.contentVersion, finalVersion);
   assert.equal(closed.project.closedBy, admin);
   assert.ok(closed.project.closedAt);
-  assert.ok(closed.project.closedByName);
+  assert.equal(closed.project.closedByName, "Khuong");
+  assert.equal(closed.project.closedByTitle, "Project Manager");
   assert.equal(closed.photos.length, 1);
   assert.equal(closed.comments.length, 2);
   assert.equal(closed.catalog.length, 39);
@@ -184,6 +185,7 @@ test("approval locks immutable revisions and archived evidence; new revision pin
   assert.equal((await h.db.query("select name from storage.objects where name=$1", [evidence.path])).rows.length, 1, "other inspectors can still read archived evidence");
   const archived = await h.rpc("qa_load_revision", report.id, 1);
   assert.equal(archived.inspector.id, second, "current caller identity is never frozen into archived snapshots");
+  assert.equal(archived.project.closedByTitle, "Project Manager", "the cover title belongs to the approver");
   assert.deepEqual({ ...archived, inspector: closed.inspector, revisions: closed.revisions }, closed);
   await h.user();
   const current = await h.state(report.id);
