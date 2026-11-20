@@ -96,6 +96,20 @@ from public.qa_report_revisions r cross join lateral jsonb_array_elements(r.snap
 where not exists (select 1 from public.qa_revision_photos p where p.walkdown_id = r.walkdown_id
   and p.revision = r.revision and p.photo_id = (photo->>'id')::uuid and p.path = photo->>'path');
 
+-- Compare inspection order within each target; legacy snapshots may interleave
+-- targets chronologically, and that frozen top-level array remains unchanged.
+select w.id as closed_report_with_changed_inspection_photos
+from public.qa_walkdowns w join public.qa_report_revisions r
+  on r.walkdown_id = w.id and r.revision = w.revision where w.status = 'closed'
+  and coalesce((select jsonb_agg(photo order by photo->>'recordKey', ordinal)
+    from jsonb_array_elements(r.snapshot->'photos') with ordinality as frozen(photo, ordinal)), '[]'::jsonb)
+  is distinct from (select coalesce(jsonb_agg(jsonb_build_object(
+    'id', p.id, 'walkdownId', p.walkdown_id, 'recordKey', p.record_key,
+    'path', p.path, 'name', p.name, 'width', p.width, 'height', p.height, 'createdAt', p.created_at, 'createdBy', p.created_by)
+    order by p.record_key, p.photo_position, p.created_at, p.id), '[]'::jsonb)
+    from public.qa_photos p where p.walkdown_id = w.id and p.record_key is not null
+      and p.upload_state = 'ready' and p.deleted_at is null);
+
 -- Imported functional-test evidence shares the same immutable report snapshot.
 -- Old snapshots may have no testRuns property; this means no imported runs.
 -- Inline the private state helper's aggregate so table-read roles can verify it.
@@ -111,7 +125,7 @@ where w.status = 'closed' and coalesce(r.snapshot->'testRuns', '[]'::jsonb)
             'id', p.id, 'walkdownId', p.walkdown_id, 'testRunId', p.test_run_id,
             'path', p.path, 'name', p.name, 'width', p.width, 'height', p.height, 'caption', p.caption,
             'createdAt', p.created_at, 'createdBy', p.created_by
-          ) order by p.created_at, p.id)) from public.qa_photos p
+          ) order by p.photo_position, p.created_at, p.id)) from public.qa_photos p
           where p.test_run_id = t.id and p.walkdown_id = t.walkdown_id
             and p.upload_state = 'ready' and p.deleted_at is null having count(*) > 0), '{}'::jsonb) order by t.created_at, t.id), '[]'::jsonb)
   from public.qa_test_runs t where t.walkdown_id = w.id and t.deleted_at is null);

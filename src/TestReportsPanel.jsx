@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "./Icons.jsx";
-import TestSetupPhotos from "./TestSetupPhotos.jsx";
+import PhotoGallery from "./PhotoGallery.jsx";
 import { parsePronetaFiles } from "./proneta-parser.js";
 import { importNoteClarification } from "./proneta-notes.js";
 import { buildTestChart, deviceChartTimeRange, isTestTimeRange, formatSourceTime, formatTestValue } from "./test-chart.js";
 import { testCommentDraftScope, readTestCommentDrafts, writeTestCommentDraft, removeTestCommentDraft } from "./test-comment-drafts.js";
 import { testTimeRangeScope, readDeviceTimeRange, saveDeviceTimeRange, resetDeviceTimeRange } from "./test-time-ranges.js";
 import { createTestEventEdit, setTestEventEdit, applyTestEventEdits } from "./test-event-edits.js";
+import { photoOrderKey, readPhotoOrder, samePhotoOrder } from "./photo-order.js";
 import "./test-reports.css";
 
 const statusClass = (status) => status === "Passed" ? "passed" : status === "Failed" ? "failed" : "untested";
@@ -290,7 +291,7 @@ export default function TestReportsPanel(props) {
 function ScopedTestReportsPanel({
   project, runs = [], inspector, readOnly = false, pending = false, exportProgress = "",
   onSave, onDelete, onExport, onReview, onDirtyChange,
-  getPhotoUrl, onAddSetupPhoto, onUpdateSetupPhoto, onRemoveSetupPhoto, cacheScope, storageScope,
+  getPhotoUrl, onAddSetupPhoto, onUpdateSetupPhoto, onRemoveSetupPhoto, onReorderSetupPhotos, cacheScope, storageScope,
   timeRangeChanges = {}, onTimeRangeChange,
 }) {
   function recover(records) {
@@ -308,7 +309,13 @@ function ScopedTestReportsPanel({
   const [recovery] = useState(() => readTestCommentDrafts(cacheScope));
   const [draft, setDraft] = useState(() => recover(recovery.drafts));
   const draftRef = useRef(draft);
-  const [selectedId, setSelectedId] = useState(draft?.id || null);
+  function pendingPhotoRun() {
+    return runs.find(run => {
+      const { order } = readPhotoOrder(photoOrderKey(storageScope, inspector?.id, project.walkdownId, project.revision, `test-run:${run.id}`));
+      return order && !samePhotoOrder((run.setupPhotos || []).map(photo => photo.id), order.orderedIds);
+    });
+  }
+  const [selectedId, setSelectedId] = useState(() => draft?.id || pendingPhotoRun()?.id || null);
   const [cacheError, setCacheError] = useState(recovery.error);
   const [files, setFiles] = useState([]);
   const [assignments, setAssignments] = useState({});
@@ -327,6 +334,11 @@ function ScopedTestReportsPanel({
       || !(inspector?.isAdmin || inspector?.id === draftRun.createdBy))));
   const blocked = pending || Boolean(busy);
   const canEdit = run => !readOnly && Boolean(inspector?.id && (inspector.isAdmin || inspector.id === run.createdBy));
+  useEffect(() => {
+    if (draft || setupDirty) return;
+    const recovered = pendingPhotoRun();
+    if (recovered && recovered.id !== selectedRun?.id) setSelectedId(recovered.id);
+  }, [draft, setupDirty, runs, selectedRun?.id, project.walkdownId, project.revision, storageScope, inspector?.id]);
   const confirmsRun = run => confirmDelete?.id === run.id && confirmDelete.revision === project.revision
     && confirmDelete.walkdownId === project.walkdownId && confirmDelete.runVersion === run.runVersion;
   useEffect(() => { onDirtyChange?.(Boolean(draft) || setupDirty); }, [draft, setupDirty, onDirtyChange]);
@@ -530,10 +542,11 @@ function ScopedTestReportsPanel({
         <button type="button" className="button primary" disabled={blocked || project.status !== "closed"} onClick={() => onExport(selectedRun?.id)}><Icon name="download" />{exportProgress ? "Exporting…" : "Export test PDF"}</button>
       </div>
     </div>}
-    {!draft && selectedRun && <TestSetupPhotos key={`${selectedRun.id}:${project.revision}`}
+    {!draft && selectedRun && <PhotoGallery key={`${selectedRun.id}:${project.revision}`}
       run={selectedRun} revision={project.revision} readOnly={!canEdit(selectedRun)} pending={blocked}
       getPhotoUrl={getPhotoUrl} onAddPhoto={onAddSetupPhoto} onUpdatePhoto={onUpdateSetupPhoto}
-      onRemovePhoto={onRemoveSetupPhoto} onDirtyChange={setSetupDirty} />}
+      onRemovePhoto={onRemoveSetupPhoto} onReorderPhotos={onReorderSetupPhotos} onDirtyChange={setSetupDirty}
+      orderStorageKey={photoOrderKey(storageScope, inspector?.id, project.walkdownId, project.revision, `test-run:${selectedRun.id}`)} />}
     {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${project.revision}`}</span></header>
       <TestRunDetail key={preview.id || draft?.id} run={preview} onCommentChange={canComment ? changeComment : undefined}
         onEventExclusionChange={canComment ? changeEventExclusion : undefined}

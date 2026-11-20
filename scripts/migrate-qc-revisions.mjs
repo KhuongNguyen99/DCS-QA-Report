@@ -43,6 +43,7 @@ const result = await query(`
       and not has_function_privilege('anon', to_regprocedure(signature), 'EXECUTE')) from unnest(array[
       'public.qa_approve_revision(uuid,bigint,bigint)', 'public.qa_new_revision(uuid,bigint)',
       'public.qa_delete_comment(uuid,uuid,bigint)', 'public.qa_load_revision(uuid,bigint)',
+      'public.qa_reorder_photos(uuid,text,uuid[],uuid[],bigint)',
       'public.qa_list_revisions(uuid)']) signature) as revision_access_verified,
     not exists (select 1 from public.qa_walkdowns w left join public.qa_report_revisions r
       on r.walkdown_id = w.id and r.revision = w.revision
@@ -50,6 +51,16 @@ const result = await query(`
         or r.closed_by is distinct from w.closed_by or r.skid_name is distinct from w.skid_name)) as closed_reports_preserved,
     not exists (select 1 from public.qa_revision_photos p where not exists
       (select 1 from storage.objects o where o.bucket_id = 'qa-evidence' and o.name = p.path)) as archived_photos_preserved,
+    not exists (select 1 from public.qa_walkdowns w join public.qa_report_revisions r
+      on r.walkdown_id = w.id and r.revision = w.revision where w.status = 'closed'
+      and coalesce((select jsonb_agg(photo order by photo->>'recordKey', ordinal)
+        from jsonb_array_elements(r.snapshot->'photos') with ordinality as frozen(photo, ordinal)), '[]'::jsonb)
+      is distinct from (select coalesce(jsonb_agg(jsonb_build_object(
+        'id', p.id, 'walkdownId', p.walkdown_id, 'recordKey', p.record_key,
+        'path', p.path, 'name', p.name, 'width', p.width, 'height', p.height, 'createdAt', p.created_at, 'createdBy', p.created_by)
+        order by p.record_key, p.photo_position, p.created_at, p.id), '[]'::jsonb)
+        from public.qa_photos p where p.walkdown_id = w.id and p.record_key is not null
+          and p.upload_state = 'ready' and p.deleted_at is null)) as closed_inspection_photos_preserved,
     (select relrowsecurity from pg_class where oid = 'public.qa_test_runs'::regclass)
       and not has_table_privilege('authenticated', 'public.qa_test_runs', 'INSERT,UPDATE,DELETE')
       and not has_table_privilege('anon', 'public.qa_test_runs', 'SELECT')
@@ -62,6 +73,7 @@ const result = await query(`
       'public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint)',
       'public.qa_add_test_setup_photo(uuid,uuid,uuid,bigint)',
       'public.qa_update_test_setup_photo(uuid,uuid,uuid,text,bigint)',
+      'public.qa_reorder_test_setup_photos(uuid,uuid,uuid[],uuid[],bigint)',
       'public.qa_delete_test_setup_photo(uuid,uuid,uuid,bigint)']) signature) as test_run_access_verified,
     -- The read-only API role has table access but cannot execute private helpers.
     -- Keep this aggregate aligned with test_run_info/test_runs_state without grants.
@@ -76,7 +88,7 @@ const result = await query(`
             'id', p.id, 'walkdownId', p.walkdown_id, 'testRunId', p.test_run_id,
             'path', p.path, 'name', p.name, 'width', p.width, 'height', p.height, 'caption', p.caption,
             'createdAt', p.created_at, 'createdBy', p.created_by
-          ) order by p.created_at, p.id)) from public.qa_photos p
+          ) order by p.photo_position, p.created_at, p.id)) from public.qa_photos p
           where p.test_run_id = t.id and p.walkdown_id = t.walkdown_id
             and p.upload_state = 'ready' and p.deleted_at is null having count(*) > 0), '{}'::jsonb) order by t.created_at, t.id), '[]'::jsonb)
         from public.qa_test_runs t where t.walkdown_id = w.id and t.deleted_at is null))
@@ -84,7 +96,7 @@ const result = await query(`
 `, true);
 const row = Array.isArray(result) ? result[0] : result.data?.[0] ?? result.result?.[0] ?? result;
 const checks = ["catalog_preserved", "revisions_valid", "archives_protected", "locks_installed",
-  "old_writes_blocked", "revision_access_verified", "closed_reports_preserved", "archived_photos_preserved",
+  "old_writes_blocked", "revision_access_verified", "closed_reports_preserved", "archived_photos_preserved", "closed_inspection_photos_preserved",
   "test_runs_protected", "test_run_access_verified", "closed_test_runs_preserved"];
 const failed = checks.filter((key) => row?.[key] !== true);
 if (failed.length) throw new Error(`QC revision verification failed: ${failed.join(", ")}`);

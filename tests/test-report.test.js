@@ -410,6 +410,24 @@ test("setup photo scope and metadata are checked before assets load", async () =
   } finally { globalThis.fetch = original; }
 });
 
+test('PDF setup pages follow the saved array order instead of filename or creation time', async () => {
+  const state = closedState();
+  state.testRuns[0].setupPhotos = [
+    setupPhoto('z', { createdAt: '2026-11-20T12:00:00Z' }),
+    setupPhoto('a', { createdAt: '2026-11-19T12:00:00Z' }),
+    setupPhoto('m', { createdAt: '2026-11-19T18:00:00Z' }),
+  ];
+  await withSetupImages(async ({ backend, accessed }) => {
+    const result = await pdfContent(await createTestReportPdf({ state, backend }));
+    const pages = result.pages.filter((text, index) => photoPlacements(result.streams[index]).length);
+    assert.deepEqual(accessed.map(photo => photo.id), ['z', 'a', 'm']);
+    for (const [index, id] of ['z', 'a', 'm'].entries()) {
+      assert.match(pages[index], new RegExp(`Photo ${index + 1} of 3`));
+      assert.match(pages[index], new RegExp(`Saved caption for ${id}`));
+    }
+  });
+});
+
 test("missing, oversized, or unreadable setup photos stop export instead of omitting evidence", async () => {
   const state = closedState(); state.testRuns[0].setupPhotos = [setupPhoto("photo")];
   const before = structuredClone(state);

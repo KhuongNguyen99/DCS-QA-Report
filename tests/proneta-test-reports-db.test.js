@@ -340,7 +340,7 @@ test("deployment verification works for a table-read role without private helper
   await h.db.exec("begin read only");
   try {
     const checks = (await h.db.query(deploymentChecks)).rows[0];
-    assert.equal(Object.keys(checks).length, 11);
+    assert.equal(Object.keys(checks).length, 12);
     assert.equal(Object.values(checks).every(value => value === true), true);
     const manualCheck = verification.match(/select w\.id as closed_report_with_changed_test_runs[\s\S]*?;/)[0];
     assert.deepEqual((await h.db.query(manualCheck)).rows, []);
@@ -459,4 +459,121 @@ test("setup photo writes require the owning saved run, validated scope, bounded 
     "removing a run retires its setup photos and pending reservations");
   await assert.rejects(h.rpc("qa_add_test_setup_photo", report.id, runId, image.id, 1), /Save an active test run/);
   await assert.rejects(h.rpc("qa_prepare_test_setup_photo", report.id, runId, crypto.randomUUID(), "invalid/path.jpg", "Removed run.jpg", 100, 100, 1), /Save an active test run/);
+});
+
+test("setup photo order persists atomically, appends uploads, detects competing changes, and freezes at approval", async t => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Ordered setup skid"), runId = crypto.randomUUID(), data = runData();
+  await h.rpc("qa_save_test_run", report.id, runId, data, 1, null);
+  const a = await setupPhoto(h, report.id, runId, 1), b = await setupPhoto(h, report.id, runId, 1), c = await setupPhoto(h, report.id, runId, 1);
+  await h.rpc("qa_update_test_setup_photo", report.id, runId, b.id, "Middle connection", 1);
+  const before = await h.state(report.id), original = before.testRuns[0].setupPhotos;
+  const oldIds = [a.id, b.id, c.id], orderedIds = [c.id, a.id, b.id];
+  const reordered = await h.rpc("qa_reorder_test_setup_photos", report.id, runId, orderedIds, oldIds, 1);
+  assert.deepEqual(reordered, [original[2], original[0], original[1]], "only array order changes, preserving captions and private files");
+  let current = await h.state(report.id);
+  assert.deepEqual(current.testRuns[0].setupPhotos, reordered);
+  assert.equal(current.project.contentVersion, before.project.contentVersion + 1, "one atomic reorder advances one review token");
+  assert.equal(current.testRuns[0].runVersion, 1);
+  assert.deepEqual((await h.db.query("select data from public.qa_test_runs where id=$1", [runId])).rows[0].data, data);
+  await h.rpc("qa_reorder_test_setup_photos", report.id, runId, orderedIds, orderedIds, 1);
+  assert.equal((await h.state(report.id)).project.contentVersion, current.project.contentVersion, "saving unchanged order is a no-op");
+  await assert.rejects(h.rpc("qa_approve_revision", report.id, 1, before.project.contentVersion), /changed since you reviewed/);
+  const competing = await Promise.allSettled([
+    h.rpc("qa_reorder_test_setup_photos", report.id, runId, [a.id, c.id, b.id], orderedIds, 1),
+    h.rpc("qa_reorder_test_setup_photos", report.id, runId, [b.id, a.id, c.id], orderedIds, 1),
+  ]);
+  assert.equal(competing.filter(result => result.status === "fulfilled").length, 1);
+  assert.match(competing.find(result => result.status === "rejected").reason.message, /Setup photos changed/);
+  const winningIds = (await h.state(report.id)).testRuns[0].setupPhotos.map(photo => photo.id);
+  const d = await setupPhoto(h, report.id, runId, 1);
+  const appendedIds = [...winningIds, d.id];
+  assert.deepEqual((await h.state(report.id)).testRuns[0].setupPhotos.map(photo => photo.id), appendedIds);
+  await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, winningIds, winningIds, 1), /Setup photos changed/);
+  await h.rpc("qa_delete_test_setup_photo", report.id, runId, d.id, 1);
+  await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, appendedIds, appendedIds, 1), /Setup photos changed/);
+  current = await h.state(report.id);
+  const closed = await h.rpc("qa_approve_revision", report.id, 1, current.project.contentVersion);
+  await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, oldIds, winningIds, 1), /approved and closed/);
+  await h.db.exec("reset role");
+  await h.db.exec(setupMigration);
+  assert.equal(Object.values((await h.db.query(deploymentChecks)).rows[0]).every(value => value === true), true);
+  const manualCheck = verification.match(/select w\.id as closed_report_with_changed_test_runs[\s\S]*?;/)[0];
+  assert.deepEqual((await h.db.query(manualCheck)).rows, []);
+  await h.user();
+  await h.rpc("qa_new_revision", report.id, 1);
+  await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, oldIds, winningIds, 1), /different revision/);
+  await h.rpc("qa_reorder_test_setup_photos", report.id, runId, [...winningIds].reverse(), winningIds, 2);
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns,
+    "later draft order cannot change the approved array order");
+  assert.equal(await h.rpc("qa_delete_test_setup_photo", report.id, runId, a.id, 2), null);
+  assert.equal((await h.db.query("delete from storage.objects where name=$1 returning name", [a.path])).rows.length, 0);
+  assert.equal((await h.db.query("select name from storage.objects where name=$1", [a.path])).rows.length, 1);
+});
+
+test("setup photo order requires owner or admin access and an exact validated current photo list", async t => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Order permissions skid"), runId = crypto.randomUUID(), otherId = crypto.randomUUID();
+  await h.rpc("qa_save_test_run", report.id, runId, runData(), 1, null);
+  await h.rpc("qa_save_test_run", report.id, otherId, runData(), 1, null);
+  const a = await setupPhoto(h, report.id, runId, 1), b = await setupPhoto(h, report.id, runId, 1);
+  const foreign = await setupPhoto(h, report.id, otherId, 1), expected = [a.id, b.id];
+  const pendingId = crypto.randomUUID();
+  await h.rpc("qa_prepare_test_setup_photo", report.id, runId, pendingId, `${admin}/${pendingId}.jpg`, "Pending.jpg", 800, 600, 1);
+  for (const invalid of [null, [a.id, a.id], [a.id, null], Array(31).fill(a.id), [[a.id, b.id]]]) {
+    await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, invalid, expected, 1), /complete order/);
+    await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, expected, invalid, 1), /complete order/);
+  }
+  for (const invalid of [[], [a.id], [a.id, foreign.id], [a.id, pendingId], [a.id, b.id, foreign.id]])
+    await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, invalid, expected, 1), /every current setup photo/);
+  await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, expected, [b.id, a.id], 1), /Setup photos changed/);
+  await assert.rejects(h.db.query("update public.qa_photos set photo_position=99 where id=$1", [a.id]), /permission denied/);
+  await h.user(second);
+  await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, [b.id, a.id], expected, 1), /Only the importing inspector/);
+  const ownId = crypto.randomUUID();
+  await h.rpc("qa_save_test_run", report.id, ownId, runData(), 1, null);
+  assert.deepEqual(await h.rpc("qa_reorder_test_setup_photos", report.id, ownId, [], [], 1), []);
+  const ownA = await setupPhoto(h, report.id, ownId, 1, second), ownB = await setupPhoto(h, report.id, ownId, 1, second);
+  await h.rpc("qa_reorder_test_setup_photos", report.id, ownId, [ownB.id, ownA.id], [ownA.id, ownB.id], 1);
+  await h.user(outsider);
+  await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, [b.id, a.id], expected, 1), /approved project inspector/);
+  await h.db.exec("reset role; set role anon");
+  await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, [b.id, a.id], expected, 1), /permission denied/);
+  await h.user(admin);
+  const changed = await h.rpc("qa_reorder_test_setup_photos", report.id, ownId, [ownA.id, ownB.id], [ownB.id, ownA.id], 1);
+  assert.deepEqual(changed.map(photo => photo.id), [ownA.id, ownB.id], "admins can reorder another inspector's run");
+  await h.rpc("qa_delete_test_run", report.id, ownId, 1, 1);
+  await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, ownId, [], [], 1), /Save an active test run/);
+});
+
+test("setup photo order migration backfills legacy timestamp and ID order without changing closed reports", async t => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Legacy photo order skid"), runId = crypto.randomUUID();
+  await h.rpc("qa_save_test_run", report.id, runId, runData(), 1, null);
+  const a = await setupPhoto(h, report.id, runId, 1), b = await setupPhoto(h, report.id, runId, 1), c = await setupPhoto(h, report.id, runId, 1);
+  await h.db.exec("reset role");
+  await h.db.query("update public.qa_photos set photo_position=null, created_at='2026-01-01T00:00:00Z' where test_run_id=$1", [runId]);
+  await h.user();
+  const before = await h.state(report.id), legacyIds = [a.id, b.id, c.id].sort();
+  assert.deepEqual(before.testRuns[0].setupPhotos.map(photo => photo.id), legacyIds, "legacy ties use ID ordering");
+  const closed = await h.rpc("qa_approve_revision", report.id, 1, before.project.contentVersion);
+  await h.db.exec("reset role");
+  await h.db.exec("alter table public.qa_photos drop column photo_position");
+  await h.db.exec(setupMigration);
+  await h.db.exec(setupMigration);
+  await h.db.exec(schema);
+  assert.deepEqual((await h.db.query("select id, photo_position from public.qa_photos where test_run_id=$1 order by photo_position", [runId])).rows,
+    legacyIds.map((id, index) => ({ id, photo_position: index + 1 })));
+  assert.equal(Object.values((await h.db.query(deploymentChecks)).rows[0]).every(value => value === true), true);
+  await h.user();
+  assert.deepEqual(await h.state(report.id), closed, "metadata backfill leaves frozen JSON and review tokens unchanged");
+  await h.rpc("qa_new_revision", report.id, 1);
+  const reversedIds = [...legacyIds].reverse();
+  await h.rpc("qa_reorder_test_setup_photos", report.id, runId, reversedIds, legacyIds, 2);
+  await h.db.exec("reset role");
+  await h.db.exec(setupMigration);
+  await h.user();
+  assert.deepEqual((await h.state(report.id)).testRuns[0].setupPhotos.map(photo => photo.id), reversedIds,
+    "reapplying the migration preserves an explicitly saved order");
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns);
 });

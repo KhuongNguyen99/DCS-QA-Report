@@ -7,7 +7,7 @@ const approvedDate = (value) => new Date(value).toLocaleString(undefined, {
 
 export default function RevisionPanel({
   project, revisions = [], photoCount, commentCount, completedCount, targetCount,
-  testRunCount = 0, setupPhotoCount = 0, pending = false, hasDraftComments = false, hasDraftTests = false,
+  testRunCount = 0, setupPhotoCount = 0, pending = false, hasDraftComments = false, hasDraftTests = false, hasDraftPhotos = false,
   onApprove, onNewRevision, onExport, onExportTests,
 }) {
   const [review, setReview] = useState(null);
@@ -38,7 +38,7 @@ export default function RevisionPanel({
   }
 
   function beginReview() {
-    if (blocked || hasDraftComments || hasDraftTests || project.status !== "draft") return;
+    if (blocked || hasDraftComments || hasDraftTests || hasDraftPhotos || project.status !== "draft") return;
     setError("");
     setReview({
       walkdownId: project.walkdownId, revision: project.revision,
@@ -74,11 +74,12 @@ export default function RevisionPanel({
         <div className="revision-body">
           <p>Review the saved photos, comments, and test reports, then approve and close this revision to export it.</p>
           <span className="revision-summary">{photoCount} photos · {commentCount} comments · {completedCount}/{targetCount} items reviewed · {testRunCount} test runs{setupPhotoCount > 0 && ` · ${setupPhotoCount} setup photos`}</span>
-          {!review && <button type="button" className="button primary" disabled={blocked || hasDraftComments || hasDraftTests} onClick={beginReview}>
+          {!review && <button type="button" className="button primary" disabled={blocked || hasDraftComments || hasDraftTests || hasDraftPhotos} onClick={beginReview}>
             <Icon name="check" size={17} />Approve &amp; close
           </button>}
           {hasDraftComments && <p className="revision-draft-notice" role="status">Post or clear your draft comments before approving this revision.</p>}
           {hasDraftTests && <p className="revision-draft-notice" role="status">Save or discard your test run changes before approving this revision.</p>}
+          {hasDraftPhotos && <p className="revision-draft-notice" role="status">Save or discard your pending photo order before approving this revision.</p>}
         </div>
       )}
       {review && (
@@ -89,7 +90,7 @@ export default function RevisionPanel({
           {changed && <p className="field-error" role="alert">The report changed while you were reviewing. Cancel and review the updated report before approving.</p>}
           <div className="revision-actions">
             <button type="button" className="button secondary" disabled={blocked} onClick={() => setReview(null)}>Cancel</button>
-            <button type="button" className="button primary" disabled={blocked || changed || hasDraftComments || hasDraftTests}
+            <button type="button" className="button primary" disabled={blocked || changed || hasDraftComments || hasDraftTests || hasDraftPhotos}
               onClick={() => action("approve", () => onApprove(review))}>
               {busy === "approve" ? "Approving…" : "Confirm approval & close"}
             </button>

@@ -7,6 +7,8 @@ const sql = (name) => readFile(new URL(`../supabase/${name}`, import.meta.url), 
 const schema = await sql("schema.sql");
 const migration = await sql("qc-revisions.sql");
 const verification = await sql("VERIFY.sql");
+const deploymentScript = await readFile(new URL("../scripts/migrate-qc-revisions.mjs", import.meta.url), "utf8");
+const deploymentChecks = deploymentScript.match(/const result = await query\(`([\s\S]*?)`, true\);/)[1];
 const admin = "11111111-1111-4111-8111-111111111111";
 const second = "22222222-2222-4222-8222-222222222222";
 const outsider = "33333333-3333-4333-8333-333333333333";
@@ -39,6 +41,14 @@ async function database(t, initial = schema) {
   )).rows[0].result;
   await user();
   return { db, user, rpc, state: (id) => rpc("qa_load_state", id) };
+}
+
+async function inspectionPhoto(h, walkdownId, recordKey, revision = 1, userId = admin) {
+  const id = crypto.randomUUID(), path = `${userId}/${id}.jpg`;
+  await h.rpc("qa_prepare_photo", walkdownId, id, recordKey, path, "Inspection evidence", 100, 150, revision);
+  await h.db.query("insert into storage.objects(bucket_id,name) values('qa-evidence',$1)", [path]);
+  await h.rpc("qa_add_photo", walkdownId, id, revision);
+  return { id, path };
 }
 
 test("QC migration preserves existing revisions and evidence; draft edits no longer change revision", async (t) => {
@@ -230,4 +240,118 @@ test("comment authors can remove their own notes and missing evidence cannot be 
   assert.equal((await h.state(report.id)).project.status, "draft");
   assert.equal((await h.rpc("qa_list_revisions", report.id)).length, 0);
   assert.equal(await h.rpc("qa_delete_photo", report.id, photoId, 1), path);
+});
+
+test("inspection photo order saves atomically for every target kind, appends uploads, and rejects competing changes", async t => {
+  const h = await database(t), report = await h.rpc("qa_create_walkdown", "Ordered inspection skid");
+  const key = "device:V-3541", otherKey = "equipment:control-box";
+  const a = await inspectionPhoto(h, report.id, key), other = await inspectionPhoto(h, report.id, otherKey);
+  const b = await inspectionPhoto(h, report.id, key), c = await inspectionPhoto(h, report.id, key);
+  await h.rpc("qa_set_complete", report.id, key, true, 1);
+  const before = await h.state(report.id), original = before.photos.filter(photo => photo.recordKey === key);
+  const oldIds = [a.id, b.id, c.id], orderedIds = [c.id, a.id, b.id];
+  await h.user(second);
+  const changed = await h.rpc("qa_reorder_photos", report.id, key, orderedIds, oldIds, 1);
+  assert.deepEqual(changed, [original[2], original[0], original[1]], "any approved inspector can order a page without changing evidence metadata");
+  let current = await h.state(report.id);
+  assert.deepEqual(current.records, before.records, "reordering does not reopen completed inspections or change their status");
+  assert.deepEqual(current.photos.filter(photo => photo.recordKey === key), changed);
+  assert.deepEqual(current.photos.filter(photo => photo.recordKey === otherKey), before.photos.filter(photo => photo.recordKey === otherKey));
+  assert.equal(current.project.contentVersion, before.project.contentVersion + 1);
+  await h.rpc("qa_reorder_photos", report.id, key, orderedIds, orderedIds, 1);
+  assert.equal((await h.state(report.id)).project.contentVersion, current.project.contentVersion);
+  await assert.rejects(h.rpc("qa_approve_revision", report.id, 1, before.project.contentVersion), /changed since you reviewed/);
+  const competing = await Promise.allSettled([
+    h.rpc("qa_reorder_photos", report.id, key, [a.id, c.id, b.id], orderedIds, 1),
+    h.rpc("qa_reorder_photos", report.id, key, [b.id, c.id, a.id], orderedIds, 1),
+  ]);
+  assert.equal(competing.filter(result => result.status === "fulfilled").length, 1);
+  assert.match(competing.find(result => result.status === "rejected").reason.message, /Inspection photos changed/);
+  const winner = (await h.state(report.id)).photos.filter(photo => photo.recordKey === key).map(photo => photo.id);
+  const d = await inspectionPhoto(h, report.id, key, 1, second), appended = [...winner, d.id];
+  assert.deepEqual((await h.state(report.id)).photos.filter(photo => photo.recordKey === key).map(photo => photo.id), appended);
+  await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, winner, winner, 1), /Inspection photos changed/);
+  await h.rpc("qa_delete_photo", report.id, d.id, 1);
+  await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, appended, appended, 1), /Inspection photos changed/);
+  const equipment = await inspectionPhoto(h, report.id, otherKey, 1, second);
+  await h.rpc("qa_reorder_photos", report.id, otherKey, [equipment.id, other.id], [other.id, equipment.id], 1);
+  const terminalA = await inspectionPhoto(h, report.id, "terminal:A", 1, second), terminalB = await inspectionPhoto(h, report.id, "terminal:A", 1, second);
+  await h.rpc("qa_reorder_photos", report.id, "terminal:A", [terminalB.id, terminalA.id], [terminalA.id, terminalB.id], 1);
+  current = await h.state(report.id);
+  assert.deepEqual(current.photos.filter(photo => photo.recordKey === "terminal:A").map(photo => photo.id), [terminalB.id, terminalA.id]);
+  assert.deepEqual(current.photos.filter(photo => photo.recordKey === otherKey).map(photo => photo.id), [equipment.id, other.id]);
+  const closed = await h.rpc("qa_approve_revision", report.id, 1, current.project.contentVersion);
+  await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, oldIds, winner, 1), /approved and closed/);
+  await h.db.exec("reset role");
+  await h.db.exec(schema);
+  await h.db.exec(migration);
+  assert.equal(Object.values((await h.db.query(deploymentChecks)).rows[0]).every(value => value === true), true);
+  await h.user(second);
+  assert.deepEqual((await h.state(report.id)).photos, closed.photos);
+  await h.rpc("qa_new_revision", report.id, 1);
+  await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, oldIds, winner, 1), /different revision/);
+  await h.rpc("qa_reorder_photos", report.id, key, [...winner].reverse(), winner, 2);
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).photos, closed.photos);
+  await h.user();
+  assert.equal(await h.rpc("qa_delete_photo", report.id, a.id, 2), null);
+  assert.equal((await h.db.query("delete from storage.objects where name=$1 returning name", [a.path])).rows.length, 0);
+  assert.equal((await h.db.query("select name from storage.objects where name=$1", [a.path])).rows.length, 1);
+});
+
+test("inspection photo order validates exact scope and permutation and denies anonymous or unapproved users", async t => {
+  const h = await database(t), report = await h.rpc("qa_create_walkdown", "Inspection order validation skid");
+  const another = await h.rpc("qa_create_walkdown", "Foreign inspection order skid"), key = "device:V-3541";
+  const a = await inspectionPhoto(h, report.id, key), b = await inspectionPhoto(h, report.id, key), expected = [a.id, b.id];
+  const foreign = await inspectionPhoto(h, another.id, key), otherTarget = await inspectionPhoto(h, report.id, "terminal:A");
+  const pending = crypto.randomUUID();
+  await h.rpc("qa_prepare_photo", report.id, pending, key, `${admin}/${pending}.jpg`, "Pending photo", 100, 100, 1);
+  for (const invalid of [null, [a.id, a.id], [a.id, null], Array(1001).fill(a.id), [[a.id, b.id]]]) {
+    await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, invalid, expected, 1), /complete order/);
+    await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, expected, invalid, 1), /complete order/);
+  }
+  for (const invalid of [[], [a.id], [a.id, foreign.id], [a.id, otherTarget.id], [a.id, pending], [a.id, b.id, otherTarget.id]])
+    await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, invalid, expected, 1), /every current inspection photo/);
+  await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, expected, [b.id, a.id], 1), /Inspection photos changed/);
+  await assert.rejects(h.rpc("qa_reorder_photos", report.id, "walkdown:general", [], [], 1), /Unknown inspection target/);
+  await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, expected, expected, null), /different revision/);
+  await assert.rejects(h.db.query("update public.qa_photos set photo_position=50 where id=$1", [a.id]), /permission denied/);
+  assert.deepEqual(await h.rpc("qa_reorder_photos", report.id, "terminal:B", [], [], 1), []);
+  await h.user(outsider);
+  await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, [b.id, a.id], expected, 1), /approved project inspector/);
+  await h.db.exec("reset role; set role anon");
+  await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, [b.id, a.id], expected, 1), /permission denied/);
+});
+
+test("inspection ordering backfills each legacy target and preserves approved arrays and review tokens on upgrades", async t => {
+  const h = await database(t), report = await h.rpc("qa_create_walkdown", "Legacy inspection ordering skid");
+  const key = "device:V-3541", otherKey = "terminal:A";
+  const a = await inspectionPhoto(h, report.id, key), b = await inspectionPhoto(h, report.id, otherKey);
+  const c = await inspectionPhoto(h, report.id, key), d = await inspectionPhoto(h, report.id, otherKey);
+  await h.db.exec("reset role");
+  await h.db.exec(migration.replaceAll("order by p.record_key, p.photo_position, p.created_at, p.id", "order by p.created_at, p.id"));
+  await h.db.query("update public.qa_photos set photo_position=null where walkdown_id=$1", [report.id]);
+  await h.user();
+  const before = await h.state(report.id);
+  assert.deepEqual(before.photos.map(photo => photo.id), [a.id, b.id, c.id, d.id]);
+  const closed = await h.rpc("qa_approve_revision", report.id, 1, before.project.contentVersion);
+  await h.db.exec("reset role");
+  await h.db.exec("alter table public.qa_photos drop column photo_position");
+  await h.db.exec(migration);
+  await h.db.exec(migration);
+  await h.db.exec(schema);
+  const positions = (await h.db.query("select id, photo_position from public.qa_photos where walkdown_id=$1", [report.id])).rows;
+  for (const [id, position] of [[a.id, 1], [b.id, 1], [c.id, 2], [d.id, 2]])
+    assert.equal(positions.find(photo => photo.id === id).photo_position, position);
+  assert.equal(Object.values((await h.db.query(deploymentChecks)).rows[0]).every(value => value === true), true);
+  const manualCheck = verification.match(/select w\.id as closed_report_with_changed_inspection_photos[\s\S]*?;/)[0];
+  assert.deepEqual((await h.db.query(manualCheck)).rows, []);
+  await h.user();
+  assert.deepEqual(await h.state(report.id), closed, "backfill leaves the entire approved array and report metadata unchanged");
+  await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_reorder_photos", report.id, key, [c.id, a.id], [a.id, c.id], 2);
+  await h.db.exec("reset role");
+  await h.db.exec(schema);
+  await h.user();
+  assert.deepEqual((await h.state(report.id)).photos.filter(photo => photo.recordKey === key).map(photo => photo.id), [c.id, a.id]);
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).photos, closed.photos);
 });

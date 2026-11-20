@@ -288,6 +288,59 @@ test("setup captions and removal preserve revision scope and archived objects", 
   assert.equal(h.calls.length, count);
 });
 
+test("setup photo reordering sends the complete expected order and returns saved photo metadata", async () => {
+  const runId = "66666666-6666-4666-8666-666666666666";
+  const nextId = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+  const photos = [{ id: nextId, caption: "Second", path: "second.jpg" }, { id: photoId, caption: "First", path: "first.jpg" }];
+  const h = fixture({ rpcResults: { qa_reorder_test_setup_photos: photos } });
+  assert.deepEqual(await h.backend.reorderTestSetupPhotos(runId, [nextId.toUpperCase(), photoId], [photoId, nextId]), photos);
+  assert.deepEqual(h.calls, [["qa_reorder_test_setup_photos", {
+    p_walkdown_id: walkdownId, p_run_id: runId, p_ordered_photo_ids: [nextId, photoId],
+    p_expected_photo_ids: [photoId, nextId], p_expected_revision: 17,
+  }]]);
+  const conflict = fixture({ rpcErrors: { qa_reorder_test_setup_photos: { message: "Setup photos changed. Refresh before saving." } } });
+  await assert.rejects(conflict.backend.reorderTestSetupPhotos(runId, [nextId, photoId], [photoId, nextId]),
+    /Could not save the setup photo order: Setup photos changed/);
+});
+
+test("setup photo reordering rejects malformed, duplicate, incomplete and unpinned requests before RPC", async () => {
+  const h = fixture(), runId = "66666666-6666-4666-8666-666666666666";
+  await assert.rejects(h.backend.reorderTestSetupPhotos("invalid", [], []), /valid imported test run/);
+  for (const invalid of [null, "photos", [null], ["wrong-photo"], [photoId, photoId], Array(31).fill(photoId)]) {
+    await assert.rejects(h.backend.reorderTestSetupPhotos(runId, invalid, [photoId]), /setup photo|30 photos/);
+    await assert.rejects(h.backend.reorderTestSetupPhotos(runId, [photoId], invalid), /setup photo|30 photos/);
+  }
+  await assert.rejects(h.backend.reorderTestSetupPhotos(runId, [], [photoId]), /every current setup photo/);
+  await assert.rejects(h.backend.reorderTestSetupPhotos(runId, [userId], [photoId]), /every current setup photo/);
+  await assert.rejects(h.workspace.forWalkdown(walkdownId).reorderTestSetupPhotos(runId, [], []), /current revision/);
+  assert.deepEqual(h.calls, []);
+});
+
+test("inspection photo reordering supports device, terminal and equipment scopes with a pinned expected order", async () => {
+  const nextId = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+  const photos = [{ id: nextId, recordKey: "device:V-3541", name: "Second" }, { id: photoId, recordKey: "device:V-3541", name: "First" }];
+  const h = fixture({ rpcResults: { qa_reorder_photos: photos } });
+  for (const recordKey of ["device:V-3541", "terminal:A", "equipment:control-box"]) {
+    assert.deepEqual(await h.backend.reorderPhotos(recordKey, [nextId.toUpperCase(), photoId], [photoId, nextId]), photos);
+    assert.deepEqual(h.calls.at(-1), ["qa_reorder_photos", { p_walkdown_id: walkdownId, p_record_key: recordKey,
+      p_ordered_photo_ids: [nextId, photoId], p_expected_photo_ids: [photoId, nextId], p_expected_revision: 17 }]);
+  }
+  const count = h.calls.length;
+  for (const invalid of [null, [photoId, photoId], ["invalid"], Array(1001).fill(photoId), Array(1)]) {
+    await assert.rejects(h.backend.reorderPhotos("device:V-3541", invalid, [photoId]), /inspection photo|1000 photos/);
+    await assert.rejects(h.backend.reorderPhotos("device:V-3541", [photoId], invalid), /inspection photo|1000 photos/);
+  }
+  await assert.rejects(h.backend.reorderPhotos("walkdown:general", [], []), /inspection target/);
+  await assert.rejects(h.backend.reorderPhotos("device:V-3541", [], [photoId]), /every current inspection photo/);
+  await assert.rejects(h.backend.reorderPhotos("device:V-3541", [nextId], [photoId]), /every current inspection photo/);
+  await assert.rejects(h.workspace.forWalkdown(walkdownId).reorderPhotos("terminal:A", [], []), /current revision/);
+  assert.equal(h.calls.length, count);
+  const many = Array.from({ length: 31 }, () => crypto.randomUUID());
+  await h.backend.reorderPhotos("terminal:A", [...many].reverse(), many);
+  const conflict = fixture({ rpcErrors: { qa_reorder_photos: { message: "Inspection photos changed. Refresh before saving." } } });
+  await assert.rejects(conflict.backend.reorderPhotos("device:V-3541", [nextId, photoId], [photoId, nextId]), /Could not save the inspection photo order: Inspection photos changed/);
+});
+
 test("functional test runs require software metadata and finite bounded serialized evidence", async () => {
   const h = fixture();
   const run = { id: "66666666-6666-4666-8666-666666666666", schemaVersion: 1,

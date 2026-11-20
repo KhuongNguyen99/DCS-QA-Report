@@ -26,6 +26,21 @@ end; $$;
 create index if not exists qa_photos_test_run_ready on public.qa_photos(test_run_id, created_at, id)
   where deleted_at is null and upload_state = 'ready';
 
+-- Backfill private ordering metadata without changing approved snapshots or
+-- report review tokens. ALTER TABLE holds the table lock through this migration.
+alter table public.qa_photos add column if not exists photo_position integer check (photo_position > 0);
+alter table public.qa_photos disable trigger qa_photos_draft_only;
+alter table public.qa_photos disable trigger qa_photos_update_report_revision;
+with missing as (
+  select p.id, coalesce((select max(prior.photo_position) from public.qa_photos prior
+      where prior.test_run_id = p.test_run_id), 0)
+    + row_number() over (partition by p.test_run_id order by p.created_at, p.id) as position
+  from public.qa_photos p where p.test_run_id is not null and p.upload_state = 'ready' and p.photo_position is null
+)
+update public.qa_photos p set photo_position = missing.position from missing where p.id = missing.id;
+alter table public.qa_photos enable trigger qa_photos_update_report_revision;
+alter table public.qa_photos enable trigger qa_photos_draft_only;
+
 create or replace function qa_private.test_setup_photo_info(p_id uuid)
 returns jsonb language sql stable security definer set search_path = '' as $$
   select jsonb_build_object('id', id, 'walkdownId', walkdown_id, 'testRunId', test_run_id,
@@ -38,7 +53,7 @@ create or replace function qa_private.test_run_info(p_id uuid)
 returns jsonb language sql stable security definer set search_path = '' as $$
   select data || jsonb_build_object('id', id, 'walkdownId', walkdown_id, 'runVersion', run_version,
     'createdAt', created_at, 'createdBy', created_by, 'updatedAt', updated_at, 'updatedBy', updated_by)
-    || coalesce((select jsonb_build_object('setupPhotos', jsonb_agg(qa_private.test_setup_photo_info(p.id) order by p.created_at, p.id))
+    || coalesce((select jsonb_build_object('setupPhotos', jsonb_agg(qa_private.test_setup_photo_info(p.id) order by p.photo_position, p.created_at, p.id))
       from public.qa_photos p where p.test_run_id = r.id and p.walkdown_id = r.walkdown_id
         and p.upload_state = 'ready' and p.deleted_at is null having count(*) > 0), '{}'::jsonb)
   from public.qa_test_runs r where id = p_id;
@@ -63,7 +78,7 @@ returns jsonb language sql stable security definer set search_path = '' as $$
       'quality', r.quality, 'qualityBy', r.quality_by, 'qualityAt', r.quality_at) order by r.key)
       from public.qa_records r where r.walkdown_id = p_walkdown_id), '[]'::jsonb),
     'photos', coalesce((select jsonb_agg(jsonb_build_object('id', p.id, 'walkdownId', p.walkdown_id, 'recordKey', p.record_key,
-      'path', p.path, 'name', p.name, 'width', p.width, 'height', p.height, 'createdAt', p.created_at, 'createdBy', p.created_by) order by p.created_at, p.id)
+      'path', p.path, 'name', p.name, 'width', p.width, 'height', p.height, 'createdAt', p.created_at, 'createdBy', p.created_by) order by p.record_key, p.photo_position, p.created_at, p.id)
       from public.qa_photos p where p.walkdown_id = p_walkdown_id and p.deleted_at is null and p.upload_state = 'ready' and p.record_key is not null), '[]'::jsonb),
     'comments', coalesce((select jsonb_agg(jsonb_build_object('id', c.id, 'walkdownId', c.walkdown_id,
       'recordKey', coalesce(c.record_key, 'walkdown:general'), 'text', c.text, 'createdAt', c.created_at,
@@ -125,7 +140,10 @@ begin
   if not exists (select 1 from storage.objects where bucket_id = 'qa-evidence' and name = photo.path) then
     raise exception 'Upload the image before adding it to the test setup.';
   end if;
-  update public.qa_photos set upload_state = 'ready', created_at = clock_timestamp() where id = p_id;
+  update public.qa_photos set upload_state = 'ready', created_at = clock_timestamp(),
+    photo_position = (select coalesce(max(p.photo_position), 0) + 1 from public.qa_photos p
+      where p.test_run_id = p_run_id and p.upload_state = 'ready' and p.deleted_at is null)
+  where id = p_id;
   return qa_private.test_setup_photo_info(p_id);
 end;
 $$;
@@ -155,6 +173,39 @@ begin
   end if;
   if exists (select 1 from public.qa_revision_photos where path = photo.path) then return null; end if;
   return photo.path;
+end;
+$$;
+
+create or replace function public.qa_reorder_test_setup_photos(p_walkdown_id uuid, p_run_id uuid,
+  p_ordered_photo_ids uuid[], p_expected_photo_ids uuid[], p_expected_revision bigint)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare current_ids uuid[];
+begin
+  -- This acquires the same transaction lock as uploads, removals, and closeout.
+  perform qa_private.require_test_setup_run(p_walkdown_id, p_run_id, p_expected_revision);
+  if p_ordered_photo_ids is null or p_expected_photo_ids is null
+    or coalesce(array_ndims(p_ordered_photo_ids), 1) <> 1 or coalesce(array_ndims(p_expected_photo_ids), 1) <> 1
+    or cardinality(p_ordered_photo_ids) > 30 or cardinality(p_expected_photo_ids) > 30
+    or cardinality(p_ordered_photo_ids) <> (select count(distinct id) from unnest(p_ordered_photo_ids) id)
+    or cardinality(p_expected_photo_ids) <> (select count(distinct id) from unnest(p_expected_photo_ids) id) then
+    raise exception 'Include each setup photo exactly once in a complete order of at most 30 photos.';
+  end if;
+  select coalesce(array_agg(id order by photo_position, created_at, id), '{}'::uuid[]) into current_ids
+  from public.qa_photos where walkdown_id = p_walkdown_id and test_run_id = p_run_id
+    and upload_state = 'ready' and deleted_at is null;
+  if p_expected_photo_ids is distinct from current_ids then
+    raise exception 'Setup photos changed since you opened them. Refresh before changing their order.' using errcode = '40001';
+  end if;
+  if cardinality(p_ordered_photo_ids) <> cardinality(current_ids) or not p_ordered_photo_ids @> current_ids then
+    raise exception 'Include every current setup photo exactly once in the order.';
+  end if;
+  if p_ordered_photo_ids is distinct from current_ids then
+    update public.qa_photos p set photo_position = requested.position
+    from unnest(p_ordered_photo_ids) with ordinality as requested(id, position)
+    where p.id = requested.id and p.walkdown_id = p_walkdown_id and p.test_run_id = p_run_id
+      and p.photo_position is distinct from requested.position;
+  end if;
+  return coalesce(qa_private.test_run_info(p_run_id)->'setupPhotos', '[]'::jsonb);
 end;
 $$;
 
@@ -217,10 +268,12 @@ for each row execute function qa_private.retire_test_setup_photos();
 
 revoke all on function public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint),
   public.qa_add_test_setup_photo(uuid,uuid,uuid,bigint), public.qa_update_test_setup_photo(uuid,uuid,uuid,text,bigint),
-  public.qa_delete_test_setup_photo(uuid,uuid,uuid,bigint) from public, anon, authenticated;
+  public.qa_delete_test_setup_photo(uuid,uuid,uuid,bigint),
+  public.qa_reorder_test_setup_photos(uuid,uuid,uuid[],uuid[],bigint) from public, anon, authenticated;
 grant execute on function public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint),
   public.qa_add_test_setup_photo(uuid,uuid,uuid,bigint), public.qa_update_test_setup_photo(uuid,uuid,uuid,text,bigint),
-  public.qa_delete_test_setup_photo(uuid,uuid,uuid,bigint) to authenticated;
+  public.qa_delete_test_setup_photo(uuid,uuid,uuid,bigint),
+  public.qa_reorder_test_setup_photos(uuid,uuid,uuid[],uuid[],bigint) to authenticated;
 revoke all on function qa_private.test_setup_photo_info(uuid), qa_private.guard_test_setup_data(),
   qa_private.require_test_setup_run(uuid,uuid,bigint), qa_private.retire_test_setup_photos() from public, anon, authenticated;
 

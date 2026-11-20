@@ -63,6 +63,15 @@ function validateTestRunId(value) {
   return value.toLowerCase();
 }
 
+function validatePhotoOrder(value, kind, max) {
+  if (!Array.isArray(value) || value.length > max)
+    throw new Error(`Provide the complete ${kind} order, with at most ${max} photos.`);
+  const ids = Array.from(value, id => validateEvidenceId(id, kind).toLowerCase());
+  if (new Set(ids).size !== ids.length)
+    throw new Error(`Include each ${kind} exactly once in the order.`);
+  return ids;
+}
+
 function testRunPayload(run) {
   if (!run || typeof run !== "object" || Array.isArray(run))
     throw new Error("Import the test files before saving a run.");
@@ -490,6 +499,18 @@ export function createBackend(
         return uploadPhoto(recordKey, null, photo);
       },
 
+      async reorderPhotos(recordKey, orderedPhotoIds, expectedPhotoIds) {
+        validateRecordKey(recordKey);
+        const ordered = validatePhotoOrder(orderedPhotoIds, "inspection photo", 1000);
+        const expected = validatePhotoOrder(expectedPhotoIds, "inspection photo", 1000);
+        const expectedSet = new Set(expected);
+        if (ordered.length !== expected.length || ordered.some(photoId => !expectedSet.has(photoId)))
+          throw new Error("Include every current inspection photo exactly once in the order.");
+        return writeRpc("qa_reorder_photos", {
+          p_record_key: recordKey, p_ordered_photo_ids: ordered, p_expected_photo_ids: expected,
+        }, "Could not save the inspection photo order");
+      },
+
       async addTestSetupPhoto(runId, photo) {
         validateTestRunId(runId);
         return uploadPhoto(null, runId, photo);
@@ -503,6 +524,18 @@ export function createBackend(
         return writeRpc("qa_update_test_setup_photo", {
           p_run_id: runId, p_id: photoId, p_caption: caption.trim(),
         }, "Could not save the setup photo caption");
+      },
+
+      async reorderTestSetupPhotos(runId, orderedPhotoIds, expectedPhotoIds) {
+        const id = validateTestRunId(runId);
+        const ordered = validatePhotoOrder(orderedPhotoIds, "setup photo", 30);
+        const expected = validatePhotoOrder(expectedPhotoIds, "setup photo", 30);
+        const expectedSet = new Set(expected);
+        if (ordered.length !== expected.length || ordered.some(photoId => !expectedSet.has(photoId)))
+          throw new Error("Include every current setup photo exactly once in the order.");
+        return writeRpc("qa_reorder_test_setup_photos", {
+          p_run_id: id, p_ordered_photo_ids: ordered, p_expected_photo_ids: expected,
+        }, "Could not save the setup photo order");
       },
 
       async deleteTestSetupPhoto(runId, photoId) {

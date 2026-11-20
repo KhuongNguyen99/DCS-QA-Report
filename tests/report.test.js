@@ -128,6 +128,13 @@ function evidencePhotos(key, count) {
   }));
 }
 
+test('inspection PDF preserves the saved photo order for each target', async () => {
+  const key = `device:${schedule.devices[0].id}`;
+  const photos = evidencePhotos(key, 3).reverse();
+  const { fetched } = await compactReport({ photos });
+  assert.deepEqual(fetched.filter(path => path.startsWith('/private/')), photos.map(photo => `/private/${photo.id}`));
+});
+
 function photoPlacements(stream) {
   return [...stream.matchAll(/([\d.]+) 0 0 ([\d.]+) ([\d.]+) ([\d.]+) cm\s*\/I\d+ Do/g)]
     .map(([, width, height, x, y]) => ({ width: +width, height: +height, x: +x, y: +y }));

@@ -8,6 +8,7 @@ import { build } from "esbuild";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { testCommentDraftScope, testCommentDraftKey } from "../src/test-comment-drafts.js";
 import { testTimeRangeScope, readTestTimeRanges } from "../src/test-time-ranges.js";
+import { photoOrderKey } from "../src/photo-order.js";
 
 let directory;
 let bundle;
@@ -889,6 +890,24 @@ test("manual time ranges and pending comment drafts recover independently", asyn
   assert.deepEqual(reopened.stored(), comments, 'resetting the view cannot discard pending report comments');
   assert.equal(reopened.window.dirty.at(-1), true);
   assert.equal(reopened.window.calls.length, 0);
+});
+
+test('recovered photo order selects its run and blocks other edits until it is saved or discarded', async t => {
+  const first = savedRun();
+  const second = savedRun({ id: 'run-2', name: 'Another run', setupPhotos: ['a', 'b'].map(id => ({ id, name: `${id}.jpg`, path: `private/${id}.jpg` })) });
+  const key = photoOrderKey('https://example.supabase.co', 'inspector-1', project.walkdownId, project.revision, `test-run:${second.id}`);
+  const stored = { [key]: JSON.stringify({ v: 1, expectedIds: ['a', 'b'], orderedIds: ['b', 'a'] }) };
+  const h = await setup(t, { runs: [first, second] }, { stored });
+  assert.equal(h.query('.test-run-toolbar select').value, second.id);
+  assert.equal(h.query('.test-run-toolbar select').disabled, true);
+  assert.equal(h.window.dirty.at(-1), true);
+  assert.equal(h.button('Edit run').disabled, true);
+  assert.equal(h.button('Import test run').disabled, true);
+  assert.deepEqual(Array.from(h.document.querySelectorAll('.test-setup-photo-body > .test-setup-filename'), e => e.textContent), ['b.jpg', 'a.jpg']);
+  await h.click(h.button('Discard photo order'));
+  assert.equal(h.query('.test-run-toolbar select').disabled, false);
+  assert.equal(h.window.dirty.at(-1), false);
+  assert.deepEqual(h.stored(), {});
 });
 
 test("time ranges remain local and available on approved reports with identity and revision isolation", async t => {
