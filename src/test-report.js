@@ -490,13 +490,13 @@ function runSummary(writer, run, approver) {
   writer.table([
     { label: "Device name", width: WIDTH - 378 },
     { label: "Slot", width: 118 },
-    { label: "Recorded wiring result", width: 180 },
     { label: "Channels", width: 80 },
+    { label: "Recorded wiring result", width: 180 },
   ], run.devices.map((device) => [
     device.name,
     [...new Set(device.channels.map((channel) => channel.slot).filter(Number.isInteger))]
       .sort((a, b) => a - b).join(", ") || "Unspecified",
-    resultLabel(device.status), device.channels.length,
+    device.channels.length, resultLabel(device.status),
   ]));
 }
 

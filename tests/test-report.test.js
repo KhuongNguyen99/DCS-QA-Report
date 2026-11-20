@@ -606,8 +606,8 @@ test("PDF separates mixed-unit and same-unit signals within a device while print
     const devicePage = result.pages[graphPages[0]];
     assert.match(devicePage, /Valve device/);
     assert.equal(devicePage.match(/^mA$/gm)?.length, 2, "current axes carry unit-only labels");
-    const summary = result.pages.find(page => page.includes("Recorded wiring result\nChannels"));
-    assert.match(summary, /Device name\nSlot\nRecorded wiring result\nChannels\nValve device\n1, 3\nNot tested\n3/);
+    const summary = result.pages.find(page => page.includes("Channels\nRecorded wiring result"));
+    assert.match(summary, /Device name\nSlot\nChannels\nRecorded wiring result\nValve device\n1, 3\n3\nNot tested/);
     assert.doesNotMatch(result.text, /Logged changes|Each signal has a separate graph|Original tokens are retained below|Parameter tables show/);
     assert.match(devicePage, /Engineering note covering every valve graph/);
     for (const time of ["19:18:44", "19:17:46", "19:19:34"]) assert.ok(devicePage.includes(time));
