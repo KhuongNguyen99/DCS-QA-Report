@@ -1,5 +1,6 @@
 import { jsPDF } from "jspdf";
 import { revisionNumber } from "./domain.js";
+import { normalizePronetaStatus } from "./proneta-parser.js";
 import { pronetaSelectionLabel } from "./proneta-selection-labels.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
 import { buildTestChart, formatSourceTime, isTestTimeRange } from "./test-chart.js";
@@ -110,6 +111,14 @@ function textStyle(doc, size = 10, bold = false, color = COLOR.ink) {
   doc.setFont("NotoSans", bold ? "bold" : "normal");
   doc.setFontSize(size);
   doc.setTextColor(...color);
+}
+
+function isNotApplicable(value) {
+  return normalizePronetaStatus(value) === "Not applicable";
+}
+
+function applicableChannel({ symbolicName, status, rawStatus }) {
+  return ![symbolicName, status, rawStatus].some(isNotApplicable);
 }
 
 function resultLabel(value) {
@@ -495,7 +504,7 @@ function channelDetails(writer, channel, run, { heading = true, charts, deviceNa
   const result = resultLabel(channel.status);
   const { rawStatus } = channel;
   const source = rawStatus && !/^\s*ok\s*$/i.test(rawStatus) ? ` (source: ${rawStatus})` : "";
-  const wiring = `Recorded wiring result: ${result}${source}`;
+  const wiring = `Test Result: ${result}${source}`;
   const color = resultColor(result);
   const populated = (channel.series || []).filter(series => series.points?.length);
   if (charts) {
@@ -545,7 +554,7 @@ function runSummary(writer, run, approver) {
     { label: "Device name", width: WIDTH - 378 },
     { label: "Slot", width: 118 },
     { label: "Channels", width: 80 },
-    { label: "Recorded wiring result", width: 180 },
+    { label: "Test Result", width: 180 },
   ], run.devices.map((device) => [
     device.name,
     [...new Set(device.channels.map((channel) => channel.slot).filter(Number.isInteger))]
@@ -559,7 +568,7 @@ function runAppendices(writer, run) {
     writer.page(`${run.name || "Test run"} - Unassigned channels`);
     writer.table([
       { label: "Station", width: 135 }, { label: "Slot / channel", width: 130 },
-      { label: "Symbolic name", width: 180 }, { label: "Recorded wiring result", width: WIDTH - 445 },
+      { label: "Symbolic name", width: 180 }, { label: "Test Result", width: WIDTH - 445 },
     ], run.unassignedChannels.map((channel) => [stationName(run, channel.stationId),
       `${channel.slot ?? "?"} / ${channelLabel(channel)}`, channel.symbolicName || "Unassigned", resultLabel(channel.status)]));
     for (const channel of run.unassignedChannels) {
@@ -609,6 +618,12 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       throw new Error("The saved test run is missing its software name or version.");
     if (!Array.isArray(run.devices) || run.devices.some((device) => !device.name || !Array.isArray(device.channels)))
       throw new Error("The saved test run has incomplete device data.");
+    run.devices = run.devices.flatMap(device => {
+      if (isNotApplicable(device.name) || isNotApplicable(device.status)) return [];
+      const channels = device.channels.filter(applicableChannel);
+      return channels.length || !device.channels.length ? [{ ...device, channels }] : [];
+    });
+    run.unassignedChannels = (run.unassignedChannels || []).filter(applicableChannel);
     validateReportComment(run.comment, "overall test run comment");
     for (const device of run.devices) validateReportComment(device.comment, "device comment");
     validateSetupPhotos(run, project);
@@ -668,7 +683,7 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       writer.page(device.name);
       if (device.channels.length > 1) {
         const result = resultLabel(device.status);
-        writer.paragraph(`Device wiring result: ${result}`, { bold: true, color: resultColor(result) });
+        writer.paragraph(`Device Test Result: ${result}`, { bold: true, color: resultColor(result) });
       }
       const charts = [];
       for (const channel of device.channels) channelDetails(writer, channel, run, {

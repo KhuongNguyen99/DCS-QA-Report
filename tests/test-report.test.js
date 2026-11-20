@@ -208,6 +208,13 @@ test("test PDF rejects drafts, incomplete approval data, wrong skid, and missing
 test("approved test PDF preserves evidence and run context while fitting each graph's time axis", async () => {
   await withFonts(async (requested) => {
     const state = closedState();
+    const run = state.testRuns[0];
+    const channel = run.devices[0].channels[0];
+    run.devices.push({ ...run.devices[0], id: "na-device", name: "N.A.", comment: "Skipped device comment" });
+    run.devices[0].channels.push({
+      ...channel, id: "na-channel", status: "Not applicable", rawStatus: "N.a.",
+      parameters: [{ name: "Skipped channel setting", value: "1" }],
+    });
     const savedState = structuredClone(state);
     const result = await pdfContent(await createTestReportPdf({ state }));
     assert.deepEqual(state, savedState, "The export leaves approved evidence intact");
@@ -221,17 +228,18 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.doesNotMatch(result.text, /Stations and module parameters|Set parameters/);
     assert.equal(photoPlacements(result.streams[0]).length, 1, "the QC cover logo is on the first page");
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
-      "Siemens PRONETA Basic", "Version entered by tester", "RTD-EXAMPLE", "VALVE-EXAMPLE", "Recorded wiring result: Failed (source: Error)",
-      "Recorded wiring result: Passed", "Celsius", "7FFFH", "synthetic-log.csv, row 3",
-      "Module diagnostic setting", "Unused-channel setting", "Not applicable"])
+      "Siemens PRONETA Basic", "Version entered by tester", "RTD-EXAMPLE", "VALVE-EXAMPLE", "Test Result: Failed (source: Error)",
+      "Test Result: Passed", "Celsius", "7FFFH", "synthetic-log.csv, row 3",
+      "Module diagnostic setting"])
       assert.ok(result.text.includes(text), `Missing report text: ${text}`);
     assert.doesNotMatch(result.text, /Sources and import\s+notes|SHA-256|Synthetic warning retained for review|Unrecognized synthetic event/);
+    assert.doesNotMatch(result.text, /N\/A|Not applicable|Unused-channel setting|Unassigned channels|Skipped device comment|Skipped channel setting|Recorded wiring result/i);
     assert.ok(result.streams.slice(1).every(stream => photoPlacements(stream).length === 0), "charts remain vector shapes");
     assert.match(result.raw, /D:20261120113000\+00'00'/, "PDF metadata uses approval time, not export time");
     assert.doesNotMatch(result.text, /\(source: OK\)/i);
     const cells = result.blocks.flat();
     for (const [label, rgb] of [["Passed", [31, 105, 57]], ["Failed", [170, 49, 43]]]) {
-      const matching = cells.filter(({ text }) => text === label || text.startsWith("Recorded wiring result: " + label));
+      const matching = cells.filter(({ text }) => text === label || text.startsWith("Test Result: " + label));
       assert.ok(matching.length >= 2, "the result appears in the summary and on its device page");
       assert.ok(matching.every(({ color }) => color?.every((value, index) => Math.abs(value - rgb[index] / 255) < 0.005)));
     }
@@ -414,12 +422,12 @@ test("result-only runs keep Not tested distinct without fabricating a graph or p
     run.devices = [run.devices[0]];
     run.devices[0].status = "Not tested";
     run.devices[0].channels[0].status = "Not tested";
-    run.devices[0].channels[0].rawStatus = "N.a.";
+    run.devices[0].channels[0].rawStatus = "Unrecorded";
     run.devices[0].channels[0].series = [];
     const result = await pdfContent(await createTestReportPdf({ state }));
     assert.match(result.text, /No dated event log imported/);
-    assert.match(result.text, /Recorded wiring result: Not tested \(source: N.a.\)/);
-    assert.doesNotMatch(result.text, /connect recorded changes|Recorded wiring result: Passed/);
+    assert.match(result.text, /Test Result: Not tested \(source: Unrecorded\)/);
+    assert.doesNotMatch(result.text, /connect recorded changes|Test Result: Passed/);
   });
 });
 
@@ -676,8 +684,8 @@ test("PDF separates mixed-unit and same-unit signals within a device while print
     const devicePage = result.pages[graphPages[0]];
     assert.match(devicePage, /Valve device/);
     assert.equal(devicePage.match(/^mA$/gm)?.length, 2, "current axes carry unit-only labels");
-    const summary = result.pages.find(page => page.includes("Channels\nRecorded wiring result"));
-    assert.match(summary, /Device name\nSlot\nChannels\nRecorded wiring result\nValve device\n1, 3\n3\nNot tested/);
+    const summary = result.pages.find(page => page.includes("Channels\nTest Result"));
+    assert.match(summary, /Device name\nSlot\nChannels\nTest Result\nValve device\n1, 3\n3\nNot tested/);
     assert.doesNotMatch(result.text, /Logged changes|Each signal has a separate graph|Original tokens are retained below|Parameter tables show/);
     assert.match(devicePage, /Engineering note covering every valve graph/);
     for (const time of ["19:18:44", "19:17:46", "19:19:34"]) assert.ok(devicePage.includes(time));
