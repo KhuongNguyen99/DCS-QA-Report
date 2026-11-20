@@ -18,8 +18,9 @@ export function formatTestValue(value) {
 
 /**
  * Geometry shared by the SVG preview and vector PDF chart. Every call requires
- * the run-wide clock, never a channel's first/last point. Only observed after-
- * values are plotted; event logs cannot establish a continuous sampled trace.
+ * the run-wide clock, never a channel's first/last point. Dots stay tied to the
+ * observed after-values. Connections and the held final value are display-only
+ * geometry, so no synthetic readings enter the saved evidence or event count.
  */
 export function buildTestChart(series, clock, {
   width = 700, height = 220,
@@ -41,17 +42,28 @@ export function buildTestChart(series, clock, {
     : left + (time - startMs) / (endMs - startMs) * plot.width;
   const valid = [];
   const invalid = [];
+  const sequence = [];
+  let latestTime = -Infinity;
   for (const point of series.points) {
     if (!Number.isFinite(point.timeMs)) {
       invalid.push({ ...point, x: null });
+      sequence.push(null);
       continue;
     }
     if (point.timeMs < startMs || point.timeMs > endMs)
       throw new Error("An observation falls outside the shared test-run time span.");
+    if (point.timeMs < latestTime)
+      throw new Error("Observations must be ordered by time before connecting the graph.");
+    latestTime = point.timeMs;
     const candidate = { ...point, x: xFor(point.timeMs) };
     if (point.valid === false || !Number.isFinite(point.value)
-      || (series.kind === "digital" && point.value !== 0 && point.value !== 1)) invalid.push(candidate);
-    else valid.push(candidate);
+      || (series.kind === "digital" && point.value !== 0 && point.value !== 1)) {
+      invalid.push(candidate);
+      sequence.push(null);
+    } else {
+      valid.push(candidate);
+      sequence.push(candidate);
+    }
   }
   let min;
   let max;
@@ -69,6 +81,29 @@ export function buildTestChart(series, clock, {
     min = 0; max = 1;
   }
   const yFor = (value) => top + (max - value) / (max - min) * plot.height;
+  const points = valid.map((point) => ({ ...point, y: yFor(point.value) }));
+  const connections = [];
+  const coordinate = (point) => ({ x: point.x, y: yFor(point.value) });
+  const connect = (from, to) => {
+    if (from.x !== to.x || from.y !== to.y) connections.push({ from, to });
+  };
+  let previous = null;
+  for (const point of sequence) {
+    if (previous && point) {
+      const from = coordinate(previous);
+      const to = coordinate(point);
+      if (series.kind === "digital") {
+        const corner = { x: to.x, y: from.y };
+        connect(from, corner);
+        connect(corner, to);
+      } else connect(from, to);
+    }
+    // An invalid observation breaks the trace, including a held final value.
+    previous = point;
+  }
+  const extension = previous && previous.timeMs < endMs
+    ? { from: coordinate(previous), to: { x: plot.left + plot.width, y: yFor(previous.value) } }
+    : null;
   const count = Math.max(2, Math.min(9, Math.floor(tickCount) || 5));
   const spanningDays = formatSourceTime(startMs, true).slice(0, 10) !== formatSourceTime(endMs, true).slice(0, 10);
   const ticks = startMs === endMs ? [startMs]
@@ -85,7 +120,7 @@ export function buildTestChart(series, clock, {
       fullLabel: formatSourceTime(timeMs, true),
     })),
     yTicks: yValues.map((value) => ({ value, y: yFor(value), label: formatTestValue(value) })),
-    points: valid.map((point) => ({ ...point, y: yFor(point.value) })),
+    points, connections, extension,
     invalidPoints: invalid,
     observedCount: valid.length,
     invalidCount: invalid.length,

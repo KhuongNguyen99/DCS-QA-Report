@@ -182,7 +182,7 @@ function reportWriter(doc) {
       width: WIDTH, height: 201, padding: { left: 57, right: 25, top: 20, bottom: 45 },
     });
     const title = `${series.name || "Recorded values"} - ${geometry.unit}`;
-    const observationNote = `${geometry.observedCount} observed change(s)${geometry.invalidCount ? `; ${geometry.invalidCount} invalid reading(s), marked below the plot when dated` : ""}. Points are logged changes, not continuous samples. Blank intervals have no recorded observations.`;
+    const observationNote = `${geometry.observedCount} observed change(s)${geometry.invalidCount ? `; ${geometry.invalidCount} invalid reading(s), marked below the plot when dated` : ""}. ${series.kind === "digital" ? "Steps" : "Lines"} connect recorded changes; dashed tail holds the last value to the run end.`;
     const rangeNote = `Shared run span: ${rangeLabel(clock)}. ${clockLabel(clock)}.`;
     const heightFor = (value, size, lineHeight, gap) => {
       textStyle(doc, size);
@@ -192,7 +192,7 @@ function reportWriter(doc) {
       + heightFor(observationNote, 7.8, 11, 5) + heightFor(rangeNote, 7.8, 11, 12));
     heading(title, 10);
     const originY = y;
-    const { plot, points, invalidPoints, xTicks, yTicks } = geometry;
+    const { plot, points, invalidPoints, xTicks, yTicks, connections, extension } = geometry;
     doc.setLineWidth(0.35);
     textStyle(doc, 7.5, false, COLOR.muted);
     for (const tick of yTicks) {
@@ -205,6 +205,18 @@ function reportWriter(doc) {
       doc.line(PAGE.margin + tick.x, originY + plot.top, PAGE.margin + tick.x, originY + plot.top + plot.height);
       doc.text(tick.label, PAGE.margin + tick.x, originY + plot.top + plot.height + 19, { align: "center" });
       if (tick.dateLabel) doc.text(tick.dateLabel, PAGE.margin + tick.x, originY + plot.top + plot.height + 29, { align: "center" });
+    }
+    doc.setDrawColor(...COLOR.blue);
+    doc.setLineWidth(1.1);
+    doc.setLineDashPattern([], 0);
+    for (const { from, to } of connections) {
+      doc.line(PAGE.margin + from.x, originY + from.y, PAGE.margin + to.x, originY + to.y);
+    }
+    if (extension) {
+      doc.setLineDashPattern([4, 3], 0);
+      doc.line(PAGE.margin + extension.from.x, originY + extension.from.y,
+        PAGE.margin + extension.to.x, originY + extension.to.y);
+      doc.setLineDashPattern([], 0);
     }
     doc.setFillColor(...COLOR.blue);
     points.forEach((point) => doc.circle(PAGE.margin + point.x, originY + point.y, 1.8, "F"));

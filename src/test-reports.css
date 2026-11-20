@@ -96,6 +96,9 @@
 .test-chart svg { display: block; width: 100%; min-width: 410px; }
 .test-chart svg text { fill: #65735f; font: 11px "QC Sans", sans-serif; }
 .test-gridline { stroke: #e2e7df; stroke-width: 1; }
+.test-trace,
+.test-held-value { stroke: #39724e; stroke-width: 1.5; fill: none; }
+.test-held-value { stroke-dasharray: 6 4; }
 .test-observation { fill: #39724e; opacity: 0.8; }
 .test-invalid-observation { stroke: #b54338; stroke-width: 1.8; fill: none; }
 .test-chart > p { font-size: 11px; color: #6c796e; padding: 0 14px 12px; }

@@ -15,7 +15,8 @@ test("different channel coverage retains identical shared time ticks and graph b
   assert.equal(early.points[0].x, early.plot.left);
   assert.equal(late.points[1].x, late.plot.left + late.plot.width);
   assert.equal(early.points.length, 2, "no synthetic endpoints or previous values");
-  assert.ok(early.points[1].x < late.points[0].x, "unobserved station intervals remain blank");
+  assert.ok(early.points[1].x < late.points[0].x, "original station timestamps are preserved");
+  assert.equal(early.extension.to.x, late.points[1].x, "the early series holds its last value to the common end");
 });
 
 test("invalid values do not distort the range and duplicate timestamp observations remain visible data", () => {
@@ -33,7 +34,7 @@ test("invalid values do not distort the range and duplicate timestamp observatio
   assert.equal(result.invalidPoints[1].value, 32767);
 });
 
-test("digital and constant signals have usable axes without extrapolated samples", () => {
+test("digital and constant signals have usable axes without adding measured samples", () => {
   const digital = buildTestChart({ kind: "digital", points: [point(1000, 1), point(2000, 0), point(3000, 3)] }, clock);
   assert.deepEqual(digital.yTicks.map((tick) => tick.value), [0, 1]);
   assert.equal(digital.invalidCount, 1);
@@ -43,6 +44,67 @@ test("digital and constant signals have usable axes without extrapolated samples
   const instant = buildTestChart({ kind: "analog", points: [point(0, 20)] }, { startMs, endMs: startMs });
   assert.equal(instant.xTicks.length, 1);
   assert.equal(instant.points[0].x, instant.plot.left + instant.plot.width / 2);
+  assert.equal(instant.extension, null);
+});
+
+test("analog connections preserve same-second changes and hold the final value to the shared right edge", () => {
+  const series = { kind: "analog", points: [point(1000, 4), point(5000, 10), point(5000, 7)] };
+  const original = structuredClone(series);
+  const chart = buildTestChart(series, clock);
+  const xy = point => ({ x: point.x, y: point.y });
+  assert.deepEqual(chart.connections, [
+    { from: xy(chart.points[0]), to: xy(chart.points[1]) },
+    { from: xy(chart.points[1]), to: xy(chart.points[2]) },
+  ]);
+  assert.equal(chart.connections[1].from.x, chart.connections[1].to.x, "same-second transitions stay vertical");
+  assert.deepEqual(chart.extension, {
+    from: xy(chart.points[2]), to: { x: chart.plot.left + chart.plot.width, y: chart.points[2].y },
+  });
+  assert.equal(chart.observedCount, 3);
+  assert.equal(chart.points.length, 3, "held endpoint is not counted as another observation");
+  assert.deepEqual(series, original, "rendering does not change saved observations");
+});
+
+test("digital connections hold the previous state until each recorded transition", () => {
+  const chart = buildTestChart({ kind: "digital", points: [point(1000, 0), point(2000, 1), point(3000, 0)] }, clock);
+  const [first, second, third] = chart.points;
+  assert.deepEqual(chart.connections, [
+    { from: { x: first.x, y: first.y }, to: { x: second.x, y: first.y } },
+    { from: { x: second.x, y: first.y }, to: { x: second.x, y: second.y } },
+    { from: { x: second.x, y: second.y }, to: { x: third.x, y: second.y } },
+    { from: { x: third.x, y: second.y }, to: { x: third.x, y: third.y } },
+  ]);
+  assert.ok(chart.connections.every(({ from, to }) => from.x === to.x || from.y === to.y));
+  assert.equal(chart.extension.from.y, third.y);
+  assert.equal(chart.extension.to.y, third.y);
+});
+
+test("invalid observations break connections and stop a trailing held value", () => {
+  const chart = buildTestChart({ kind: "analog", points: [
+    point(0, 4), point(1000, null, { valid: false }), point(2000, 8), point(3000, 10),
+    point(4000, null, { valid: false }),
+  ] }, clock);
+  assert.equal(chart.connections.length, 1, "no line crosses an invalid reading");
+  assert.equal(chart.connections[0].from.x, chart.points[1].x);
+  assert.equal(chart.connections[0].to.x, chart.points[2].x);
+  assert.equal(chart.extension, null, "an invalid final event cannot imply the old reading stayed valid");
+  const unknownTime = buildTestChart({ kind: "analog", points: [point(0, 4), { value: 7 }] }, clock);
+  assert.equal(unknownTime.extension, null);
+  assert.deepEqual(unknownTime.connections, []);
+});
+
+test("single-point and empty series have bounded tails without invented leading data", () => {
+  const single = buildTestChart({ kind: "analog", points: [point(2000, 5)] }, clock);
+  assert.deepEqual(single.connections, []);
+  assert.equal(single.extension.from.x, single.points[0].x);
+  assert.ok(single.extension.from.x > single.plot.left, "nothing is drawn before the first reading");
+  assert.equal(single.extension.to.x, single.plot.left + single.plot.width);
+  const ended = buildTestChart({ kind: "analog", points: [point(392_000, 5)] }, clock);
+  assert.equal(ended.extension, null);
+  const empty = buildTestChart({ kind: "analog", points: [] }, clock);
+  assert.deepEqual(empty.connections, []);
+  assert.equal(empty.extension, null);
+  assert.throws(() => buildTestChart({ points: [point(2000, 5), point(1000, 4)] }, clock), /ordered by time/);
 });
 
 test("wall-clock display is timezone-independent and incomplete or out-of-range observations cannot be hidden", () => {

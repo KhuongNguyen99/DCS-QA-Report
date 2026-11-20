@@ -158,6 +158,8 @@ test("multi-file preview leaves the software version blank and uses one shared d
     assert.equal(chart.dataset.timeEnd, String(startMs + 392_000));
     assert.equal(chart.querySelectorAll("circle.test-observation").length, 1, "no invented endpoints");
   }
+  assert.equal(charts[0].querySelectorAll(".test-held-value").length, 1, "an early final reading extends to the common run end");
+  assert.equal(charts[1].querySelectorAll(".test-held-value").length, 0, "a reading at the common end needs no extra tail");
   await h.click(h.button("Save test run"));
   assert.equal(h.window.calls.length, 0);
   assert.match(h.text(), /software version before saving/);
@@ -280,4 +282,30 @@ test("closed read-only runs remain reviewable and exportable with absolute graph
   await h.click(h.button("Export test PDF"));
   assert.deepEqual(Array.from(h.window.exports), ["run-1"]);
   assert.equal(h.window.calls.length, 0);
+});
+
+test("SVG graphs connect observations and draw a separate horizontal final-value extension", async t => {
+  const run = savedRun();
+  const series = run.devices[0].channels[0].series[0];
+  series.kind = "analog";
+  series.unit = "mA";
+  series.points = [
+    { ...series.points[0], timeMs: startMs + 1000, value: 4, rawValue: "4 mA" },
+    { ...series.points[0], timeMs: startMs + 5000, value: 20, rawValue: "20 mA" },
+  ];
+  const h = await setup(t, { runs: [run] });
+  const chart = h.query("svg[data-time-start]");
+  const dots = chart.querySelectorAll("circle.test-observation");
+  const trace = chart.querySelector(".test-trace");
+  const tail = chart.querySelector(".test-held-value");
+  assert.equal(dots.length, 2);
+  assert.equal(trace.getAttribute("x1"), dots[0].getAttribute("cx"));
+  assert.equal(trace.getAttribute("y1"), dots[0].getAttribute("cy"));
+  assert.equal(trace.getAttribute("x2"), dots[1].getAttribute("cx"));
+  assert.equal(trace.getAttribute("y2"), dots[1].getAttribute("cy"));
+  assert.equal(tail.getAttribute("x1"), dots[1].getAttribute("cx"));
+  assert.equal(tail.getAttribute("y1"), tail.getAttribute("y2"));
+  assert.ok(Number(tail.getAttribute("x2")) > Number(tail.getAttribute("x1")));
+  assert.match(h.text(), /dashed tail holds the last value to the run end/);
+  assert.equal(series.points.length, 2);
 });

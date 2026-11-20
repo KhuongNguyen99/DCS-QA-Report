@@ -91,6 +91,30 @@ async function pdfContent(blob) {
   return { raw, text: pages.join("\n"), pages, streams, blocks };
 }
 
+// Read the actual PDF line operators, including their stroke color and dash
+// state, so the regression checks the exported vectors rather than a mock.
+function pdfLines(stream) {
+  let color = [], dash = [], cursor = null, path = [];
+  const result = [];
+  for (const line of stream.split(/\r?\n/)) {
+    const tokens = line.trim().split(/\s+/);
+    const operator = tokens.at(-1);
+    if (operator === "RG" && tokens.length === 4) color = tokens.slice(0, 3).map(Number);
+    else if (operator === "d") {
+      const pattern = line.match(/\[([^\]]*)\]/)?.[1].trim();
+      dash = pattern ? pattern.split(/\s+/).map(Number) : [];
+    } else if (operator === "m" && tokens.length === 3) cursor = { x: Number(tokens[0]), y: Number(tokens[1]) };
+    else if (operator === "l" && tokens.length === 3 && cursor) {
+      const next = { x: Number(tokens[0]), y: Number(tokens[1]) };
+      path.push({ from: cursor, to: next }); cursor = next;
+    } else if (operator === "S") {
+      result.push(...path.map(segment => ({ ...segment, color: [...color], dash: [...dash] })));
+      path = []; cursor = null;
+    } else if (["f", "F", "f*", "n"].includes(operator)) { path = []; cursor = null; }
+  }
+  return result;
+}
+
 async function withFonts(callback) {
   const original = globalThis.fetch;
   const requested = [];
@@ -137,11 +161,11 @@ test("approved test PDF preserves results, active settings, raw invalid tokens, 
     assert.ok(result.text.replace(/\s/g, "").includes("ab".repeat(32)));
     assert.doesNotMatch(result.raw, /\/Subtype\s*\/Image/, "Charts must remain vector shapes");
     assert.match(result.raw, /D:20261120113000\+00'00'/, "PDF metadata uses approval time, not export time");
-    const graphPages = result.pages.filter((page) => page.includes("Points are logged changes"));
+    const graphPages = result.pages.filter((page) => page.includes("connect recorded changes"));
     assert.equal(graphPages.length, 2);
     for (const page of graphPages) {
       for (const tick of ["19:17:00", "19:18:38", "19:20:16", "19:21:54", "19:23:32"]) assert.ok(page.includes(tick), tick);
-      assert.match(page, /not continuous samples/);
+      assert.match(page, /dashed tail holds the last value to the run end/);
       assert.match(page, /Source clock \(unspecified\)/);
     }
     result.pages.forEach((page, index) => {
@@ -232,7 +256,7 @@ test("result-only runs keep Not tested distinct without fabricating a graph or p
     const result = await pdfContent(await createTestReportPdf({ state }));
     assert.match(result.text, /No dated event log imported/);
     assert.match(result.text, /Recorded wiring result: Not tested \(source: N.a.\)/);
-    assert.doesNotMatch(result.text, /Points are logged changes|Recorded wiring result: Passed/);
+    assert.doesNotMatch(result.text, /connect recorded changes|Recorded wiring result: Passed/);
   });
 });
 
@@ -248,5 +272,70 @@ test("explicit-offset logs label normalized graph coordinates as UTC and retain 
     assert.match(result.text, /original event timestamps retain their offsets/);
     assert.match(result.text, /2026-11-19T14:17:02-05:00/);
     assert.doesNotMatch(result.text, /Clock: Source clock \(timezone not recorded\)/);
+  });
+});
+
+test("PDF connects analog values and digital steps, draws held tails, and breaks at invalid readings", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const points = entries => entries.map(([offset, value]) => ({
+      timeMs: startMs + offset, time: "Synthetic source time", value, valid: value !== null,
+      rawValue: value === null ? "Invalid" : String(value), previousValue: 0,
+      previousRawValue: "0", sourceId: "source-log", sourceRow: 2,
+    }));
+    const cases = [
+      { name: "Analog ramp", kind: "analog", points: points([[0, 4], [196_000, 20]]) },
+      { name: "Digital steps", kind: "digital", points: points([[98_000, 1], [196_000, 0]]) },
+      { name: "Invalid gap", kind: "analog", points: points([[0, 4], [98_000, 8], [196_000, null], [294_000, 12]]) },
+      { name: "Invalid final reading", kind: "analog", points: points([[0, 4], [196_000, 8], [294_000, null]]) },
+    ];
+    run.devices = cases.map((series, index) => ({ id: `vector-${index}`, name: series.name, status: "Not tested", channels: [{
+      id: `channel-${index}`, symbolicName: series.name, stationId: "station-1", slot: index + 1,
+      channel: 0, status: "Not tested", parameters: [], series: [{ id: `series-${index}`, unit: "", ...series }],
+    }] }));
+    run.unassignedChannels = [];
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    const isBlue = line => line.color.length === 3 && line.color.every((value, index) => Math.abs(value - [24, 108, 161][index] / 255) < 0.005);
+    const graphLines = name => {
+      const page = result.pages.findIndex(text => text.includes(name) && text.includes("connect recorded changes"));
+      assert.ok(page >= 0, `Missing graph for ${name}`);
+      return pdfLines(result.streams[page]).filter(isBlue);
+    };
+    const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.01, `${actual} differs from ${expected}`);
+    const same = (a, b) => { near(a.x, b.x); near(a.y, b.y); };
+    // Landscape report plot spans these fixed page positions; all cases keep
+    // the same run clock while their observations cover different intervals.
+    const left = 100.2, right = 723.8, width = right - left;
+    const analog = graphLines("Analog ramp");
+    assert.equal(analog.length, 2);
+    assert.deepEqual(analog[0].dash, []);
+    assert.deepEqual(analog[1].dash, [4, 3]);
+    near(analog[0].from.x, left); near(analog[0].to.x, left + width / 2);
+    assert.notEqual(analog[0].from.y, analog[0].to.y, "analog points are connected directly");
+    same(analog[1].from, analog[0].to);
+    near(analog[1].from.y, analog[1].to.y); near(analog[1].to.x, right);
+
+    const digital = graphLines("Digital steps");
+    assert.equal(digital.length, 3);
+    assert.deepEqual(digital.map(line => line.dash), [[], [], [4, 3]]);
+    near(digital[0].from.x, left + width / 4); near(digital[0].to.x, left + width / 2);
+    near(digital[0].from.y, digital[0].to.y);
+    same(digital[1].from, digital[0].to); near(digital[1].from.x, digital[1].to.x);
+    assert.notEqual(digital[1].from.y, digital[1].to.y, "digital state changes vertically");
+    same(digital[2].from, digital[1].to); near(digital[2].from.y, digital[2].to.y); near(digital[2].to.x, right);
+
+    const gap = graphLines("Invalid gap");
+    assert.equal(gap.length, 2, "there is no connection across the invalid event");
+    near(gap[0].to.x, left + width / 4);
+    near(gap[1].from.x, left + width * 3 / 4);
+    assert.deepEqual(gap[1].dash, [4, 3]); near(gap[1].to.x, right);
+    const trailing = graphLines("Invalid final reading");
+    assert.equal(trailing.length, 1, "an invalid final event prevents holding an earlier value");
+    assert.deepEqual(trailing[0].dash, []);
+    const red = result.streams.flatMap(pdfLines).filter(line => line.color.length === 3
+      && line.color.every((value, index) => Math.abs(value - [170, 49, 43][index] / 255) < 0.005));
+    assert.ok(red.length > 0);
+    assert.ok(red.every(line => line.dash.length === 0), "held-tail dash style must not leak into invalid-value markers");
   });
 });

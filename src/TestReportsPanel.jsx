@@ -35,6 +35,12 @@ export function TestSeriesChart({ series, clock }) {
             <text x={tick.x} y={plot.top + plot.height + 21} textAnchor="middle">{tick.label}</text>
             {tick.dateLabel && <text x={tick.x} y={plot.top + plot.height + 37} textAnchor="middle">{tick.dateLabel}</text>}
           </g>)}
+          {chart.connections.map((segment, index) => <line key={`trace-${index}`}
+            x1={segment.from.x} y1={segment.from.y} x2={segment.to.x} y2={segment.to.y} className="test-trace" />)}
+          {chart.extension && <line x1={chart.extension.from.x} y1={chart.extension.from.y}
+            x2={chart.extension.to.x} y2={chart.extension.to.y} className="test-held-value">
+            <title>Last recorded value held to the end of the shared run</title>
+          </line>}
           {chart.points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={3} className="test-observation">
             <title>{formatSourceTime(point.timeMs, true)}: {formatTestValue(point.value)} {series.unit} · source row {point.sourceRow}</title>
           </circle>)}
@@ -44,7 +50,7 @@ export function TestSeriesChart({ series, clock }) {
             </path>)}
         </svg>
       </div>
-      <p>{chart.observedCount} recorded change values{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}. All graphs use the same run time span{clock.basis === "absolute" ? " in UTC" : ""}. Blank intervals have no recorded changes.</p>
+      <p>{chart.observedCount} recorded change values{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : "Lines connect recorded readings"}; the dashed tail holds the last value to the run end. All graphs use the same run time span{clock.basis === "absolute" ? " in UTC" : ""}.</p>
       <details className="test-events"><summary>View recorded events ({series.points.length})</summary>
         <div className="test-table-scroll"><table>
           <thead><tr><th>Source time</th><th>Previous</th><th>Recorded value</th><th>Source row</th></tr></thead>
