@@ -531,11 +531,13 @@ test("App keeps unsaved test edits across navigation, locks approval, and export
   const setupPhoto = { id: "setup-1", walkdownId: SKID, testRunId: testRun().id,
     path: "private/original-setup.jpg", name: "Original setup", width: 800, height: 600,
     caption: "Approved pneumatic and feedback setup", createdBy: INSPECTOR };
-  h.server.state.testRuns = [{ ...testRun(), setupPhotos: [setupPhoto] }];
+  h.server.state.testRuns = [{ ...testRun(), setupPhotos: [setupPhoto],
+    devices: [{ id: "V-3541", name: "V-3541", status: "Passed", channels: [] }] }];
   await h.notify();
   await h.nav("Test reports");
   assert.equal(h.button("Export test PDF").disabled, true);
-  await h.click(h.button("Edit run"));
+  await h.fill(h.document.querySelector('[aria-label="Overall test run comment"] textarea'), "Run reviewed before approval");
+  await h.fill(h.document.querySelector('.test-device-content .test-comment textarea'), "Device wiring verified\nRetest complete");
   const name = [...h.document.querySelectorAll(".test-metadata-grid label")].find(item => item.textContent === "Test run name").querySelector("input");
   await h.fill(name, "Reviewed valve test");
   assert.equal(h.document.querySelector("#skid-report").disabled, true);
@@ -545,11 +547,14 @@ test("App keeps unsaved test edits across navigation, locks approval, and export
   assert.equal(h.button("Approve & close").disabled, true);
   await h.click(h.button("Review test reports"));
   assert.equal(name.value, "Reviewed valve test", "navigation preserves local import metadata");
+  assert.equal(h.document.querySelector('[aria-label="Overall test run comment"] textarea').value, "Run reviewed before approval");
   await h.click(h.button("Save test run"));
   assert.equal(h.server.calls.at(-1).kind, "saveTestRun");
   assert.equal(h.server.calls.at(-1).revision, 7);
   assert.equal(h.server.calls.at(-1).run.runVersion, 1);
   assert.equal(h.server.state.testRuns[0].name, "Reviewed valve test");
+  assert.equal(h.server.state.testRuns[0].comment, "Run reviewed before approval");
+  assert.equal(h.server.state.testRuns[0].devices[0].comment, "Device wiring verified\nRetest complete");
   await h.nav("Report");
   assert.equal(h.button("Approve & close").disabled, false);
   await h.click(h.button("Approve & close"));
@@ -562,6 +567,9 @@ test("App keeps unsaved test edits across navigation, locks approval, and export
   await h.click(h.button("Export test PDF"));
   assert.equal(h.window.testPdfExports.at(-1).runId, testRun().id);
   assert.equal(h.window.testPdfExports.at(-1).state.project.revision, 7);
+  assert.equal(h.document.querySelector('.test-comment textarea'), null, "approved comments are read-only");
+  assert.equal(h.window.testPdfExports.at(-1).state.testRuns[0].comment, "Run reviewed before approval");
+  assert.equal(h.window.testPdfExports.at(-1).state.testRuns[0].devices[0].comment, "Device wiring verified\nRetest complete");
   assert.deepEqual(copy(h.window.testPdfExports.at(-1).state.testRuns[0].setupPhotos), [setupPhoto]);
   assert.match(h.window.downloads.at(-1).name, /DCS-IO-Test-Report-Rev7-2026-11-19\.pdf$/);
   await h.nav("Report");
@@ -576,6 +584,8 @@ test("App keeps unsaved test edits across navigation, locks approval, and export
   await h.click(h.button("Export test reports revision 7"));
   assert.equal(h.window.testPdfExports.at(-1).runId, null, "history exports all runs from its closed snapshot");
   assert.equal(h.window.testPdfExports.at(-1).state.testRuns[0].name, "Reviewed valve test");
+  assert.equal(h.window.testPdfExports.at(-1).state.testRuns[0].comment, "Run reviewed before approval");
+  assert.equal(h.window.testPdfExports.at(-1).state.testRuns[0].devices[0].comment, "Device wiring verified\nRetest complete");
   assert.equal(h.window.testPdfExports.at(-1).state.project.revision, 7);
   assert.deepEqual(copy(h.window.testPdfExports.at(-1).state.testRuns[0].setupPhotos), [setupPhoto], "Historical export retains setup photos after the live run is removed");
 });

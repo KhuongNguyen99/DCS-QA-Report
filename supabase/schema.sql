@@ -1065,6 +1065,9 @@ begin
   if p_data->'schemaVersion' is distinct from '1'::jsonb then raise exception 'Unsupported test run format. Import the files again.'; end if;
   if jsonb_typeof(p_data->'name') is distinct from 'string' or length(trim(p_data->>'name')) not between 1 and 160
     or (p_data->>'name') ~ '[[:cntrl:]]' then raise exception 'Enter a test run name between 1 and 160 characters.'; end if;
+  if p_data ? 'comment' and (jsonb_typeof(p_data->'comment') is distinct from 'string' or length(p_data->>'comment') > 4000) then
+    raise exception 'Keep test run and device comments to text of at most 4,000 characters.';
+  end if;
   if jsonb_typeof(p_data->'software') is distinct from 'object'
     or jsonb_typeof(p_data->'software'->'name') is distinct from 'string'
     or length(trim(p_data->'software'->>'name')) not between 1 and 120
@@ -1139,6 +1142,9 @@ begin
       or length(device->>'id') not between 1 and 160 or jsonb_typeof(device->'name') is distinct from 'string'
       or length(device->>'name') not between 1 and 160 or coalesce(device->>'status','') not in ('Passed','Failed','Not tested')
       or jsonb_typeof(device->'channels') is distinct from 'array' then raise exception 'The device test result is invalid.'; end if;
+    if device ? 'comment' and (jsonb_typeof(device->'comment') is distinct from 'string' or length(device->>'comment') > 4000) then
+      raise exception 'Keep test run and device comments to text of at most 4,000 characters.';
+    end if;
   end loop;
   if (select count(*) <> count(distinct value->>'id') from jsonb_array_elements(p_data->'devices')) then
     raise exception 'Test device identifiers must be unique.';

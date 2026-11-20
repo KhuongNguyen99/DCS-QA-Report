@@ -117,7 +117,8 @@ async function setup(t, props = {}) {
     async fill(input, value) {
       assert.ok(input, "field exists");
       await window.act(async () => {
-        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(input, value);
+        const prototype = input.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(prototype, "value").set.call(input, value);
         input.dispatchEvent(new window.Event("input", { bubbles: true }));
       });
     },
@@ -343,4 +344,105 @@ test("a device shows one mixed-unit plot with matching legend colors and aligned
   assert.notEqual(legend[0].querySelector("line").getAttribute("stroke"), legend[1].querySelector("line").getAttribute("stroke"));
   assert.equal(h.window.calls.length, 0);
   assert.deepEqual(run, before, "displaying combined graphs preserves saved evidence");
+});
+
+test("run and device comments start a pending edit, retain failed saves, and preserve imported evidence", async t => {
+  const run = savedRun({ comment: "Original overall note" });
+  run.devices[0].comment = "Original device note";
+  run.devices[0].channels[0].comment = "Original tester comment";
+  const second = structuredClone(run.devices[0]);
+  second.id = "valve-2"; second.name = "VALVE-SECOND"; second.comment = "Second device note";
+  run.devices.push(second);
+  const before = structuredClone(run);
+  const h = await setup(t, { runs: [run] });
+  const overall = () => h.query('[aria-label="Overall test run comment"] textarea');
+  const device = () => h.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea');
+  assert.equal(overall().value, "Original overall note");
+  await h.fill(device(), "Wiring checked.\nRetest required.");
+  assert.match(h.text(), /Unsaved preview/);
+  assert.equal(h.window.dirty.at(-1), true);
+  assert.equal(h.window.calls.length, 0, "typing is pending until Save");
+  await h.fill(overall(), "Overall observations\nSecond line");
+  await h.click(h.button("VALVE-SECONDPassed"));
+  assert.equal(h.query('[aria-label="Device comment for VALVE-SECOND"] textarea').value, "Second device note");
+  await h.click(h.button("VALVE-EXAMPLEPassed"));
+  assert.equal(device().value, "Wiring checked.\nRetest required.");
+  await h.click(h.button("Save test run"));
+  const payload = structuredClone(h.window.calls[0].payload);
+  assert.equal(payload.id, run.id);
+  assert.equal(payload.runVersion, run.runVersion);
+  assert.equal(h.window.calls[0].revision, project.revision);
+  assert.equal(payload.comment, "Overall observations\nSecond line");
+  assert.equal(payload.devices[0].comment, "Wiring checked.\nRetest required.");
+  assert.equal(payload.devices[1].comment, "Second device note");
+  assert.deepEqual(payload.devices.map(item => item.channels), before.devices.map(item => item.channels));
+  assert.equal(h.window.parses.length, 0, "comments do not reimport source files");
+  await h.settle("Network interrupted");
+  assert.equal(device().value, payload.devices[0].comment);
+  await h.click(h.button("Save test run"));
+  assert.deepEqual(structuredClone(h.window.calls[1].payload), payload);
+  await h.settle();
+  assert.equal(h.window.dirty.at(-1), false);
+  assert.equal(overall().value, payload.comment);
+  assert.deepEqual(run, before, "authoring comments never mutates the loaded snapshot");
+});
+
+test("comments survive source rereads and can be discarded or cleared explicitly", async t => {
+  const run = savedRun({ comment: "Saved run note" });
+  run.devices[0].comment = "Saved device note";
+  const h = await setup(t, { runs: [run] });
+  const overall = () => h.query('[aria-label="Overall test run comment"] textarea');
+  const device = () => h.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea');
+  await h.fill(overall(), "Unsaved run note");
+  await h.fill(device(), "Unsaved device note");
+  await h.choose();
+  await h.finishParse();
+  assert.equal(overall().value, "Unsaved run note");
+  assert.equal(device().value, "Unsaved device note");
+  await h.click(h.button("Discard changes"));
+  assert.equal(overall().value, "Saved run note");
+  assert.equal(device().value, "Saved device note");
+  await h.fill(overall(), "");
+  await h.fill(device(), "");
+  await h.click(h.button("Save test run"));
+  assert.equal(h.window.calls[0].payload.comment, "");
+  assert.equal(h.window.calls[0].payload.devices[0].comment, "");
+  await h.settle();
+});
+
+test("comment edits respect ownership and revision locks while retaining a stale local preview", async t => {
+  const run = savedRun({ createdBy: "other-inspector", comment: "Approved overall note" });
+  run.devices[0].comment = "Approved device note";
+  const h = await setup(t, { runs: [run] });
+  assert.equal(h.document.querySelectorAll('.test-comment textarea').length, 0);
+  assert.match(h.text(), /Approved device note/);
+  await h.configure({ inspector: { id: "inspector-1", isAdmin: true } });
+  await h.fill(h.query('[aria-label="Overall test run comment"] textarea'), "Pending local note");
+  await h.configure({ readOnly: true, project: { ...project, status: "closed" } });
+  assert.equal(h.document.querySelectorAll('.test-comment textarea').length, 0);
+  assert.match(h.text(), /Pending local note/);
+  assert.equal(h.button("Save test run").disabled, true);
+  await h.configure({ readOnly: false, project: { ...project, revision: 5 } });
+  await h.click(h.button("Save test run"));
+  assert.equal(h.window.calls.length, 0);
+  await h.click(h.button("Discard changes"));
+  assert.equal(h.query('[aria-label="Overall test run comment"] textarea').value, "Approved overall note");
+});
+
+test("overall comments stay with the selected run and support 4,000 Unicode characters", async t => {
+  const first = savedRun({ comment: "First run note" });
+  const second = savedRun({ id: "run-2", name: "Second run", comment: "Second run note" });
+  const h = await setup(t, { runs: [first, second] });
+  const select = h.query('.test-run-toolbar select');
+  await h.window.act(async () => { select.value = second.id; select.dispatchEvent(new h.window.Event("change", { bubbles: true })); });
+  const field = () => h.query('[aria-label="Overall test run comment"] textarea');
+  assert.equal(field().value, "Second run note");
+  await h.fill(field(), "😀".repeat(4001));
+  assert.equal(Array.from(field().value).length, 4000);
+  assert.match(h.text(), /4000\/4,000/);
+  await h.click(h.button("Save test run"));
+  assert.equal(h.window.calls[0].payload.id, "run-2");
+  assert.equal(h.window.calls[0].payload.comment, "😀".repeat(4000));
+  assert.equal(first.comment, "First run note");
+  await h.settle();
 });

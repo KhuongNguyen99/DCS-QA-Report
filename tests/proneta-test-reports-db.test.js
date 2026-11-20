@@ -162,6 +162,24 @@ test("functional test writes require source/software validity, ordered shared ti
   await checkInvalid(data => { data.devices[0].channels[0].series[0].points[0].value = null; }, /numeric value/);
   await checkInvalid(data => { data.devices[0].channels[0].series[0].points[0].sourceId = "unknown"; }, /reference an imported source/);
   await checkInvalid(data => { data.devices[0].status = "Looks okay"; }, /device test result is invalid/);
+  for (const comment of [null, 1, false, [], {}, "x".repeat(4001), "😀".repeat(4001)]) {
+    await checkInvalid(data => { data.comment = comment; }, /comments.*4,000/);
+    await checkInvalid(data => { data.devices[0].comment = comment; }, /comments.*4,000/);
+  }
+  await checkInvalid(data => { data.comment = "Null\u0000byte"; }, /unsupported Unicode escape/);
+  await checkInvalid(data => { data.devices[0].comment = "Null\u0000byte"; }, /unsupported Unicode escape/);
+  const bounded = runData();
+  bounded.comment = "😀".repeat(4000);
+  bounded.devices[0].comment = "x".repeat(4000);
+  const boundedId = crypto.randomUUID();
+  const boundarySaved = await h.rpc("qa_save_test_run", report.id, boundedId, bounded, 1, null);
+  assert.equal(boundarySaved.comment, bounded.comment);
+  assert.equal(boundarySaved.devices[0].comment, bounded.devices[0].comment);
+  bounded.comment = "x".repeat(4000);
+  bounded.devices[0].comment = "😀".repeat(4000);
+  const boundaryEdited = await h.rpc("qa_save_test_run", report.id, boundedId, bounded, 1, 1);
+  assert.equal(boundaryEdited.comment, bounded.comment);
+  assert.equal(boundaryEdited.devices[0].comment, bounded.devices[0].comment);
   const untimed = runData({ timed: false }), id = crypto.randomUUID();
   const saved = await h.rpc("qa_save_test_run", report.id, id, untimed, 1, null);
   assert.equal(saved.clock.startMs, null, "results without dated series are supported");
@@ -184,6 +202,62 @@ test("functional test writes require source/software validity, ordered shared ti
   await h.user(outsider);
   await assert.rejects(h.rpc("qa_save_test_run", report.id, crypto.randomUUID(), untimed, 1, null), /approved project inspector/);
   assert.equal((await h.db.query("select id from public.qa_test_runs")).rows.length, 0);
+});
+
+test("authored comments belong to one test run and remain frozen after approval and later clearing", async (t) => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Authored test comments skid");
+  const id = crypto.randomUUID(), otherId = crypto.randomUUID(), data = runData();
+  await h.user(second);
+  const legacy = await h.rpc("qa_save_test_run", report.id, id, data, 1, null);
+  const other = await h.rpc("qa_save_test_run", report.id, otherId, data, 1, null);
+  assert.equal(Object.hasOwn(legacy, "comment"), false);
+  assert.equal(Object.hasOwn(legacy.devices[0], "comment"), false);
+  const initial = await h.state(report.id);
+  const authored = structuredClone(data);
+  authored.comment = "  Overall run review\nRetest completed.  ";
+  authored.devices[0].comment = "Device reviewed\nTravel verified ✓";
+  const saved = await h.rpc("qa_save_test_run", report.id, id, authored, 1, 1);
+  assert.equal(saved.runVersion, 2);
+  assert.equal(saved.comment, authored.comment);
+  assert.equal(saved.devices[0].comment, authored.devices[0].comment);
+  assert.deepEqual(saved.devices[0].channels, data.devices[0].channels);
+  assert.deepEqual(saved.sources, data.sources);
+  let current = await h.state(report.id);
+  assert.ok(current.project.contentVersion > initial.project.contentVersion);
+  assert.deepEqual(current.testRuns.find(run => run.id === otherId), other);
+  assert.deepEqual(current.comments, initial.comments, "authored notes are not whole-walkdown comments");
+  assert.deepEqual(current.records, initial.records);
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, { ...authored, comment: "Stale overwrite" }, 1, 1), /changed since you opened/);
+  assert.deepEqual(await h.rpc("qa_save_test_run", report.id, id, authored, 1, 1), saved,
+    "retrying an identical comment save is idempotent even after the response is lost");
+  assert.equal((await h.state(report.id)).project.contentVersion, current.project.contentVersion);
+  await h.user(admin);
+  const adminData = { ...authored, comment: "Administrator review\nApproved for closeout." };
+  const reviewed = await h.rpc("qa_save_test_run", report.id, id, adminData, 1, 2);
+  assert.equal(reviewed.updatedBy, admin);
+  assert.equal(reviewed.runVersion, 3);
+  current = await h.state(report.id);
+  const closed = await h.rpc("qa_approve_revision", report.id, 1, current.project.contentVersion);
+  assert.deepEqual(closed.testRuns.find(run => run.id === id), reviewed);
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, { ...adminData, comment: "Late edit" }, 1, 3), /approved and closed/);
+  await h.db.exec("reset role");
+  await h.db.exec(migration);
+  await h.db.exec(setupMigration);
+  await h.user(second);
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns,
+    "upgrading validation preserves approved comments and legacy runs");
+  await h.rpc("qa_new_revision", report.id, 1);
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, { ...adminData, comment: null }, 2, 3), /comments.*4,000/);
+  const clearedData = { ...adminData, comment: "", devices: [{ ...adminData.devices[0], comment: "" }] };
+  const cleared = await h.rpc("qa_save_test_run", report.id, id, clearedData, 2, 3);
+  assert.equal(cleared.comment, "");
+  assert.equal(cleared.devices[0].comment, "");
+  assert.equal(cleared.runVersion, 4);
+  assert.deepEqual(cleared.devices[0].channels, data.devices[0].channels);
+  assert.deepEqual(cleared.sources, data.sources);
+  assert.deepEqual((await h.state(report.id)).testRuns.find(run => run.id === otherId), other);
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns);
 });
 
 test("deployment verification works for a table-read role without private helper execution", async (t) => {

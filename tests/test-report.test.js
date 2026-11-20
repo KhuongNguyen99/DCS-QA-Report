@@ -204,6 +204,7 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     const savedState = structuredClone(state);
     const result = await pdfContent(await createTestReportPdf({ state }));
     assert.deepEqual(state, savedState, "Clarifying a legacy import note must not change approved evidence");
+    assert.doesNotMatch(result.text, /Overall test run comment|Device comment/, "legacy runs do not invent engineer comments");
     assert.deepEqual(requested.sort(), ["NotoSans-Bold.ttf", "NotoSans-Regular.ttf"]);
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
       "Siemens PRONETA Basic", "Version entered by tester", "RTD-EXAMPLE", "VALVE-EXAMPLE", "Recorded wiring result: Failed (source: Error)",
@@ -243,18 +244,29 @@ test("selected run exports the loaded archived revision and excludes other runs"
     const archived = runFixture("archived");
     archived.name = "Archived run";
     archived.software.version = "Saved version 1";
+    archived.comment = "Archived overall review comment";
+    archived.devices[0].comment = "Archived device review comment";
     const newer = runFixture("newer");
     newer.name = "Unselected new run";
     newer.software.version = "Version that must not appear";
+    newer.comment = "Unselected overall review comment";
+    newer.devices[0].comment = "Unselected device review comment";
     state.testRuns = [archived, newer];
     const result = await pdfContent(await createTestReportPdf({ state, runId: "archived" }));
     assert.match(result.text, /Revision 1/);
     assert.match(result.text, /Saved version 1/);
-    assert.doesNotMatch(result.text, /Unselected new run|Version that must not appear/);
+    assert.match(result.text, /Archived overall review comment/);
+    assert.match(result.text, /Archived device review comment/);
+    assert.doesNotMatch(result.text, /Unselected new run|Version that must not appear|Unselected overall review comment|Unselected device review comment/);
     const all = await pdfContent(await createTestReportPdf({ state }));
     assert.match(all.text, /2 saved test run\(s\) included/);
     assert.match(all.text, /Unselected new run/);
     assert.match(all.text, /Version that must not appear/);
+    assert.match(all.text, /Archived overall review comment/);
+    assert.match(all.text, /Archived device review comment/);
+    assert.match(all.text, /Unselected overall review comment/);
+    assert.match(all.text, /Unselected device review comment/);
+    assert.equal(all.text.match(/Overall test run comment/g)?.length, 2, "each run keeps its own overall comment");
   });
 });
 
@@ -268,15 +280,21 @@ test("export captures the approved payload before asynchronous font loading", as
   };
   try {
     const state = closedState();
+    state.testRuns[0].comment = "Approved overall review comment";
+    state.testRuns[0].devices[0].comment = "Approved device review comment";
     const pending = createTestReportPdf({ state });
     state.project.revision = 99;
     state.project.skidName = "Mutated skid";
     state.testRuns[0].devices[0].name = "Mutated device";
     state.testRuns[0].software.version = "Mutated software";
+    state.testRuns[0].comment = "Mutated overall comment";
+    state.testRuns[0].devices[0].comment = "Mutated device comment";
     release();
     const result = await pdfContent(await pending);
     assert.match(result.text, /Revision 2/);
     assert.match(result.text, /RTD-EXAMPLE/);
+    assert.match(result.text, /Approved overall review comment/);
+    assert.match(result.text, /Approved device review comment/);
     assert.doesNotMatch(result.text, /Mutated|Revision 99/);
   } finally { globalThis.fetch = original; }
 });
@@ -631,6 +649,80 @@ test("unassigned channels retain their combined graphs and invalid-source detail
     assert.match(result.text, /synthetic-log.csv, row 3/);
     const graphPage = result.pages.findIndex(page => page.includes("connect recorded changes"));
     assert.match(result.pages[graphPage], /Unassigned channels/);
+    assert.deepEqual(state, saved);
+  });
+});
+
+test("PDF validates optional engineer comments before loading fonts or setup photos", async () => {
+  const original = globalThis.fetch;
+  let fetched = false, accessed = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error("No assets expected"); };
+  const backend = { getPhotoUrl: async () => { accessed = true; return "/private/setup.png"; } };
+  try {
+    for (const value of [null, 0, false, [], {}, "x".repeat(4001), "🧪".repeat(4001), "Comment\0with NUL"]) {
+      const runState = closedState();
+      runState.testRuns[0].setupPhotos = [setupPhoto("review")];
+      runState.testRuns[0].comment = value;
+      await assert.rejects(createTestReportPdf({ state: runState, backend }), /overall test run comment.*at most 4,000 characters/);
+      const deviceState = closedState();
+      deviceState.testRuns[0].setupPhotos = [setupPhoto("review")];
+      deviceState.testRuns[0].devices[0].comment = value;
+      await assert.rejects(createTestReportPdf({ state: deviceState, backend }), /device comment.*at most 4,000 characters/);
+    }
+    assert.equal(fetched, false);
+    assert.equal(accessed, false);
+  } finally { globalThis.fetch = original; }
+});
+
+test("run and device comments preserve multiline Unicode separately from imported tester comments", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    run.comment = "Kiểm tra tổng thể hoàn tất.\nΔοκιμή συνολική";
+    run.devices[0].comment = "Nhiệt độ ổn định tại 25°C.\nПроверено устройство";
+    run.devices[1].comment = "  \n \t";
+    const saved = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    const overallPage = result.pages.find(page => page.includes("Overall test run comment"));
+    assert.ok(overallPage);
+    assert.equal(overallPage.split("\n")[2], run.name);
+    assert.match(overallPage, /Kiểm tra tổng thể hoàn tất\.\nΔοκιμή συνολική/);
+    const devicePage = result.pages.find(page => page.includes("Device comment"));
+    assert.ok(devicePage);
+    assert.match(devicePage, /RTD-EXAMPLE/);
+    assert.match(devicePage, /Nhiệt độ ổn định tại 25degC\.\nПроверено устройство/);
+    assert.equal(result.text.match(/Device comment/g)?.length, 1, "whitespace-only comments stay omitted");
+    assert.match(result.text, /Tester comment: Investigate the wiring before retest\./);
+    assert.deepEqual(state, saved);
+  });
+});
+
+test("long run and device comments paginate completely above the footer through the 4,000-character limit", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const runLines = Array.from({ length: 70 }, (_, index) => `Run-comment-line-${String(index + 1).padStart(2, "0")}: Kiểm tra`);
+    const deviceLines = Array.from({ length: 70 }, (_, index) => `Device-comment-line-${String(index + 1).padStart(2, "0")}: Проверено`);
+    const tail = "\nRun-comment-final-boundary";
+    run.comment = ("🧪" + runLines.join("\n")).padEnd(4001 - tail.length, "x") + tail;
+    run.devices[0].comment = deviceLines.join("\n");
+    assert.equal(Array.from(run.comment).length, 4000);
+    assert.equal(run.comment.length, 4001, "the limit counts Unicode code points, not UTF-16 code units");
+    assert.ok(run.devices[0].comment.length < 4000);
+    const saved = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    for (const line of [...runLines, ...deviceLines]) assert.ok(result.text.includes(line), `Missing comment text: ${line}`);
+    assert.match(result.text, /Run-comment-final-boundary/);
+    assert.match(result.text, /\[U\+1F9EA\]/, "unsupported glyphs retain the established printable-text representation");
+    assert.ok(result.pages.filter(page => /Run-comment-line-/.test(page)).length > 1);
+    assert.ok(result.pages.filter(page => /Device-comment-line-/.test(page)).length > 1);
+    assert.ok(result.pages.some(page => page.includes(`${run.name} (continued)`) && /Run-comment-line-/.test(page)));
+    assert.ok(result.pages.some(page => page.includes("RTD-EXAMPLE (continued)") && /Device-comment-line-/.test(page)));
+    assert.match(result.text, /Tester comment: Investigate the wiring before retest\./);
+    for (const page of result.blocks) for (const block of page) {
+      if (!block.text || block.y === null || /^(Approved:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
+    }
     assert.deepEqual(state, saved);
   });
 });

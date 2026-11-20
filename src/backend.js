@@ -72,6 +72,11 @@ function testRunPayload(run) {
   if (typeof data.software?.name !== "string" || !data.software.name.trim() || data.software.name.length > 120
     || typeof data.software?.version !== "string" || !data.software.version.trim() || data.software.version.length > 80)
     throw new Error("Enter the test software name and version before saving the test run.");
+  for (const item of [data, ...(Array.isArray(data.devices) ? data.devices : [])]) {
+    if (item && Object.hasOwn(item, "comment") && (typeof item.comment !== "string"
+      || Array.from(item.comment).length > 4000 || item.comment.includes("\u0000")))
+      throw new Error("Keep test run and device comments to text of at most 4,000 characters.");
+  }
   const seen = new WeakSet();
   function check(value) {
     if (typeof value === "number" && !Number.isFinite(value))

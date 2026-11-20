@@ -46,6 +46,12 @@ Open **Test reports** after choosing a named skid. This view imports Siemens PRO
 6. In the saved run's **Setup** section, select **Add setup photos** and choose one or several images of the wiring, instruments, air supply, and other test equipment. Each uploaded photo is saved to that run immediately. Add an optional caption and save it, open a photo to view it larger, or remove an unwanted photo while the revision is a draft.
 7. Open **Report**, review the saved content, and **Approve & close**. The same revision locks QC evidence, test runs, setup photos, and captions. **Export test PDF** is then available for the selected run. Its Setup section places the photos and captions before device results, with uncropped images and the skid/revision footer. The closed-revision history also exports all test runs from any approved revision. **New revision** carries the current runs and setup photos into an editable draft; later edits and removals preserve earlier approved reports.
 
+### Test comments
+
+Add an **Overall test run comment** for the selected run, and a **Device comment** beneath each device's graph. Each field supports up to 4,000 Unicode characters and multiple lines. Typing starts a pending edit; select **Save test run** to apply the comments or **Discard changes** to restore the saved text. The importing inspector or an administrator can edit comments while the revision is a draft. Save failures retain them for retry, and source-file rereads preserve comments for matching device identifiers. Comments remain separate from imported tester comments, wiring results, and measurements.
+
+The overall comment belongs only to its test run. Approved snapshots lock both run and device comments, and the test PDF includes them with their respective run summary or device. A new revision allows later changes without altering earlier approved reports.
+
 ### Setup photos
 
 A saved test run supports up to 30 setup photos, with captions of up to 1,000 characters. JPEG, PNG, WebP, and browser-decodable HEIC/HEIF files up to 20 MB each use the same image normalization and private storage as inspection photos. Image bytes are stored separately from the normalized CSV/parameter payload. The importing inspector or an administrator can add photos, change captions, or remove photos from a draft. Finish uploads and save or cancel caption edits before approving, switching skids, or signing out. If a batch stops on an error, successful uploads remain saved.

@@ -180,6 +180,32 @@ test("functional test runs retain provenance and are saved or removed only in th
   await assert.rejects(denied.backend.deleteTestRun(id, 2), /Only the importing inspector/);
 });
 
+test("test run and device comments validate optional text without changing imported evidence", async () => {
+  const h = fixture();
+  const run = { id: "66666666-6666-4666-8666-666666666666", schemaVersion: 1, runVersion: 2,
+    name: "Commented test", software: { name: "PRONETA Basic", version: "3.9" },
+    sources: [{ id: "source-a", sha256: "a".repeat(64) }],
+    devices: [{ id: "V-3541", channels: [{ comment: "Original tester evidence" }] }] };
+  for (const comment of [undefined, null, 1, false, [], {}, "x".repeat(4001), "😀".repeat(4001), "Null\u0000byte"]) {
+    await assert.rejects(h.backend.saveTestRun({ ...run, comment }), /comments.*4,000/);
+    await assert.rejects(h.backend.saveTestRun({ ...run, devices: [{ ...run.devices[0], comment }] }), /comments.*4,000/);
+  }
+  assert.deepEqual(h.calls, [], "invalid authored comments never reach the server");
+  for (const comment of [undefined, "", "  First line\nSecond line\t✓  ", "x".repeat(4000), "😀".repeat(4000)]) {
+    const authored = comment === undefined ? {} : { comment };
+    const devices = [{ ...run.devices[0], ...authored }];
+    await h.backend.saveTestRun({ ...run, ...authored, devices });
+    const request = h.calls.at(-1)[1];
+    assert.deepEqual(request.p_data, {
+      schemaVersion: run.schemaVersion, name: run.name, software: run.software,
+      sources: run.sources, devices, ...authored,
+    });
+    assert.equal(request.p_expected_revision, 17);
+    assert.equal(request.p_expected_run_version, 2);
+  }
+  assert.equal(run.devices[0].channels[0].comment, "Original tester evidence");
+});
+
 test("setup photo uploads use the saved run and pinned revision without creating an inspection record", async () => {
   const runId = "66666666-6666-4666-8666-666666666666";
   const saved = { id: photoId, walkdownId, testRunId: runId, path: `${userId}/${photoId}.jpg`, caption: "", name: "Setup", width: 100, height: 150 };

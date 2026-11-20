@@ -12,6 +12,18 @@ const COLOR = {
 const RESULT_LABELS = new Set(["Passed", "Failed", "Not tested", "Not applicable"]);
 const MAX_SETUP_PHOTO_BYTES = 12 * 1024 * 1024;
 const SETUP_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MAX_COMMENT_LENGTH = 4000;
+
+function validateReportComment(value, label) {
+  if (value !== undefined && (typeof value !== "string" || Array.from(value).length > MAX_COMMENT_LENGTH || value.includes("\0")))
+    throw new Error(`The saved ${label} must be text of at most 4,000 characters without NUL characters. Reload the approved revision.`);
+}
+
+function reportComment(writer, label, value) {
+  if (!value?.trim()) return;
+  writer.heading(label, 10);
+  writer.paragraph(value);
+}
 
 function validateSetupPhotos(run, project) {
   if (run.setupPhotos === undefined) return;
@@ -451,6 +463,7 @@ function runSummary(writer, run) {
   writer.paragraph(`Software: ${run.software.name} | Version: ${run.software.version}`, { size: 11, bold: true });
   writer.paragraph(`Run time span: ${rangeLabel(run.clock)}`);
   writer.paragraph(`Clock: ${clockLabel(run.clock)}. One graph per device shares a time axis across its recorded values. Different units keep separate scales. Each device graph fits its recorded time range within this run.`, { color: COLOR.muted });
+  reportComment(writer, "Overall test run comment", run.comment);
   writer.paragraph("Recorded wiring results are the tester's entries in PRONETA. Logged values alone do not establish a functional pass.", { color: COLOR.muted });
   writer.table([
     { label: "Device name", width: 300 },
@@ -566,6 +579,8 @@ export async function createTestReportPdf({ state, runId = null, backend, onProg
       throw new Error("The saved test run is missing its software name or version.");
     if (!Array.isArray(run.devices) || run.devices.some((device) => !device.name || !Array.isArray(device.channels)))
       throw new Error("The saved test run has incomplete device data.");
+    validateReportComment(run.comment, "overall test run comment");
+    for (const device of run.devices) validateReportComment(device.comment, "device comment");
     validateSetupPhotos(run, project);
     for (const channel of [...run.devices.flatMap((device) => device.channels), ...(run.unassignedChannels || [])])
       for (const series of channel.series || [])
@@ -610,6 +625,7 @@ export async function createTestReportPdf({ state, runId = null, backend, onProg
       writer.paragraph(`Test run: ${run.name || "Test run"} | Software: ${run.software.name} ${run.software.version}`, { size: 8.5, color: COLOR.muted });
       if (device.channels.length > 1) writer.paragraph(`Recorded wiring result: ${resultLabel(device.status)}`, { bold: true });
       writer.chart(device, run.clock, run.stations);
+      reportComment(writer, "Device comment", device.comment);
       for (const channel of device.channels) channelDetails(writer, channel, run, {
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,
       });

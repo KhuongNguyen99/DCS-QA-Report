@@ -16,6 +16,19 @@ function TestStatus({ status }) {
   return <span className={`test-status ${statusClass(status)}`}>{status || "Not tested"}</span>;
 }
 
+function TestComment({ title, label = title, value, onChange, disabled }) {
+  const text = typeof value === "string" ? value : "";
+  return <section className="test-comment" aria-label={label}>
+    <h4>{title}</h4>
+    {onChange ? <>
+      <label><span className="sr-only">{label}</span><textarea rows={3} maxLength={8000}
+        value={text} onChange={event => onChange(Array.from(event.target.value).slice(0, 4000).join(""))}
+        disabled={disabled} placeholder="Add a comment…" /></label>
+      <small>{Array.from(text).length}/4,000 · Save with Save test run.</small>
+    </> : <p className={text ? "" : "test-muted"}>{text || "No comment added."}</p>}
+  </section>;
+}
+
 export function TestDeviceChart({ device, clock, stations }) {
   let chart;
   try { chart = buildDeviceTestChart(device, clock, { stations }); }
@@ -106,7 +119,7 @@ function Parameters({ parameters = [], title = "Set parameters" }) {
   </details>;
 }
 
-export function TestRunDetail({ run }) {
+export function TestRunDetail({ run, onCommentChange, commentsDisabled = false }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
   const devices = run.devices || [];
@@ -121,6 +134,8 @@ export function TestRunDetail({ run }) {
       <div><span>Device results</span><strong>{counts.Passed || 0} passed · {counts.Failed || 0} failed · {counts["Not tested"] || 0} not tested</strong></div>
     </div>
     <p className="test-meaning">Passed/Failed comes from the recorded PRONETA wiring result. Graphs show logged signal changes in their original units.</p>
+    <TestComment title="Overall test run comment" value={run.comment} disabled={commentsDisabled}
+      onChange={onCommentChange && (value => onCommentChange(null, value))} />
     {run.warnings?.length > 0 && <details className="test-import-notes" open>
       <summary>Import notes ({run.warnings.length})</summary>
       {noteClarification && <p>{noteClarification}</p>}
@@ -139,6 +154,8 @@ export function TestRunDetail({ run }) {
         {device ? <>
           <div className="test-device-heading"><h3>{device.name}</h3><TestStatus status={device.status} /></div>
           <TestDeviceChart device={device} clock={run.clock} stations={run.stations} />
+          <TestComment title="Device comment" label={`Device comment for ${device.name}`} value={device.comment}
+            disabled={commentsDisabled} onChange={onCommentChange && (value => onCommentChange(device.id, value))} />
           {(device.channels || []).map(channel => {
             const station = run.stations?.find(item => item.id === channel.stationId);
             const module = station?.modules?.find(item => item.slot === channel.slot);
@@ -210,15 +227,29 @@ export default function TestReportsPanel({
     return () => window.removeEventListener("beforeunload", preventDiscard);
   }, [Boolean(draft), setupDirty]);
 
-  function begin(run = null) {
-    if (readOnly || blocked || setupDirty || draft || (run && !canEdit(run))) return;
-    setError(""); setFiles([]); setAssignments({}); setConfirmDelete(null);
-    setDraft({
+  function draftFrom(run) {
+    return {
       revision: project.revision, walkdownId: project.walkdownId,
       id: run?.id || crypto.randomUUID(), runVersion: run?.runVersion ?? null,
       name: run?.name || "Control box I/O test", software: { ...(run?.software || EMPTY_SOFTWARE) },
       timeZone: run?.clock?.timeZone || "Source clock (timezone not recorded)",
+      comment: run?.comment || "",
+      deviceComments: Object.fromEntries((run?.devices || []).map(device => [device.id, device.comment || ""])),
       data: run ? structuredClone(run) : null,
+    };
+  }
+  function begin(run = null) {
+    if (readOnly || blocked || setupDirty || draft || (run && !canEdit(run))) return;
+    setError(""); setFiles([]); setAssignments({}); setConfirmDelete(null);
+    setDraft(draftFrom(run));
+  }
+  function changeComment(deviceId, value) {
+    if (readOnly || stale || blocked || setupDirty || busyRef.current || (!draft && (!selectedRun || !canEdit(selectedRun)))) return;
+    setConfirmDelete(null);
+    setDraft(previous => {
+      const next = previous || draftFrom(selectedRun);
+      return deviceId === null ? { ...next, comment: value }
+        : { ...next, deviceComments: { ...next.deviceComments, [deviceId]: value } };
     });
   }
   function discard() {
@@ -253,7 +284,7 @@ export default function TestReportsPanel({
     if (!draft.name.trim() || !draft.software.name.trim() || !draft.software.version.trim()) {
       setError("Enter the test run name, software name, and software version before saving."); return;
     }
-    const payload = { ...draft.data, id: draft.id, runVersion: draft.runVersion,
+    const payload = { ...preview, id: draft.id, runVersion: draft.runVersion,
       name: draft.name.trim(), software: { name: draft.software.name.trim(), version: draft.software.version.trim() },
       clock: { ...draft.data.clock, timeZone: draft.timeZone.trim() || "Source clock (timezone not recorded)" },
     };
@@ -274,7 +305,11 @@ export default function TestReportsPanel({
     finally { busyRef.current = false; setBusy(""); }
   }
   const preview = draft ? (draft.data ? { ...draft.data, name: draft.name, software: draft.software,
+    comment: draft.comment,
+    devices: draft.data.devices.map(device => ({ ...device,
+      comment: Object.hasOwn(draft.deviceComments, device.id) ? draft.deviceComments[device.id] : device.comment ?? "" })),
     clock: { ...draft.data.clock, timeZone: draft.timeZone } } : null) : selectedRun;
+  const canComment = draft ? !readOnly && !stale : selectedRun && canEdit(selectedRun);
   return <section className="test-reports" aria-label="I/O test reports">
     <div className="card test-intro">
       <div><span className="eyebrow">SOFTWARE TEST EVIDENCE</span><h2>I/O test reports</h2>
@@ -329,7 +364,9 @@ export default function TestReportsPanel({
       run={selectedRun} revision={project.revision} readOnly={!canEdit(selectedRun)} pending={blocked}
       getPhotoUrl={getPhotoUrl} onAddPhoto={onAddSetupPhoto} onUpdatePhoto={onUpdateSetupPhoto}
       onRemovePhoto={onRemoveSetupPhoto} onDirtyChange={setSetupDirty} />}
-    {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${project.revision}`}</span></header><TestRunDetail key={preview.id || draft?.id} run={preview} /></section>}
+    {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${project.revision}`}</span></header>
+      <TestRunDetail key={preview.id || draft?.id} run={preview} onCommentChange={canComment ? changeComment : undefined}
+        commentsDisabled={blocked || setupDirty} /></section>}
     {!preview && !draft && <div className="card test-empty"><Icon name="report" size={36} /><h3>No test runs in this revision</h3><p>{readOnly ? "Start a new revision to import a test run." : "Import the files for your test, review the devices and parameters, then save the run."}</p></div>}
   </section>;
 }
