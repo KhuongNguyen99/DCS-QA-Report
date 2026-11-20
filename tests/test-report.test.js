@@ -156,7 +156,7 @@ function readPlot(result, title) {
   const hasColor = (line, rgb) => line.color.length === 3
     && line.color.every((value, index) => Math.abs(value - rgb[index] / 255) < 0.005);
   const grid = lines.filter(line => hasColor(line, [213, 222, 229])
-    && line.from.y === line.to.y && Math.abs(line.from.x - heading.x - 40) < 0.01
+    && line.from.y === line.to.y && Math.abs(line.from.x - heading.x - 49) < 0.01
     && 612 - line.from.y > heading.y && 612 - line.from.y < heading.y + 105);
   assert.ok(grid.length >= 2, `Missing plot grid for ${title}`);
   const left = grid[0].from.x;
@@ -230,8 +230,10 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.ok(result.text.replace(/\s/g, "").includes("ab".repeat(32)));
     assert.ok(result.streams.slice(1).every(stream => photoPlacements(stream).length === 0), "charts remain vector shapes");
     assert.match(result.raw, /D:20261120113000\+00'00'/, "PDF metadata uses approval time, not export time");
-    const graphPages = result.pages.filter(page => /Temperature - degC|Output state - State/.test(page));
+    const graphPages = result.pages.filter(page => /\n(?:Temperature|Output state)\n/.test(page));
     assert.equal(graphPages.length, 2);
+    assert.match(graphPages[0], /\n\u00b0C\n/);
+    assert.match(graphPages[1], /\nState\n/);
     assert.match(graphPages[0], /Figure 1\. Station Example \| Slot 3 \| Channel 1 \| Analog input/);
     for (const page of graphPages) {
       assert.doesNotMatch(page, /Test run:.*Software:|observed change\(s\)|Graph span:|Shared run span:|connect recorded changes/);
@@ -267,8 +269,9 @@ test("selected run exports the loaded archived revision and excludes other runs"
     assert.match(result.text, /Archived device review comment/);
     assert.doesNotMatch(result.text, /Unselected new run|Version that must not appear|Unselected overall review comment|Unselected device review comment/);
     const all = await pdfContent(await createTestReportPdf({ state }));
-    assert.match(all.text, /2 saved test run\(s\) included/);
-    assert.match(all.text, /Unselected new run/);
+    assert.match(all.pages[1], /Test run summary/);
+    assert.match(all.pages[1], /Archived run/);
+    assert.match(all.pages[1], /Unselected new run/);
     assert.match(all.text, /Version that must not appear/);
     assert.match(all.text, /Archived overall review comment/);
     assert.match(all.text, /Archived device review comment/);
@@ -358,8 +361,7 @@ test("explicit-offset logs label normalized graph coordinates as UTC and retain 
     run.clock.timeZone = "Source clock (timezone not recorded)";
     run.devices[0].channels[0].series[0].points[1].time = "2026-11-19T14:17:02-05:00";
     const result = await pdfContent(await createTestReportPdf({ state }));
-    assert.match(result.text, /UTC \(normalized from source timestamps/);
-    assert.match(result.text, /original event timestamps retain their offsets/);
+    assert.match(result.text, /Clock: UTC/);
     assert.match(result.text, /2026-11-19T14:17:02-05:00/);
     assert.doesNotMatch(result.text, /Clock: Source clock \(timezone not recorded\)/);
   });
@@ -571,7 +573,7 @@ test("PDF separates mixed-unit and same-unit signals within a device while print
       rawValue: String(value), previousValue: 0, previousRawValue: "0", sourceId: "source-log", sourceRow: 21, ...extra,
     });
     const channel = (id, series) => ({
-      id, symbolicName: "Valve device", stationId: "station-1", slot: 3, sourceChannel: `Channel ${id}`,
+      id, symbolicName: "Valve device", stationId: "station-1", slot: id === 2 ? 1 : 3, sourceChannel: `Channel ${id}`,
       status: "Not tested", parameters: [], series,
     });
     run.comment = "Overall run engineering note";
@@ -597,12 +599,16 @@ test("PDF separates mixed-unit and same-unit signals within a device while print
     assert.match(result.text, /BAD-TEMP/);
     assert.match(result.text, /synthetic-log.csv, row 47/);
     assert.match(result.text, /Original source timestamp/);
-    const titles = ["VLV-900-POS - mA", "PD-900 - mA", "Valve output - State", "Temperature evidence - degC"];
+    const titles = ["VLV-900-POS", "PD-900", "Valve output", "Temperature evidence"];
     const plots = titles.map(title => readPlot(result, title));
     const graphPages = plots.map(plot => plot.page);
     assert.equal(new Set(graphPages).size, 1, "a typical device keeps its separate graphs on one page");
     const devicePage = result.pages[graphPages[0]];
     assert.match(devicePage, /Valve device/);
+    assert.equal(devicePage.match(/^mA$/gm)?.length, 2, "current axes carry unit-only labels");
+    const summary = result.pages.find(page => page.includes("Recorded wiring result\nChannels"));
+    assert.match(summary, /Device name\nSlot\nRecorded wiring result\nChannels\nValve device\n1, 3\nNot tested\n3/);
+    assert.doesNotMatch(result.text, /Logged changes|Each signal has a separate graph|Original tokens are retained below|Parameter tables show/);
     assert.match(devicePage, /Engineering note covering every valve graph/);
     for (const time of ["19:18:44", "19:17:46", "19:19:34"]) assert.ok(devicePage.includes(time));
     assert.ok(devicePage.indexOf("Device comment") > devicePage.indexOf("Figure 4."));
@@ -736,7 +742,7 @@ test("manual device ranges apply to every separate channel graph and preserve hi
     const timeRanges = { [run.id]: { [device.id]: { startMs: startMs + 100_000, endMs: startMs + 200_000 } } };
     const originalState = structuredClone(state), originalRanges = structuredClone(timeRanges);
     const result = await pdfContent(await createTestReportPdf({ state, timeRanges }));
-    const titles = ["Temperature - degC", "Manual command - State", "V-900-POS - mA"];
+    const titles = ["Temperature", "Manual command", "V-900-POS"];
     const pages = titles.map(title => {
       const page = result.pages.findIndex(text => text.includes(title));
       assert.ok(page >= 0, `Missing graph ${title}`);
@@ -748,7 +754,7 @@ test("manual device ranges apply to every separate channel graph and preserve hi
     }
     assert.match(result.text, /7FFFH/);
     assert.match(result.text, /synthetic-log.csv, row 3/);
-    const otherPage = result.pages.find(page => page.includes("Output state - State"));
+    const otherPage = result.pages.find(page => page.includes("\nOutput state\n"));
     assert.ok(otherPage);
     assert.match(otherPage, /19:21:56/);
     const isColor = (line, rgb) => line.color.length === 3 && line.color.every((value, index) => Math.abs(value - rgb[index] / 255) < 0.005);
@@ -783,13 +789,13 @@ test("manual PDF ranges remain scoped to their run and device and ignore unselec
     state.testRuns = [archived, newer];
     const selectedRanges = { archived: { "device-1": { startMs: startMs + 1000, endMs: startMs + 3000 }, "missing-device": "ignored" }, newer: null };
     const selected = await pdfContent(await createTestReportPdf({ state, runId: "archived", timeRanges: selectedRanges }));
-    const archivedPage = selected.pages.find(page => page.includes("Archived temperature - degC"));
+    const archivedPage = selected.pages.find(page => page.includes("Archived temperature"));
     assert.match(archivedPage, /19:17:01/);
     assert.match(archivedPage, /19:17:03/);
     assert.doesNotMatch(selected.text, /Newer temperature/);
     const allRanges = { archived: selectedRanges.archived, "missing-run": { "device-1": "ignored" } };
     const all = await pdfContent(await createTestReportPdf({ state, timeRanges: allRanges }));
-    const newerPage = all.pages.find(page => page.includes("Newer temperature - degC"));
+    const newerPage = all.pages.find(page => page.includes("Newer temperature"));
     assert.ok(newerPage);
     assert.match(newerPage, /19:17:04/);
   });
@@ -808,7 +814,7 @@ test("manual PDF range options are captured before asynchronous font loading", a
     timeRanges["run-1"]["device-1"].endMs = startMs + 200_000;
     release();
     const result = await pdfContent(await pending);
-    const graphPage = result.pages.find(page => page.includes("Temperature - degC"));
+    const graphPage = result.pages.find(page => page.includes("\nTemperature\n"));
     assert.ok(graphPage);
     assert.match(graphPage, /19:17:01/);
     assert.match(graphPage, /19:17:03/);
@@ -868,7 +874,7 @@ test("approved PDF reconnects retained readings and moves removed values into so
     const original = structuredClone(state);
     const timeRanges = { [run.id]: { [device.id]: { ...CLOCK } } };
     const result = await pdfContent(await createTestReportPdf({ state, timeRanges }));
-    const graphs = ["Analog removal - mA", "Digital removal - State", "Invalid removal - mA"].map(title => readPlot(result, title));
+    const graphs = ["Analog removal", "Digital removal", "Invalid removal"].map(title => readPlot(result, title));
     const plots = graphs.map(graph => graph.traces);
     assert.deepEqual(plots.map(lines => lines.length), [2, 2, 2]);
     const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
@@ -919,7 +925,6 @@ test("removed-event audit tables paginate fully outside a manual view and retain
       [run.id]: { [device.id]: { startMs: startMs + 100_000, endMs: startMs + 200_000 } },
     } }));
     assert.match(result.text, /Removed events - Audited signal/);
-    assert.match(result.text, /including events outside the displayed time range/);
     for (let index = 1; index <= 75; index++) {
       const number = String(index).padStart(2, "0");
       assert.match(result.text, new RegExp(`Audit-source-time-${number}`));

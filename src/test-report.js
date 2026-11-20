@@ -141,7 +141,7 @@ function rangeLabel(clock) {
 
 function clockLabel(clock) {
   return clock?.basis === "absolute"
-    ? "UTC (normalized from source timestamps; original event timestamps retain their offsets)"
+    ? "UTC"
     : clock?.timeZone || "Source clock (unspecified)";
 }
 
@@ -274,15 +274,14 @@ function reportWriter(doc) {
     }
     y += 12;
   }
-  function prepareChart(series, clock, timeRange, width, details) {
+  function prepareChart(series, clock, timeRange, width, details, title) {
     const compact = width < WIDTH;
     const geometry = buildTestChart(series, clock, {
       width, height: compact ? 91 : 201,
-      padding: compact ? { left: 40, right: 24, top: 8, bottom: 31 } : { left: 57, right: 25, top: 20, bottom: 45 },
+      padding: compact ? { left: 49, right: 24, top: 8, bottom: 31 } : { left: 57, right: 25, top: 20, bottom: 45 },
       tickCount: width < 250 ? 3 : compact ? 4 : 5,
       timeRange,
     });
-    const title = `${series.name || "Recorded values"} - ${geometry.unit}`;
     const legend = `Figure ${++figureNumber}. ${details}`;
     const titleStyle = { size: 10, bold: true, gap: 3, lineHeight: 14.5 };
     const legendStyle = { size: 8, color: COLOR.muted, gap: 10, lineHeight: 11 };
@@ -290,9 +289,9 @@ function reportWriter(doc) {
       textStyle(doc, style.size, style.bold);
       return doc.splitTextToSize(printableText(value), width).length * style.lineHeight + style.gap;
     };
-    const height = heightFor(title, titleStyle) + geometry.height + heightFor(legend, legendStyle);
+    const height = (title ? heightFor(title, titleStyle) : 0) + geometry.height + heightFor(legend, legendStyle);
     return { height, draw(left) {
-      paragraph(title, { ...titleStyle, left, width });
+      if (title) paragraph(title, { ...titleStyle, left, width });
       drawChart(doc, geometry, left, y, compact);
       y += geometry.height;
       paragraph(legend, { ...legendStyle, left, width });
@@ -304,7 +303,10 @@ function reportWriter(doc) {
     const width = (WIDTH - gap * (columns - 1)) / columns;
     for (let start = 0; start < charts.length; start += columns) {
       const row = charts.slice(start, start + columns)
-        .map(({ series, details }) => prepareChart(series, clock, timeRange, width, details));
+        .map(({ series, details }) => {
+          const title = charts.length > 1 || series.name !== sectionTitle ? series.name : "";
+          return prepareChart(series, clock, timeRange, width, details, title);
+        });
       ensure(Math.max(...row.map(chart => chart.height)));
       const top = y;
       let rowBottom = y;
@@ -318,6 +320,10 @@ function reportWriter(doc) {
   }
   function drawChart(doc, geometry, left, originY, compact) {
     const { plot, points, invalidPoints, xTicks, yTicks, connections, extension } = geometry;
+    const unit = printableText(geometry.unit).replace(/^deg([CF])$/, "\u00b0$1");
+    textStyle(doc, compact ? 7.5 : 8.5, true, COLOR.muted);
+    const axisCenter = originY + plot.top + plot.height / 2;
+    doc.text(unit, left + 8, axisCenter + doc.getTextWidth(unit) / 2, { angle: 90 });
     doc.setLineWidth(0.35);
     textStyle(doc, compact ? 7 : 7.5, false, COLOR.muted);
     for (const tick of yTicks) {
@@ -416,15 +422,16 @@ function parameterTable(writer, parameters, { heading = true } = {}) {
   }
 }
 
-function channelDetails(writer, channel, run, { heading = true, charts } = {}) {
+function channelDetails(writer, channel, run, { heading = true, charts, deviceName } = {}) {
   const details = `${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}${channel.role ? ` | ${channel.role}` : ""}`;
   const name = channel.symbolicName || channelLabel(channel);
   const result = resultLabel(channel.status);
   const wiring = `Recorded wiring result: ${result}${channel.rawStatus ? ` (source: ${channel.rawStatus})` : ""}`;
   const populated = (channel.series || []).filter(series => series.points?.length);
-  const context = populated.length ? wiring : `${details} | ${wiring}`;
   if (charts) {
-    writer.paragraph(`${heading ? `${name} | ` : ""}${context}`, { size: 8.5, gap: 4, lineHeight: 11 });
+    const label = heading && name !== deviceName ? name : "";
+    const location = !populated.length ? details : heading && !label ? channelLabel(channel) : "";
+    writer.paragraph([label, location, wiring].filter(Boolean).join(" | "), { size: 8.5, gap: 4, lineHeight: 11 });
   } else {
     if (heading) writer.heading(name);
     if (!populated.length) writer.paragraph(details, { color: COLOR.muted });
@@ -434,9 +441,6 @@ function channelDetails(writer, channel, run, { heading = true, charts } = {}) {
   }
   if (channel.comment) writer.paragraph(`Tester comment: ${channel.comment}`);
   parameterTable(writer, channel.parameters);
-  if (!populated.length) {
-    writer.paragraph("No dated observations were imported for this channel.", { color: COLOR.muted });
-  }
   if (charts) {
     charts.push(...populated.map(series => ({ series, details })));
   } else for (const series of populated) {
@@ -451,7 +455,6 @@ function seriesAudit(writer, series, run) {
     || (point.previousRawValue !== undefined && point.previousRawValue !== "" && point.previousValue === null)));
   if (invalid.length) {
     writer.heading(`Invalid or unplottable values - ${series.name || "Recorded values"}`, 10);
-    writer.paragraph("Original tokens are retained below. Invalid after-values are excluded from the vertical scale; an invalid previous token does not invalidate a valid recorded after-value.", { size: 8, color: COLOR.muted });
     writer.table([
       { label: "Source time", width: 142 },
       { label: "Before / after (original tokens)", width: 220 },
@@ -465,7 +468,6 @@ function seriesAudit(writer, series, run) {
   const removed = series.points.filter((point) => point.excluded === true);
   if (removed.length) {
     writer.heading(`Removed events - ${series.name || "Recorded values"}`, 10);
-    writer.paragraph("These events were removed from the active graphs. Their original values and source references are retained below for review, including events outside the displayed time range.", { size: 8, color: COLOR.muted });
     writer.table([
       { label: "Original source time", width: 142 },
       { label: "Before / after (original tokens)", width: 220 },
@@ -478,29 +480,29 @@ function seriesAudit(writer, series, run) {
   }
 }
 
-function runSummary(writer, run) {
+function runSummary(writer, run, approver) {
   writer.page(run.name || "Test run");
   writer.paragraph(`Software: ${run.software.name} | Version: ${run.software.version}`, { size: 11, bold: true });
   writer.paragraph(`Run time span: ${rangeLabel(run.clock)}`);
-  writer.paragraph(`Clock: ${clockLabel(run.clock)}. Each signal has a separate graph with its own unit scale. Time ranges fit the observations unless a manual view is selected for the device.`, { color: COLOR.muted });
+  writer.paragraph(`Clock: ${clockLabel(run.clock)}`, { color: COLOR.muted });
+  if (approver) writer.paragraph(`Approved by: ${approver}`);
   reportComment(writer, "Overall test run comment", run.comment);
-  writer.paragraph("Recorded wiring results are the tester's entries in PRONETA. Logged values alone do not establish a functional pass.", { color: COLOR.muted });
   writer.table([
-    { label: "Device name", width: 300 },
-    { label: "Recorded wiring result", width: 160 },
+    { label: "Device name", width: WIDTH - 378 },
+    { label: "Slot", width: 118 },
+    { label: "Recorded wiring result", width: 180 },
     { label: "Channels", width: 80 },
-    { label: "Logged changes", width: WIDTH - 540 },
   ], run.devices.map((device) => [
-    device.name, resultLabel(device.status), device.channels.length,
-    device.channels.reduce((sum, channel) => sum + (channel.series || []).reduce((count, series) => count + (series.points?.length || 0), 0), 0),
+    device.name,
+    [...new Set(device.channels.map((channel) => channel.slot).filter(Number.isInteger))]
+      .sort((a, b) => a - b).join(", ") || "Unspecified",
+    resultLabel(device.status), device.channels.length,
   ]));
-  writer.paragraph(`${run.unassignedChannels?.length || 0} channel(s) without an assigned device name are retained in the unassigned-channel appendix.`, { size: 8, color: COLOR.muted });
 }
 
 function runAppendices(writer, run) {
   if (run.unassignedChannels?.length) {
     writer.page(`${run.name || "Test run"} - Unassigned channels`);
-    writer.paragraph("Channels marked N/A or without a device name remain separate from named-device results.");
     writer.table([
       { label: "Station", width: 135 }, { label: "Slot / channel", width: 130 },
       { label: "Symbolic name", width: 180 }, { label: "Recorded wiring result", width: WIDTH - 445 },
@@ -515,28 +517,30 @@ function runAppendices(writer, run) {
       }
     }
   }
-  writer.page(`${run.name || "Test run"} - Stations and module parameters`);
-  writer.paragraph("Parameter tables show the selections saved in the imported parameter files. Encoded selections remain labeled when no readable value label was supplied.", { color: COLOR.muted });
-  for (const station of run.stations || []) {
-    writer.heading(station.name || station.id);
-    writer.paragraph([station.macAddress && `MAC: ${station.macAddress}`, station.serialNumber && `Serial: ${station.serialNumber}`].filter(Boolean).join(" | "), { color: COLOR.muted });
-    writer.table([
-      { label: "Slot", width: 50 }, { label: "Module", width: 295 },
-      { label: "Order number", width: 205 }, { label: "Serial number", width: WIDTH - 550 },
-    ], (station.modules || []).map((module) => [module.slot, module.name, module.orderNumber || "", module.serialNumber || ""]));
-    const parameters = (station.modules || []).flatMap((module) => (module.parameters || []).map((parameter) => ({ ...parameter, slot: module.slot })));
-    if (parameters.length) {
-      writer.heading(`${station.name || station.id} - Module-wide parameters`, 11);
+  if (run.stations?.length) {
+    writer.page(`${run.name || "Test run"} - Stations and module parameters`);
+    for (const station of run.stations) {
+      writer.heading(station.name || station.id);
+      const identifiers = [station.macAddress && `MAC: ${station.macAddress}`, station.serialNumber && `Serial: ${station.serialNumber}`].filter(Boolean).join(" | ");
+      if (identifiers) writer.paragraph(identifiers, { color: COLOR.muted });
       writer.table([
-        { label: "Slot", width: 40 }, { label: "Parameter", width: 278 },
-        { label: "Selected value", width: 184 }, { label: "Group / record", width: WIDTH - 502 },
-      ], parameters.map((parameter) => [parameter.slot, parameter.name, selectedValue(parameter),
-        [parameter.group, parameter.recordIndex == null ? "" : `Record ${parameter.recordIndex}`].filter(Boolean).join(" | ")]),
-      { compact: true });
+        { label: "Slot", width: 50 }, { label: "Module", width: 295 },
+        { label: "Order number", width: 205 }, { label: "Serial number", width: WIDTH - 550 },
+      ], (station.modules || []).map((module) => [module.slot, module.name, module.orderNumber || "", module.serialNumber || ""]));
+      const parameters = (station.modules || []).flatMap((module) => (module.parameters || []).map((parameter) => ({ ...parameter, slot: module.slot })));
+      if (parameters.length) {
+        writer.heading(`${station.name || station.id} - Module-wide parameters`, 11);
+        writer.table([
+          { label: "Slot", width: 40 }, { label: "Parameter", width: 278 },
+          { label: "Selected value", width: 184 }, { label: "Group / record", width: WIDTH - 502 },
+        ], parameters.map((parameter) => [parameter.slot, parameter.name, selectedValue(parameter),
+          [parameter.group, parameter.recordIndex == null ? "" : `Record ${parameter.recordIndex}`].filter(Boolean).join(" | ")]),
+        { compact: true });
+      }
     }
   }
+  if (!run.sources?.length && !run.warnings?.length && !run.unparsedEvents?.length) return;
   writer.page(`${run.name || "Test run"} - Sources and import notes`);
-  writer.paragraph("Source fingerprints identify the exact imported file contents. The approved report uses the saved run data from this QC revision.", { color: COLOR.muted });
   writer.table([
     { label: "File / type", width: 210 }, { label: "Station / bytes", width: 160 },
     { label: "SHA-256", width: WIDTH - 370 },
@@ -544,11 +548,12 @@ function runAppendices(writer, run) {
     `${source.name}\n${source.kind}`, `${stationName(run, source.stationId)}\n${source.size ?? "Unknown"} bytes`,
     source.sha256 || "Not recorded",
   ]));
-  writer.heading("Import notes");
-  const clarification = importNoteClarification(run.warnings);
-  if (clarification) writer.paragraph(clarification, { size: 8.5 });
-  if (!run.warnings?.length) writer.paragraph("No import warnings recorded.");
-  else run.warnings.forEach((warning) => writer.paragraph(warning, { size: 8.5 }));
+  if (run.warnings?.length) {
+    writer.heading("Import notes");
+    const clarification = importNoteClarification(run.warnings);
+    if (clarification) writer.paragraph(clarification, { size: 8.5 });
+    run.warnings.forEach((warning) => writer.paragraph(warning, { size: 8.5 }));
+  }
   if (run.unparsedEvents?.length) {
     writer.heading("Events retained without a parsed value");
     writer.table([
@@ -640,26 +645,25 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
   });
   drawCover(doc, { ...project, skidName: project.skidName.trim().replace(/\s+/g, " ") }, closedAt, logo, "Test Result");
   const writer = reportWriter(doc);
-  writer.page("I/O test report");
-  writer.paragraph(`Revision ${project.revision} - Approved and closed`, { size: 13, bold: true });
-  writer.paragraph(`Approved: ${dateLabel(closedAt)}${project.closedByName ? ` | By: ${project.closedByName}` : ""}`);
-  writer.paragraph(`${runs.length} saved test run(s) included. This export reflects the locked QC revision.`, { color: COLOR.muted, gap: 18 });
-  writer.table([
-    { label: "Test run", width: 260 }, { label: "Software / version", width: 290 },
-    { label: "Named devices", width: WIDTH - 550 },
-  ], runs.map((run) => [run.name || "Test run", `${run.software.name}\n${run.software.version}`, run.devices.length]));
-  writer.paragraph("Results, parameter selections, and logged changes are grouped by device name. Each signal has a separate graph with its own unit scale. Time ranges fit the observations unless a manual view is selected for the device. The comment for each device applies to all of its graphs. Passed and Failed refer to the tester-recorded wiring result; a plotted value does not create a pass result.", { color: COLOR.muted });
+  if (runs.length > 1) {
+    writer.page("Test run summary");
+    if (project.closedByName) writer.paragraph(`Approved by: ${project.closedByName}`);
+    writer.table([
+      { label: "Test run", width: 260 }, { label: "Software / version", width: 290 },
+      { label: "Named devices", width: WIDTH - 550 },
+    ], runs.map((run) => [run.name || "Test run", `${run.software.name}\n${run.software.version}`, run.devices.length]));
+  }
   for (const run of runs) {
     onProgress(`Building ${run.name || "test run"}...`);
-    runSummary(writer, run);
+    runSummary(writer, run, runs.length === 1 ? project.closedByName : undefined);
     await runSetup(writer, doc, run, backend, onProgress);
     for (const device of run.devices) {
       writer.page(device.name);
-      if (device.channels.length > 1) writer.paragraph(`Recorded wiring result: ${resultLabel(device.status)}`, { bold: true });
+      if (device.channels.length > 1) writer.paragraph(`Device wiring result: ${resultLabel(device.status)}`, { bold: true });
       const charts = [];
       for (const channel of device.channels) channelDetails(writer, channel, run, {
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,
-        charts,
+        charts, deviceName: device.name,
       });
       writer.chartGrid(charts, run.clock, deviceTimeRanges.get(device));
       reportComment(writer, "Device comment", device.comment);
