@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { testCommentDraftScope, testCommentDraftKey } from "../src/test-comment-drafts.js";
 
 let directory;
 let bundle;
@@ -79,7 +80,7 @@ function savedRun(overrides = {}) {
     software: { name: "Siemens PRONETA Basic", version: "Entered 1.0" }, ...overrides };
 }
 
-async function setup(t, props = {}) {
+async function setup(t, props = {}, { stored = {}, storageBlocked = false } = {}) {
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", error => errors.push(error.message));
@@ -90,8 +91,10 @@ async function setup(t, props = {}) {
   const { window } = dom;
   Object.assign(window, {
     IS_REACT_ACT_ENVIRONMENT: true, structuredClone, calls: [], parses: [], dirty: [], exports: [], reviews: [],
-    initialProps: { project, runs: [], inspector: { id: "inspector-1", isAdmin: false }, ...props },
+    initialProps: { project, runs: [], inspector: { id: "inspector-1", isAdmin: false }, storageScope: "https://example.supabase.co", ...props },
   });
+  for (const [key, value] of Object.entries(stored)) window.localStorage.setItem(key, value);
+  if (storageBlocked) Object.defineProperty(window, "localStorage", { get() { throw new Error("Blocked"); } });
   window.MessageChannel = class {
     constructor() {
       this.port1 = { onmessage: null };
@@ -100,14 +103,21 @@ async function setup(t, props = {}) {
   };
   window.eval(bundle);
   await window.act(async () => window.mount());
-  t.after(async () => {
+  let unmounted = false;
+  const unmount = async () => {
+    if (unmounted) return;
     await window.act(async () => window.root.unmount());
+    unmounted = true;
+  };
+  t.after(async () => {
+    await unmount();
     window.close();
     assert.deepEqual(errors, [], "no React or DOM errors");
   });
   const document = window.document;
   const h = {
-    window, document,
+    window, document, unmount,
+    stored: () => Object.fromEntries(Object.keys(window.localStorage).map(key => [key, window.localStorage.getItem(key)])),
     query: selector => document.querySelector(selector),
     text: () => document.body.textContent.replace(/\s+/g, " "),
     button: name => [...document.querySelectorAll("button")].find(button => button.textContent.trim() === name),
@@ -445,4 +455,151 @@ test("overall comments stay with the selected run and support 4,000 Unicode char
   assert.equal(h.window.calls[0].payload.comment, "😀".repeat(4000));
   assert.equal(first.comment, "First run note");
   await h.settle();
+});
+
+test("pending comments recover after a new browser window and clear only on successful save or discard", async t => {
+  const run = savedRun();
+  const h = await setup(t, { runs: [run] });
+  await h.fill(h.query('[aria-label="Overall test run comment"] textarea'), "Pending overall\nStill not approved");
+  await h.fill(h.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea'), "Pending device note");
+  const stored = h.stored();
+  assert.equal(Object.keys(stored).length, 1);
+  const cached = JSON.parse(Object.values(stored)[0]);
+  assert.equal(cached.comment, "Pending overall\nStill not approved");
+  assert.equal(cached.runVersion, run.runVersion);
+  assert.equal(cached.data, undefined, "measurement evidence is not duplicated into the text cache");
+  await h.unmount();
+  assert.deepEqual(h.stored(), stored, "unmount does not clear a pending draft");
+  const reopened = await setup(t, { runs: [run] }, { stored });
+  assert.match(reopened.text(), /Recovered pending comments/);
+  assert.equal(reopened.window.dirty.at(-1), true, "recovery locks approval and navigation immediately");
+  assert.equal(reopened.query('[aria-label="Overall test run comment"] textarea').value, cached.comment);
+  assert.equal(reopened.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea').value, "Pending device note");
+  assert.equal(reopened.window.calls.length, 0);
+  assert.deepEqual(reopened.stored(), stored, "mount never overwrites recovered text");
+  await reopened.click(reopened.button("Save test run"));
+  assert.equal(reopened.window.calls[0].payload.runVersion, run.runVersion);
+  await reopened.settle("Network failure");
+  assert.deepEqual(reopened.stored(), stored);
+  await reopened.click(reopened.button("Save test run"));
+  await reopened.settle();
+  assert.deepEqual(reopened.stored(), {});
+  assert.equal(reopened.window.dirty.at(-1), false);
+  await reopened.unmount();
+  assert.deepEqual(reopened.stored(), {}, "save cleanup cannot recreate a cache entry during effects");
+  const discarded = await setup(t, { runs: [run] }, { stored });
+  await discarded.click(discarded.button("Discard changes"));
+  assert.deepEqual(discarded.stored(), {});
+  assert.equal(discarded.window.dirty.at(-1), false);
+});
+
+test("local comment recovery is isolated by project, inspector, skid, and run", async t => {
+  const first = savedRun(), second = savedRun({ id: "run-2", name: "Second saved run" });
+  const h = await setup(t, { runs: [first, second] });
+  const select = h.query('.test-run-toolbar select');
+  await h.window.act(async () => { select.value = second.id; select.dispatchEvent(new h.window.Event("change", { bubbles: true })); });
+  await h.fill(h.query('[aria-label="Overall test run comment"] textarea'), "Only the second run");
+  const stored = h.stored();
+  for (const props of [
+    { storageScope: "https://another.supabase.co" },
+    { inspector: { id: "inspector-2", isAdmin: true } },
+    { project: { ...project, walkdownId: "skid-2" } },
+  ]) {
+    const isolated = await setup(t, { runs: [first, second], ...props }, { stored });
+    assert.equal(isolated.query('[aria-label="Import test run"]'), null);
+    assert.doesNotMatch(isolated.text(), /Only the second run/);
+    assert.deepEqual(isolated.stored(), stored);
+  }
+  await h.configure({ inspector: { id: "inspector-2", isAdmin: true } });
+  assert.doesNotMatch(h.text(), /Only the second run/);
+  await h.configure({ inspector: { id: "inspector-1", isAdmin: false } });
+  assert.equal(h.query('[aria-label="Overall test run comment"] textarea').value, "Only the second run");
+  await h.click(h.button("Save test run"));
+  assert.equal(h.window.calls[0].payload.id, second.id);
+  await h.settle();
+});
+
+test("recovered stale, removed, closed, and prior-revision comments remain readable without retargeting", async t => {
+  const run = savedRun();
+  const h = await setup(t, { runs: [run] });
+  await h.fill(h.query('[aria-label="Overall test run comment"] textarea'), "Recover this old run text");
+  await h.fill(h.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea'), "Recover this device text");
+  const stored = h.stored();
+  await h.unmount();
+  for (const props of [
+    { runs: [{ ...run, runVersion: run.runVersion + 1 }] },
+    { runs: [] },
+    { runs: [run], readOnly: true, project: { ...project, status: "closed" } },
+    { runs: [run], project: { ...project, revision: project.revision + 1 } },
+  ]) {
+    const reopened = await setup(t, props, { stored });
+    assert.match(reopened.text(), /Recover this old run text/);
+    assert.match(reopened.text(), /Recover this device text/);
+    assert.match(reopened.text(), /closed or changed/);
+    assert.equal(reopened.query('.test-comment textarea'), null);
+    assert.equal(reopened.button("Save test run").disabled, true);
+    assert.equal(reopened.window.dirty.at(-1), true);
+    await reopened.click(reopened.button("Save test run"));
+    assert.equal(reopened.window.calls.length, 0);
+    assert.deepEqual(reopened.stored(), stored);
+  }
+});
+
+test("new import comments survive reopen and require the matching original files before saving", async t => {
+  const h = await setup(t);
+  await h.importPreview();
+  await h.fill(h.field("Software version"), "3.9");
+  await h.fill(h.query('[aria-label="Overall test run comment"] textarea'), "New import note");
+  await h.fill(h.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea'), "Keep this new device note");
+  const stored = h.stored(), cached = JSON.parse(Object.values(stored)[0]);
+  await h.unmount();
+  const reopened = await setup(t, {}, { stored });
+  assert.match(reopened.text(), /Reselect the original source files/);
+  assert.equal(reopened.query('[aria-label="Overall test run comment"] textarea').value, "New import note");
+  assert.equal(reopened.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea').value, "Keep this new device note");
+  assert.equal(reopened.button("Save test run").disabled, true);
+  await reopened.choose();
+  const wrong = parsedRun(); wrong.sources[0].sha256 = "cd".repeat(32);
+  await reopened.finishParse(wrong);
+  assert.match(reopened.text(), /do not match the recovered import/);
+  assert.equal(reopened.button("Save test run").disabled, true);
+  await reopened.choose();
+  await reopened.finishParse();
+  await reopened.click(reopened.button("Save test run"));
+  assert.equal(reopened.window.calls[0].payload.id, cached.id);
+  assert.equal(reopened.window.calls[0].payload.runVersion, null);
+  assert.equal(reopened.window.calls[0].payload.devices[0].comment, "Keep this new device note");
+  await reopened.settle();
+  assert.deepEqual(reopened.stored(), {});
+});
+
+test("malformed and blocked browser storage cannot erase in-memory comments or trigger a save", async t => {
+  const run = savedRun();
+  const scope = testCommentDraftScope("https://example.supabase.co", "inspector-1", project.walkdownId);
+  const key = testCommentDraftKey(scope, { id: run.id, revision: project.revision });
+  const seed = await setup(t, { runs: [run] });
+  await seed.fill(seed.query('[aria-label="Overall test run comment"] textarea'), "Valid cached note");
+  const valid = JSON.parse(seed.stored()[key]);
+  for (const raw of ["{bad-json", JSON.stringify({ ...valid, comment: null }),
+    JSON.stringify({ ...valid, comment: "x".repeat(4001) }), JSON.stringify({ ...valid, id: "another-run" })]) {
+    const malformed = await setup(t, { runs: [run] }, { stored: { [key]: raw } });
+    assert.match(malformed.text(), /draft could not be read/);
+    assert.equal(malformed.window.dirty.at(-1), false);
+    assert.equal(malformed.stored()[key], raw);
+  }
+  const blocked = await setup(t, { runs: [run] }, { storageBlocked: true });
+  await blocked.fill(blocked.query('[aria-label="Overall test run comment"] textarea'), "Still editable in this tab");
+  assert.match(blocked.text(), /could not be cached locally/);
+  assert.equal(blocked.query('[aria-label="Overall test run comment"] textarea').value, "Still editable in this tab");
+  assert.equal(blocked.window.calls.length, 0);
+  await blocked.click(blocked.button("Save test run"));
+  await blocked.settle();
+  assert.equal(blocked.window.dirty.at(-1), false);
+  const quota = await setup(t, { runs: [run] });
+  quota.window.Storage.prototype.setItem = () => { throw new Error("Quota exceeded"); };
+  await quota.fill(quota.query('[aria-label="Overall test run comment"] textarea'), "Quota-safe in memory");
+  assert.match(quota.text(), /could not be cached locally/);
+  assert.equal(quota.query('[aria-label="Overall test run comment"] textarea').value, "Quota-safe in memory");
+  await quota.click(quota.button("Discard changes"));
+  assert.equal(quota.window.dirty.at(-1), false);
 });

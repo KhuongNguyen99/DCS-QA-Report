@@ -50,6 +50,8 @@ Open **Test reports** after choosing a named skid. This view imports Siemens PRO
 
 Add an **Overall test run comment** for the selected run, and a **Device comment** beneath each device's graph. Each field supports up to 4,000 Unicode characters and multiple lines. Typing starts a pending edit; select **Save test run** to apply the comments or **Discard changes** to restore the saved text. The importing inspector or an administrator can edit comments while the revision is a draft. Save failures retain them for retry, and source-file rereads preserve comments for matching device identifiers. Comments remain separate from imported tester comments, wiring results, and measurements.
 
+Pending comments are cached in this browser for the signed-in inspector, backend project, skid, revision, and test run. Refreshing or reopening the browser restores them as unsaved edits. **Save test run** applies them to the shared report; **Discard changes** clears the local draft. Failed saves keep the cache. If the saved run or revision has changed, the recovered text stays available for review and copying without overwriting newer evidence. Comments on a new or replaced import can also be recovered; reselect the original source files to restore its evidence before saving. The app reports when browser storage is blocked or full.
+
 The overall comment belongs only to its test run. Approved snapshots lock both run and device comments, and the test PDF includes them with their respective run summary or device. A new revision allows later changes without altering earlier approved reports.
 
 ### Setup photos

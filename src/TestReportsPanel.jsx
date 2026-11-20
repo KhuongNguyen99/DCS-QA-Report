@@ -4,6 +4,7 @@ import TestSetupPhotos from "./TestSetupPhotos.jsx";
 import { parsePronetaFiles } from "./proneta-parser.js";
 import { importNoteClarification } from "./proneta-notes.js";
 import { buildDeviceTestChart, formatSourceTime, formatTestValue } from "./test-chart.js";
+import { testCommentDraftScope, readTestCommentDrafts, writeTestCommentDraft, removeTestCommentDraft } from "./test-comment-drafts.js";
 import "./test-reports.css";
 
 const statusClass = (status) => status === "Passed" ? "passed" : status === "Failed" ? "failed" : "untested";
@@ -194,13 +195,29 @@ export function TestRunDetail({ run, onCommentChange, commentsDisabled = false }
   </div>;
 }
 
-export default function TestReportsPanel({
+export default function TestReportsPanel(props) {
+  const scope = testCommentDraftScope(props.storageScope, props.inspector?.id, props.project.walkdownId);
+  return <ScopedTestReportsPanel key={scope || "unscoped"} {...props} cacheScope={scope} />;
+}
+
+function ScopedTestReportsPanel({
   project, runs = [], inspector, readOnly = false, pending = false, exportProgress = "",
   onSave, onDelete, onExport, onReview, onDirtyChange,
-  getPhotoUrl, onAddSetupPhoto, onUpdateSetupPhoto, onRemoveSetupPhoto,
+  getPhotoUrl, onAddSetupPhoto, onUpdateSetupPhoto, onRemoveSetupPhoto, cacheScope,
 }) {
-  const [selectedId, setSelectedId] = useState(null);
-  const [draft, setDraft] = useState(null);
+  function recover(records) {
+    const cached = records.find(item => item.revision === project.revision) || records[0];
+    if (!cached) return null;
+    const run = runs.find(item => item.id === cached.id && item.runVersion === cached.runVersion);
+    return { ...cached, walkdownId: project.walkdownId, recovered: true,
+      reselectSources: cached.requiresFiles ? cached.sources : null,
+      data: run && !cached.requiresFiles ? structuredClone(run) : null };
+  }
+  const [recovery] = useState(() => readTestCommentDrafts(cacheScope));
+  const [draft, setDraft] = useState(() => recover(recovery.drafts));
+  const draftRef = useRef(draft);
+  const [selectedId, setSelectedId] = useState(draft?.id || null);
+  const [cacheError, setCacheError] = useState(recovery.error);
   const [files, setFiles] = useState([]);
   const [assignments, setAssignments] = useState({});
   const [busy, setBusy] = useState("");
@@ -212,7 +229,10 @@ export default function TestReportsPanel({
   const access = useRef(null);
   access.current = { readOnly, revision: project.revision, walkdownId: project.walkdownId };
   const selectedRun = runs.find(run => run.id === selectedId) || runs[0];
-  const stale = draft && (draft.revision !== project.revision || draft.walkdownId !== project.walkdownId);
+  const draftRun = runs.find(run => run.id === draft?.id);
+  const stale = draft && (draft.revision !== project.revision || draft.walkdownId !== project.walkdownId
+    || (draft.runVersion !== null && (!draftRun || draftRun.runVersion !== draft.runVersion
+      || !(inspector?.isAdmin || inspector?.id === draftRun.createdBy))));
   const blocked = pending || Boolean(busy);
   const canEdit = run => !readOnly && Boolean(inspector?.id && (inspector.isAdmin || inspector.id === run.createdBy));
   const confirmsRun = run => confirmDelete?.id === run.id && confirmDelete.revision === project.revision
@@ -235,18 +255,36 @@ export default function TestReportsPanel({
       timeZone: run?.clock?.timeZone || "Source clock (timezone not recorded)",
       comment: run?.comment || "",
       deviceComments: Object.fromEntries((run?.devices || []).map(device => [device.id, device.comment || ""])),
+      deviceNames: Object.fromEntries((run?.devices || []).map(device => [device.id, device.name])),
+      sources: (run?.sources || []).map(({ name, sha256 }) => ({ name, sha256 })),
+      requiresFiles: !run,
       data: run ? structuredClone(run) : null,
     };
+  }
+  function updateDraft(update) {
+    const next = typeof update === "function" ? update(draftRef.current) : update;
+    draftRef.current = next;
+    setDraft(next);
+    if (next) setCacheError(writeTestCommentDraft(cacheScope, next));
+  }
+  function finishDraft() {
+    const warning = removeTestCommentDraft(cacheScope, draftRef.current);
+    const remaining = readTestCommentDrafts(cacheScope);
+    const next = recover(remaining.drafts.filter(item => item.id !== draftRef.current.id || item.revision !== draftRef.current.revision));
+    draftRef.current = next;
+    setDraft(next); setFiles([]); setAssignments({});
+    if (next) setSelectedId(next.id);
+    setCacheError(warning || remaining.error);
   }
   function begin(run = null) {
     if (readOnly || blocked || setupDirty || draft || (run && !canEdit(run))) return;
     setError(""); setFiles([]); setAssignments({}); setConfirmDelete(null);
-    setDraft(draftFrom(run));
+    updateDraft(draftFrom(run));
   }
   function changeComment(deviceId, value) {
     if (readOnly || stale || blocked || setupDirty || busyRef.current || (!draft && (!selectedRun || !canEdit(selectedRun)))) return;
     setConfirmDelete(null);
-    setDraft(previous => {
+    updateDraft(previous => {
       const next = previous || draftFrom(selectedRun);
       return deviceId === null ? { ...next, comment: value }
         : { ...next, deviceComments: { ...next.deviceComments, [deviceId]: value } };
@@ -254,7 +292,7 @@ export default function TestReportsPanel({
   }
   function discard() {
     if (busyRef.current) return;
-    ++parseRef.current; setDraft(null); setFiles([]); setAssignments({}); setError("");
+    ++parseRef.current; finishDraft(); setError("");
   }
   async function parseFiles(incoming = files, stationAssignments = assignments) {
     if (!draft || busyRef.current || readOnly || stale) return;
@@ -266,9 +304,16 @@ export default function TestReportsPanel({
         name: draft.name, softwareName: draft.software.name, softwareVersion: draft.software.version,
         timeZone: draft.timeZone, stationAssignments,
       });
-      if (run === parseRef.current) setDraft(previous => previous && ({ ...previous, data: parsed }));
+      if (draft.reselectSources?.length) {
+        const hashes = sources => sources.map(source => source.sha256).sort().join(",");
+        if (hashes(parsed.sources) !== hashes(draft.reselectSources))
+          throw new Error("These files do not match the recovered import. Reselect the original files to keep these comments with their test evidence.");
+      }
+      if (run === parseRef.current) updateDraft(previous => previous && ({ ...previous, data: parsed, reselectSources: null,
+        sources: parsed.sources.map(({ name, sha256 }) => ({ name, sha256 })),
+        deviceNames: { ...previous.deviceNames, ...Object.fromEntries(parsed.devices.map(device => [device.id, device.name])) } }));
     } catch (e) {
-      if (run === parseRef.current) { setError(e.message); setDraft(previous => previous && ({ ...previous, data: null })); }
+      if (run === parseRef.current) { setError(e.message); updateDraft(previous => previous && ({ ...previous, data: null })); }
     } finally {
       if (run === parseRef.current) { busyRef.current = false; setBusy(""); }
     }
@@ -276,6 +321,7 @@ export default function TestReportsPanel({
   async function chooseFiles(event) {
     const chosen = Array.from(event.target.files || []); event.target.value = "";
     if (!chosen.length) return;
+    updateDraft(previous => previous && ({ ...previous, requiresFiles: true }));
     setFiles(chosen); setAssignments({});
     await parseFiles(chosen, {});
   }
@@ -293,7 +339,7 @@ export default function TestReportsPanel({
       if (access.current.readOnly || access.current.revision !== draft.revision || access.current.walkdownId !== draft.walkdownId)
         throw new Error("This draft belongs to an earlier revision. Discard it and reopen the current report.");
       const saved = await onSave(payload, draft.revision);
-      setSelectedId(saved?.id || draft.id); setDraft(null); setFiles([]); setAssignments({});
+      setSelectedId(saved?.id || draft.id); finishDraft();
     } catch (e) { setError(e.message); }
     finally { busyRef.current = false; setBusy(""); }
   }
@@ -319,15 +365,18 @@ export default function TestReportsPanel({
     </div>
     {exportProgress && <p className="test-export-progress" role="status"><span className="spinner" />{exportProgress}</p>}
     {error && <p className="message error" role="alert">{error}</p>}
+    {cacheError && <p className="message error" role="alert">{cacheError}</p>}
     {draft && <section className="card test-import-form" aria-label="Import test run">
       <h3>{draft.runVersion ? "Edit test run" : "Import a test run"}</h3>
-      {(readOnly || stale) && <p className="field-error" role="alert">This revision was closed or changed. Your local preview is retained. Discard this import and start again in the current draft to save it.</p>}
+      {draft.recovered && <p role="status">Recovered pending comments for {draft.name || "this test run"}, revision {draft.revision}. They remain unsaved until Save test run.</p>}
+      {(readOnly || stale) && <p className="field-error" role="alert">This revision or test run was closed or changed. Your local preview is retained for review and copying. Discard this draft and reopen the current run before saving.</p>}
+      {draft.recovered && draft.requiresFiles && !draft.data && <p role="status">Reselect the original source files to restore this import before saving: {draft.sources.map(source => source.name).join(", ") || "the files for this test run"}.</p>}
       <fieldset disabled={blocked || readOnly || stale}>
         <div className="test-metadata-grid">
-          <label>Test run name<input value={draft.name} maxLength={160} onChange={event => setDraft(previous => ({ ...previous, name: event.target.value }))} /></label>
-          <label>Software name<input value={draft.software.name} maxLength={120} onChange={event => setDraft(previous => ({ ...previous, software: { ...previous.software, name: event.target.value } }))} /></label>
-          <label>Software version<input value={draft.software.version} placeholder="Version used for this test" maxLength={80} onChange={event => setDraft(previous => ({ ...previous, software: { ...previous.software, version: event.target.value } }))} /></label>
-          <label>Source clock / timezone<input value={draft.timeZone} maxLength={120} onChange={event => setDraft(previous => ({ ...previous, timeZone: event.target.value }))} /></label>
+          <label>Test run name<input value={draft.name} maxLength={160} onChange={event => updateDraft(previous => ({ ...previous, name: event.target.value }))} /></label>
+          <label>Software name<input value={draft.software.name} maxLength={120} onChange={event => updateDraft(previous => ({ ...previous, software: { ...previous.software, name: event.target.value } }))} /></label>
+          <label>Software version<input value={draft.software.version} placeholder="Version used for this test" maxLength={80} onChange={event => updateDraft(previous => ({ ...previous, software: { ...previous.software, version: event.target.value } }))} /></label>
+          <label>Source clock / timezone<input value={draft.timeZone} maxLength={120} onChange={event => updateDraft(previous => ({ ...previous, timeZone: event.target.value }))} /></label>
         </div>
         <p className="test-muted">Use the software version you ran. Module firmware versions in the files are recorded separately. Times stay as recorded by the source computer.</p>
         <label className="test-file-choice">{draft.data ? "Replace source files" : "Source files"}<input type="file" multiple accept=".csv,.mpr,text/csv,application/xml,text/xml" onChange={chooseFiles} /></label>
@@ -335,7 +384,7 @@ export default function TestReportsPanel({
           <p>Station names are matched automatically. For renamed files, enter their station name below, then read the files again.</p>
           {files.map((file, index) => <label key={`${file.name}:${index}`}><span>{file.name}</span>
             <input aria-label={`Station for ${file.name}`} placeholder="Auto-detect station" value={assignments[file.name] || ""}
-              onChange={event => { setAssignments(previous => ({ ...previous, [file.name]: event.target.value })); setDraft(previous => ({ ...previous, data: null })); }} /></label>)}
+              onChange={event => { setAssignments(previous => ({ ...previous, [file.name]: event.target.value })); updateDraft(previous => ({ ...previous, data: null })); }} /></label>)}
           <button className="small-button" type="button" onClick={() => parseFiles()}>Read files again</button>
         </div>}
       </fieldset>
@@ -346,6 +395,13 @@ export default function TestReportsPanel({
         </button>
         <small>Save the reviewed import, then add setup photos before approving the skid revision.</small>
       </div>
+    </section>}
+    {draft && !draft.data && <section className="card test-preview" aria-label="Recovered test comments">
+      <TestComment title="Overall test run comment" value={draft.comment} disabled={blocked}
+        onChange={canComment ? value => changeComment(null, value) : undefined} />
+      {Object.entries(draft.deviceComments).map(([id, comment]) => <TestComment key={id}
+        title={`Device comment for ${draft.deviceNames[id] || id}`} value={comment} disabled={blocked}
+        onChange={canComment ? value => changeComment(id, value) : undefined} />)}
     </section>}
     {!draft && runs.length > 0 && <div className="test-run-toolbar">
       <label>Saved test run<select disabled={blocked || setupDirty} value={selectedRun?.id || ""} onChange={event => { setSelectedId(event.target.value); setConfirmDelete(null); }}>{runs.map(run => <option key={run.id} value={run.id}>{run.name}</option>)}</select></label>

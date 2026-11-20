@@ -1244,6 +1244,7 @@ function App() {
               project={state.project}
               runs={state.testRuns || []}
               inspector={inspector}
+              storageScope={config.url}
               readOnly={!editable}
               pending={pending > 0 || Boolean(reporting)}
               exportProgress={reporting}
