@@ -151,8 +151,6 @@ function clockLabel(clock) {
 
 function selectedValue(parameter) {
   let value = String(parameter.value ?? parameter.rawValue ?? "");
-  if (parameter.enumId && value === String(parameter.rawValue) && /^[-+]?\d+(?:\.\d+)?$/.test(value))
-    value += " (encoded selection)";
   if (parameter.unit && !value.includes(parameter.unit)) value += ` ${parameter.unit}`;
   return value || "Not specified";
 }
@@ -440,11 +438,14 @@ function configuredSettings(writer, run, showRunName) {
   };
   for (const station of run.stations || [])
     for (const module of station.modules || []) moduleFor(station.id, module.slot).module = module;
+  const addChannel = (channel, deviceName) => {
+    const parameters = channel.parameters?.filter(parameter =>
+      !/^\s*reaction to cpu stop\s*$/i.test(parameter.name));
+    if (parameters?.length) moduleFor(channel.stationId, channel.slot).channels.push({ channel, deviceName, parameters });
+  };
   for (const device of run.devices)
-    for (const channel of device.channels)
-      if (channel.parameters?.length) moduleFor(channel.stationId, channel.slot).channels.push({ channel, deviceName: device.name });
-  for (const channel of run.unassignedChannels || [])
-    if (channel.parameters?.length) moduleFor(channel.stationId, channel.slot).channels.push({ channel, deviceName: channel.symbolicName || "Unassigned" });
+    for (const channel of device.channels) addChannel(channel, device.name);
+  for (const channel of run.unassignedChannels || []) addChannel(channel, channel.symbolicName || "Unassigned");
   const configured = [...modules.values()].filter(({ module, channels }) => module?.parameters?.length || channels.length);
   if (!configured.length) return;
   writer.page("Configured settings");
@@ -459,10 +460,10 @@ function configuredSettings(writer, run, showRunName) {
     }
     if (!channels.length) continue;
     const names = new Map();
-    const rows = channels.map(({ channel, deviceName }) => {
+    const rows = channels.map(({ channel, deviceName, parameters }) => {
       const settings = new Map();
       const occurrences = new Map();
-      for (const parameter of channel.parameters) {
+      for (const parameter of parameters) {
         const count = (occurrences.get(parameter.name) || 0) + 1;
         occurrences.set(parameter.name, count);
         const key = `${parameter.name}\0${count}`;

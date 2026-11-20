@@ -222,7 +222,7 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.equal(photoPlacements(result.streams[0]).length, 1, "the QC cover logo is on the first page");
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
       "Siemens PRONETA Basic", "Version entered by tester", "RTD-EXAMPLE", "VALVE-EXAMPLE", "Recorded wiring result: Failed (source: Error)",
-      "Recorded wiring result: Passed", "0 (encoded selection)", "Celsius", "7FFFH", "synthetic-log.csv, row 3",
+      "Recorded wiring result: Passed", "Celsius", "7FFFH", "synthetic-log.csv, row 3",
       "Module diagnostic setting", "Unused-channel setting", "Not applicable"])
       assert.ok(result.text.includes(text), `Missing report text: ${text}`);
     assert.doesNotMatch(result.text, /Sources and import\s+notes|SHA-256|Synthetic warning retained for review|Unrecognized synthetic event/);
@@ -372,11 +372,12 @@ test("configured settings matrix preserves switch states and encoded numeric sel
     const settingsWords = settings.replace(/\s+/g, " ");
     assert.match(settingsWords, /Station Example \| Slot 3 \| Analog example/);
     for (const label of ["Channel settings", "Channel 1", "Channel 2", "RTD-EXAMPLE", "Diagnostics: No supply voltage L+",
-      "Diagnostics: Wire break", "Check for wire break", "Potential group", "Type/range of measurement", "Smoothing", "Reaction to CPU STOP"])
+      "Diagnostics: Wire break", "Check for wire break", "Potential group", "Type/range of measurement", "Smoothing"])
       assert.ok(settingsWords.includes(label), `Missing configured setting: ${label}`);
-    assert.match(settingsWords, /265 \(encoded selection\)/);
-    assert.match(settingsWords, /1 \(encoded selection\)/);
-    assert.equal((settingsWords.match(/0 \(encoded selection\)/g) || []).length, 2, "numeric zero selections stay numeric");
+    assert.match(settings, /^265$/m);
+    assert.match(settings, /^1$/m);
+    assert.equal((settings.match(/^0$/gm) || []).length, 1, "numeric zero stays numeric");
+    assert.doesNotMatch(settingsWords, /Reaction to CPU STOP|\(encoded selection\)/i);
     assert.equal((settings.match(/\nOff\n/g) || []).length, 1, "disabled switch differs from a missing setting");
     const green = result.streams.slice(1, summaryPage).flatMap(pdfLines).filter(line => line.color.length === 3
       && line.color.every((value, index) => Math.abs(value - [31, 105, 57][index] / 255) < 0.005));
@@ -393,7 +394,8 @@ test("runs without selected parameters omit the configured settings section", as
     const run = state.testRuns[0];
     run.stations[0].modules[0].parameters = [];
     for (const device of run.devices) for (const channel of device.channels) channel.parameters = [];
-    for (const channel of run.unassignedChannels) channel.parameters = [];
+    for (const channel of run.unassignedChannels)
+      channel.parameters = [{ name: "Reaction to CPU STOP", value: "0" }];
     const result = await pdfContent(await createTestReportPdf({ state }));
     assert.doesNotMatch(result.text, /Configured settings|Stations and module parameters/);
     assert.match(result.pages[1], /Software: Siemens PRONETA Basic/);
