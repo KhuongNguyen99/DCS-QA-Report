@@ -191,7 +191,7 @@ export function loadReportLogo() {
   return fetchImage(`${import.meta.env?.BASE_URL || "/"}assets/jeevy-logo-black.png`, "the Jeevy logo");
 }
 
-export function drawCover(doc, project, closedAt, logoImage, label = "QC Report", { revisionBottom = 550 } = {}) {
+export function drawCover(doc, project, closedAt, logoImage, label = "QC Report", { revisionBottom = 550, titleOffset = 0 } = {}) {
   drawPageHeader(doc, project, "Cover");
   doc.addImage(logoImage, "PNG", PAGE.margin, 39.6, 223.2, 74.88);
   doc.setFont("helvetica", "normal");
@@ -205,7 +205,7 @@ export function drawCover(doc, project, closedAt, logoImage, label = "QC Report"
       timeZone: "UTC",
     }),
     PAGE.margin,
-    239,
+    239 + titleOffset,
   );
   const subtitle = `${label} - ${printableText(project.skidName)}`;
   let size = 36;
@@ -214,7 +214,7 @@ export function drawCover(doc, project, closedAt, logoImage, label = "QC Report"
   do {
     setText(doc, [0, 0, 0], size, "bold");
     lines = doc.splitTextToSize(subtitle, PAGE.width - PAGE.margin * 2);
-    subtitleEnd = 345 + (lines.length - 1) * size * 1.2;
+    subtitleEnd = 345 + titleOffset + (lines.length - 1) * size * 1.2;
     if (subtitleEnd + 40 <= revisionBottom) break;
     size -= 1;
   } while (size >= 12);
@@ -222,10 +222,10 @@ export function drawCover(doc, project, closedAt, logoImage, label = "QC Report"
     throw new Error("Skid name is too long to fit on the report cover.");
   doc.setFont("helvetica", "bold");
   doc.setFontSize(Math.min(31.9, size - 1));
-  doc.text(COVER_TITLE, PAGE.margin, 290);
+  doc.text(COVER_TITLE, PAGE.margin, 290 + titleOffset);
   setText(doc, [0, 0, 0], size, "bold");
   lines.forEach((line, index) =>
-    doc.text(line, PAGE.margin, 345 + index * size * 1.2),
+    doc.text(line, PAGE.margin, 345 + titleOffset + index * size * 1.2),
   );
   doc.setFont("helvetica", "bold");
   doc.setFontSize(18);

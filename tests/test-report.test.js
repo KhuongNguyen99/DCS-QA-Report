@@ -263,6 +263,25 @@ test("approved test PDF preserves evidence and run context while fitting each gr
   });
 });
 
+test("long cover details fit on the first page above the footer", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    state.project.skidName = "W".repeat(120);
+    state.project.closedByName = "W".repeat(120);
+    const run = state.testRuns[0];
+    run.software.name = "W".repeat(120);
+    run.software.version = "W".repeat(80);
+    run.clock.timeZone = "W".repeat(120);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    assert.match(result.pages[0], /Software:/);
+    assert.match(result.pages[0], /Version:/);
+    assert.match(result.pages[0], /Run time span:/);
+    assert.match(result.pages[0], /Clock:/);
+    assert.match(result.pages[0], /Approved by:/);
+    assert.doesNotMatch(result.pages.slice(1).join("\n"), /Test run details \(continued\)/);
+  });
+});
+
 test("selected run exports the loaded archived revision and excludes other runs", async () => {
   await withFonts(async () => {
     const state = closedState();

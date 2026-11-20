@@ -113,6 +113,10 @@ function textStyle(doc, size = 10, bold = false, color = COLOR.ink) {
   doc.setTextColor(...color);
 }
 
+function paragraphLines(doc, value, width = WIDTH) {
+  return printableText(value).split("\n").flatMap(line => doc.splitTextToSize(line || " ", width));
+}
+
 function isNotApplicable(value) {
   return normalizePronetaStatus(value) === "Not applicable";
 }
@@ -221,7 +225,7 @@ function reportWriter(doc, y) {
   function paragraph(value, { size = 9, bold = false, color = COLOR.ink, gap = 7, lineHeight = size * 1.45,
     left = PAGE.margin, width = WIDTH } = {}) {
     textStyle(doc, size, bold, color);
-    const lines = printableText(value).split("\n").flatMap((line) => doc.splitTextToSize(line || " ", width));
+    const lines = paragraphLines(doc, value, width);
     for (const line of lines) {
       ensure(lineHeight);
       textStyle(doc, size, bold, color);
@@ -660,16 +664,28 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
     author: "Jeevy Fabrication", creator: "Jeevy DCS QC Report",
   });
   const cover = { ...project, skidName: project.skidName.trim().replace(/\s+/g, " ") };
-  const revisionY = drawCover(doc, cover, closedAt, logo, "Test Result", { revisionBottom: 425 });
-  const writer = reportWriter(doc, revisionY + 20);
   const coverStyle = { size: 10, lineHeight: 14, gap: 3 };
+  const coverDetails = [];
   if (runs.length === 1) {
     const [run] = runs;
-    writer.paragraph(`Software: ${run.software.name} | Version: ${run.software.version}`, { ...coverStyle, bold: true });
-    writer.paragraph(`Run time span: ${rangeLabel(run.clock)}`, coverStyle);
-    writer.paragraph(`Clock: ${clockLabel(run.clock)}`, coverStyle);
+    coverDetails.push(
+      { text: `Software: ${run.software.name} | Version: ${run.software.version}`, bold: true },
+      { text: `Run time span: ${rangeLabel(run.clock)}` },
+      { text: `Clock: ${clockLabel(run.clock)}` },
+    );
   }
-  if (project.closedByName) writer.paragraph(`Approved by: ${project.closedByName}`, coverStyle);
+  if (project.closedByName) coverDetails.push({ text: `Approved by: ${project.closedByName}` });
+  const detailsHeight = coverDetails.reduce((height, { text, bold }) => {
+    textStyle(doc, coverStyle.size, bold);
+    return height + paragraphLines(doc, text).length * coverStyle.lineHeight + coverStyle.gap;
+  }, 0);
+  const revisionBottom = 425;
+  const detailGap = 20;
+  const titleOffset = Math.max(-58, Math.min(0, PAGE.bottom - revisionBottom - detailGap - detailsHeight));
+  const revisionY = drawCover(doc, cover, closedAt, logo, "Test Result",
+    { revisionBottom: revisionBottom + titleOffset, titleOffset });
+  const writer = reportWriter(doc, revisionY + detailGap);
+  for (const { text, bold } of coverDetails) writer.paragraph(text, { ...coverStyle, bold });
   if (runs.length > 1) {
     writer.table([
       { label: "Test run", width: 167 }, { label: "Software / version", width: 156 },
