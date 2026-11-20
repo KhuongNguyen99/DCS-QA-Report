@@ -194,9 +194,8 @@ async function reportFont(file) {
 }
 
 /** A paginated writer: table rows and long notes may continue onto new pages. */
-function reportWriter(doc) {
-  let y = 54;
-  let sectionTitle = "I/O test report";
+function reportWriter(doc, y) {
+  let sectionTitle = "Test run details";
   let figureNumber = 0;
   function header() {
     textStyle(doc, 7.9, false, COLOR.muted);
@@ -543,12 +542,8 @@ function seriesAudit(writer, series, run) {
   }
 }
 
-function runSummary(writer, run, approver) {
+function runSummary(writer, run) {
   writer.page(run.name || "Test run");
-  writer.paragraph(`Software: ${run.software.name} | Version: ${run.software.version}`, { size: 11, bold: true });
-  writer.paragraph(`Run time span: ${rangeLabel(run.clock)}`);
-  writer.paragraph(`Clock: ${clockLabel(run.clock)}`, { color: COLOR.muted });
-  if (approver) writer.paragraph(`Approved by: ${approver}`);
   reportComment(writer, "Overall test run comment", run.comment);
   writer.table([
     { label: "Device name", width: WIDTH - 378 },
@@ -664,20 +659,31 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
     subject: `Approved QC revision ${project.revision}; recorded I/O wiring results and logged observations`,
     author: "Jeevy Fabrication", creator: "Jeevy DCS QC Report",
   });
-  drawCover(doc, { ...project, skidName: project.skidName.trim().replace(/\s+/g, " ") }, closedAt, logo, "Test Result");
-  const writer = reportWriter(doc);
+  const cover = { ...project, skidName: project.skidName.trim().replace(/\s+/g, " ") };
+  const revisionY = drawCover(doc, cover, closedAt, logo, "Test Result", { revisionBottom: 425 });
+  const writer = reportWriter(doc, revisionY + 20);
+  const coverStyle = { size: 10, lineHeight: 14, gap: 3 };
+  if (runs.length === 1) {
+    const [run] = runs;
+    writer.paragraph(`Software: ${run.software.name} | Version: ${run.software.version}`, { ...coverStyle, bold: true });
+    writer.paragraph(`Run time span: ${rangeLabel(run.clock)}`, coverStyle);
+    writer.paragraph(`Clock: ${clockLabel(run.clock)}`, coverStyle);
+  }
+  if (project.closedByName) writer.paragraph(`Approved by: ${project.closedByName}`, coverStyle);
   if (runs.length > 1) {
-    writer.page("Test run summary");
-    if (project.closedByName) writer.paragraph(`Approved by: ${project.closedByName}`);
     writer.table([
-      { label: "Test run", width: 260 }, { label: "Software / version", width: 290 },
-      { label: "Named devices", width: WIDTH - 550 },
-    ], runs.map((run) => [run.name || "Test run", `${run.software.name}\n${run.software.version}`, run.devices.length]));
+      { label: "Test run", width: 167 }, { label: "Software / version", width: 156 },
+      { label: "Run time span", width: 180 }, { label: "Clock", width: WIDTH - 565 },
+      { label: "Named devices", width: 62 },
+    ], runs.map((run) => [
+      run.name || "Test run", `${run.software.name}\n${run.software.version}`,
+      rangeLabel(run.clock), clockLabel(run.clock), run.devices.length,
+    ]), { compact: true });
   }
   for (const run of runs) {
     onProgress(`Building ${run.name || "test run"}...`);
     configuredSettings(writer, run, runs.length > 1);
-    runSummary(writer, run, runs.length === 1 ? project.closedByName : undefined);
+    runSummary(writer, run);
     await runSetup(writer, doc, run, backend, onProgress);
     for (const device of run.devices) {
       writer.page(device.name);

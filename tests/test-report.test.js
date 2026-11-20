@@ -223,8 +223,11 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.match(result.pages[0], /450k skid x7 - DCS\nTest Result - Skid Example\nRevision 2/);
     assert.match(result.pages[0], /November 20, 2026/);
     assert.match(result.pages[1], /Configured settings/);
-    assert.ok(result.pages.findIndex(page => page.includes("Configured settings"))
-      < result.pages.findIndex(page => page.includes("Software: Siemens PRONETA Basic")));
+    assert.match(result.pages[0], /Software: Siemens PRONETA Basic \| Version: Version entered by tester/);
+    assert.match(result.pages[0], /Run time span: 2026-11-19 19:17:00 to 2026-11-19 19:23:32/);
+    assert.match(result.pages[0], /Clock: Source clock \(unspecified\)/);
+    assert.match(result.pages[0], /Approved by: Inspector Example/);
+    assert.doesNotMatch(result.pages.slice(1).join("\n"), /Software:|Run time span:|Clock:|Approved by:/);
     assert.doesNotMatch(result.text, /Stations and module parameters|Set parameters/);
     assert.equal(photoPlacements(result.streams[0]).length, 1, "the QC cover logo is on the first page");
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
@@ -282,10 +285,11 @@ test("selected run exports the loaded archived revision and excludes other runs"
     assert.match(result.text, /Archived device review comment/);
     assert.doesNotMatch(result.text, /Unselected new run|Version that must not appear|Unselected overall review comment|Unselected device review comment/);
     const all = await pdfContent(await createTestReportPdf({ state }));
-    assert.match(all.pages[1], /Test run summary/);
-    assert.match(all.pages[1], /Archived run/);
-    assert.match(all.pages[1], /Unselected new run/);
-    assert.match(all.text, /Version that must not appear/);
+    assert.match(all.pages[0], /Archived run/);
+    assert.match(all.pages[0], /Unselected new run/);
+    assert.match(all.pages[0], /Version that must not appear/);
+    assert.match(all.pages[0], /Run time span/);
+    assert.match(all.pages[0], /Approved by: Inspector Example/);
     assert.match(all.text, /Archived overall review comment/);
     assert.match(all.text, /Archived device review comment/);
     assert.match(all.text, /Unselected overall review comment/);
@@ -378,7 +382,7 @@ test("configured settings matrix displays verified selections and preserves unfa
       parameters: [{ name: "Type/range of measurement", value: "265", rawValue: "265", enumId: "Measurement type/-area" }],
       series: [] }];
     const result = await pdfContent(await createTestReportPdf({ state }));
-    const summaryPage = result.pages.findIndex(page => page.includes("Software: Siemens PRONETA Basic"));
+    const summaryPage = result.pages.findIndex(page => page.includes("Device name\nSlot\nChannels\nTest Result"));
     const settings = result.pages.slice(1, summaryPage).join("\n");
     const settingsWords = settings.replace(/\s+/g, " ");
     assert.match(settingsWords, /Station Example \| Slot 3 \| Analog example/);
@@ -410,7 +414,8 @@ test("runs without selected parameters omit the configured settings section", as
       channel.parameters = [{ name: "Reaction to CPU STOP", value: "0" }];
     const result = await pdfContent(await createTestReportPdf({ state }));
     assert.doesNotMatch(result.text, /Configured settings|Stations and module parameters/);
-    assert.match(result.pages[1], /Software: Siemens PRONETA Basic/);
+    assert.match(result.pages[0], /Software: Siemens PRONETA Basic/);
+    assert.match(result.pages[1], /Device name/);
   });
 });
 
