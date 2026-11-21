@@ -824,6 +824,13 @@ test("run and device comments preserve multiline Unicode separately from importe
     assert.match(devicePage, /Nhiệt độ ổn định tại 25degC\.\nПроверено устройство/);
     assert.equal(result.text.match(/Device comment/g)?.length, 1, "whitespace-only comments stay omitted");
     assert.match(result.text, /Tester comment: Investigate the wiring before retest\./);
+    const blocks = result.blocks.flat();
+    for (const text of ["Overall test run comment", "Kiểm tra tổng thể hoàn tất.", "Δοκιμή συνολική",
+      "Device comment", "Nhiệt độ ổn định tại 25degC.", "Проверено устройство"]) {
+      const color = blocks.find(block => block.text === text)?.color;
+      assert.ok(color?.every((value, index) => Math.abs(value - [24, 108, 161][index] / 255) < 0.005),
+        `Expected blue text for ${text}`);
+    }
     assert.deepEqual(state, saved);
   });
 });

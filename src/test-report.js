@@ -24,8 +24,8 @@ function validateReportComment(value, label) {
 
 function reportComment(writer, label, value) {
   if (!value?.trim()) return;
-  writer.heading(label, 10);
-  writer.paragraph(value);
+  writer.heading(label, 10, COLOR.blue);
+  writer.paragraph(value, { color: COLOR.blue });
 }
 
 function isTimeRangeMap(value) {
@@ -234,9 +234,9 @@ function reportWriter(doc, y) {
     }
     y += gap;
   }
-  function heading(value, size = 12) {
+  function heading(value, size = 12, color = COLOR.ink) {
     ensure(size * 1.5 + 28);
-    paragraph(value, { size, bold: true, gap: 7 });
+    paragraph(value, { size, bold: true, color, gap: 7 });
   }
   function table(columns, rows, { compact = false, caption = "" } = {}) {
     if (!rows.length) return;
