@@ -6,10 +6,24 @@ const switchValues = new Map([
 ]);
 const diagnosticLabels = new Map([
   ["no supply voltage l+", "Supply voltage"],
+  ["missing supply voltage l+", "Supply voltage"],
   ["short circuit to ground", "Short to ground"],
   ["short circuit to l+", "Short to L+"],
   ["hart", "HART"],
 ]);
+// Siemens ET 200SP equipment manuals A5E51323262, A5E34941201 and A5E50743776.
+const diagnosticPurposes = [
+  ["Wire break", "Detects broken wiring or a disconnected device."],
+  ["Short to ground", "Detects a short from the field wiring to ground."],
+  ["Short to L+", "Detects a short to the positive DC supply."],
+  ["Short circuit", "Flags an unintended low-resistance path in the field wiring."],
+  ["Supply voltage", "Flags missing or low DC power at the module."],
+  ["Overflow", "Flags a reading above the module's measurable range."],
+  ["Underflow", "Flags a reading below the module's measurable range."],
+  ["HART", "Flags device or communication faults in HART mode."],
+  ["Undervoltage", "Flags a supply voltage below the module's minimum."],
+  ["Reference junction", "Flags a fault in the thermocouple's reference temperature measurement."],
+];
 const functionOrder = ["Valve commands", "Valve feedback", "Positioner feedback", "Pressure inputs", "Temperature inputs"];
 const diagnosticName = name => /^\s*(?:group )?diagnostics?:\s*(\S.*?)\s*$/i.exec(name)?.[1];
 const measurementField = name => /^\s*(?:type\/range of measurement|measurement range)\s*$/i.test(name);
@@ -32,7 +46,7 @@ function diagnosticSettings(parameters, module) {
   for (const parameter of parameters) {
     const name = diagnosticName(parameter.name);
     if (!name) continue;
-    const key = name.toLowerCase();
+    const key = name.toLowerCase().replaceAll("-", " ");
     diagnostics.set(diagnosticLabels.get(key) ?? `${key[0].toUpperCase()}${key.slice(1)}`,
       switchSetting(parameter, module));
   }
@@ -126,6 +140,7 @@ export function summarizeTestSettings(run) {
   }
 
   const rows = [], differences = [];
+  const listedDiagnostics = new Set();
   const rank = purpose => functionOrder.includes(purpose) ? functionOrder.indexOf(purpose) : functionOrder.length;
   const ordered = [...families.values()].sort((left, right) => rank(left.purpose) - rank(right.purpose));
   for (const { purpose, modules: locations } of ordered) {
@@ -145,9 +160,11 @@ export function summarizeTestSettings(run) {
     for (const name of new Set(entries.flatMap(entry => [...entry.diagnostics.keys()]))) {
       if (entries.every(entry => entry.diagnostics.get(name) === true)) {
         commonDiagnostics.push(name);
+        listedDiagnostics.add(name);
       } else {
         const values = settingGroups(entries, entry => entry.diagnostics.get(name) ?? null);
         if (values.length === 1 && typeof values[0][0] !== "string") continue;
+        listedDiagnostics.add(name);
         for (const [value, affected] of values) {
           if (value === true && values.every(([other]) => typeof other === "boolean")) continue;
           const selected = value === true ? "On" : value === false ? "Off" : value || "Not recorded";
@@ -160,5 +177,6 @@ export function summarizeTestSettings(run) {
     rows.push([purpose, moduleLocations(locations), capacity ? `${entries.length} of ${capacity}` : String(entries.length),
       signal, commonDiagnostics.join(", ") || "—"]);
   }
-  return { rows, differences };
+  const guide = diagnosticPurposes.filter(([name]) => listedDiagnostics.has(name));
+  return { rows, differences, guide };
 }

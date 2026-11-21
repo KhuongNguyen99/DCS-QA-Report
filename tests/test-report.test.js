@@ -445,6 +445,12 @@ test("configured settings group modules and identify different diagnostics and r
     assert.match(settings, /^265$/m, "the code stays visible without the module order number");
     assert.doesNotMatch(settings, /Reaction to CPU STOP|encoded selection|Potential group|Smoothing|Channel settings|Empty module/i);
     assert.equal(settings.match(/Valve commands/g)?.length, 1, "matching outputs share a summary row");
+    const guide = settings.slice(settings.indexOf("What the diagnostics detect"));
+    assert.match(guide, /^What the diagnostics detect/);
+    assert.match(guide, /Wire break\nDetects broken wiring or a disconnected device\./);
+    assert.match(guide, /Supply voltage\nFlags missing or low DC power at the module\./);
+    assert.match(guide, /Undervoltage\nFlags a supply voltage below the module's minimum\./);
+    assert.doesNotMatch(guide, /HART|Reference junction/, "the guide omits diagnostics absent from the settings");
   });
 });
 

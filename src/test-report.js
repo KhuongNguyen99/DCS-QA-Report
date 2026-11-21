@@ -445,7 +445,7 @@ async function runSetup(writer, doc, run, backend, onProgress) {
 }
 
 function configuredSettings(writer, run, showRunName) {
-  const { rows, differences } = summarizeTestSettings(run);
+  const { rows, differences, guide } = summarizeTestSettings(run);
   if (!rows.length) return;
   writer.page("Configured settings");
   if (showRunName) writer.paragraph(run.name || "Test run", { bold: true });
@@ -453,10 +453,20 @@ function configuredSettings(writer, run, showRunName) {
     { label: "Function", width: 106 }, { label: "Location", width: 128 },
     { label: "Channels in use", width: 72, align: "center" }, { label: "Signal", width: 173 },
     { label: "Shared diagnostics", width: WIDTH - 479 },
-  ], rows);
+  ], rows, { compact: guide.length > 0 });
   writer.table([
     { label: "Location", width: 254 }, { label: "Setting", width: 158 }, { label: "Selected value", width: WIDTH - 412 },
-  ], differences, { caption: "Settings that differ" });
+  ], differences, { caption: "Settings that differ", compact: guide.length > 0 });
+  if (!guide.length) return;
+  const twoColumns = guide.length > 4;
+  const midpoint = twoColumns ? Math.ceil(guide.length / 2) : guide.length;
+  const columns = [
+    { label: "Diagnostic", width: 86 }, { label: "Purpose", width: WIDTH / (twoColumns ? 2 : 1) - 86 },
+  ];
+  const guideRows = twoColumns
+    ? guide.slice(0, midpoint).map((entry, index) => [...entry, ...(guide[index + midpoint] || ["", ""])])
+    : guide;
+  writer.table(twoColumns ? [...columns, ...columns] : columns, guideRows, { caption: "What the diagnostics detect", compact: true });
 }
 
 function figureDescription(series, channel, deviceName) {
