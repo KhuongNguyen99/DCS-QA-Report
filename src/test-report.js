@@ -321,7 +321,7 @@ function reportWriter(doc, y) {
     }
     y += 12;
   }
-  function prepareChart(series, clock, timeRange, width, details, title) {
+  function prepareChart({ series, description, location }, clock, timeRange, width, title) {
     const compact = width < WIDTH;
     const geometry = buildTestChart(series, clock, {
       width, height: compact ? 91 : 201,
@@ -329,12 +329,12 @@ function reportWriter(doc, y) {
       tickCount: width < 250 ? 3 : compact ? 4 : 5,
       timeRange,
     });
-    const legend = `Figure ${++figureNumber}. ${details}`;
+    const legend = `Figure ${++figureNumber}. ${description}.${compact ? "\n" : " "}${location}`;
     const titleStyle = { size: 10, bold: true, gap: 3, lineHeight: 14.5 };
     const legendStyle = { size: 8, color: COLOR.muted, gap: 10, lineHeight: 11 };
     const heightFor = (value, style) => {
       textStyle(doc, style.size, style.bold);
-      return doc.splitTextToSize(printableText(value), width).length * style.lineHeight + style.gap;
+      return paragraphLines(doc, value, width).length * style.lineHeight + style.gap;
     };
     const height = (title ? heightFor(title, titleStyle) : 0) + geometry.height + heightFor(legend, legendStyle);
     return { height, draw(left) {
@@ -350,9 +350,10 @@ function reportWriter(doc, y) {
     const width = (WIDTH - gap * (columns - 1)) / columns;
     for (let start = 0; start < charts.length; start += columns) {
       const row = charts.slice(start, start + columns)
-        .map(({ series, details }) => {
-          const title = charts.length > 1 || series.name !== sectionTitle ? series.name : "";
-          return prepareChart(series, clock, timeRange, width, details, title);
+        .map(chart => {
+          const name = chart.series.name;
+          const title = charts.length > 1 || name !== sectionTitle ? name : "";
+          return prepareChart(chart, clock, timeRange, width, title);
         });
       ensure(Math.max(...row.map(chart => chart.height)));
       const top = y;
@@ -501,8 +502,29 @@ function configuredSettings(writer, run, showRunName) {
   }
 }
 
+function figureDescription(series, channel, deviceName) {
+  const unit = String(series.unit ?? "").replace(/\s/g, "").toLowerCase();
+  let measurement = "Recorded signal";
+  if (series.kind === "digital") measurement = "Recorded state";
+  else if (["a", "ma", "\u00b5a", "ua"].includes(unit)) measurement = "Measured current";
+  else if (["v", "mv"].includes(unit)) measurement = "Measured voltage";
+  else if (["\u00b0c", "\u00b0f", "degc", "degf", "k"].includes(unit)) measurement = "Measured temperature";
+  const instruments = { DP: "differential pressure transducer", PD: "pressure transducer", POS: "positioner" };
+  for (const name of [channel.symbolicName, series.name, deviceName]) {
+    const tag = String(name ?? "").trim().toUpperCase();
+    const match = /^(DP|PD|TH|POS)(?:[-_]|$)|[-_](POS)(?:#\d+)?$/.exec(tag);
+    if (!match) continue;
+    const code = match[1] || match[2];
+    if (code === "TH") return `${measurement} for thermocouple tag ${tag}`;
+    return `${measurement} of ${instruments[code]}`;
+  }
+  return channel.role ? `${measurement} for the ${channel.role.toLowerCase()}` : measurement;
+}
+
 function channelDetails(writer, channel, run, { heading = true, charts, deviceName } = {}) {
-  const details = `${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}${channel.role ? ` | ${channel.role}` : ""}`;
+  const location = `${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}`;
+  const details = channel.role ? `${location} | ${channel.role}` : location;
+  const chart = series => ({ series, description: figureDescription(series, channel, deviceName), location });
   const name = channel.symbolicName || channelLabel(channel);
   const result = resultLabel(channel.status);
   const { rawStatus } = channel;
@@ -521,9 +543,9 @@ function channelDetails(writer, channel, run, { heading = true, charts, deviceNa
   }
   if (channel.comment) writer.paragraph(`Tester comment: ${channel.comment}`);
   if (charts) {
-    charts.push(...populated.map(series => ({ series, details })));
+    charts.push(...populated.map(chart));
   } else for (const series of populated) {
-    writer.chartGrid([{ series, details }], run.clock);
+    writer.chartGrid([chart(series)], run.clock);
     seriesAudit(writer, series, run);
   }
 }

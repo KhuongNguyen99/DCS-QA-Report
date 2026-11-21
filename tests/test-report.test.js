@@ -251,7 +251,7 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     assert.equal(graphPages.length, 2);
     assert.match(graphPages[0], /\n\u00b0C\n/);
     assert.match(graphPages[1], /\nState\n/);
-    assert.match(graphPages[0], /Figure 1\. Station Example \| Slot 3 \| Channel 1 \| Analog input/);
+    assert.match(graphPages[0], /Figure 1\. Measured temperature for the analog input\. Station Example \| Slot 3 \| Channel 1/);
     for (const page of graphPages) {
       assert.doesNotMatch(page, /Test run:.*Software:|observed change\(s\)|Graph span:|Shared run span:|connect recorded changes/);
     }
@@ -261,6 +261,34 @@ test("approved test PDF preserves evidence and run context while fitting each gr
       assert.ok(page.includes(`Page ${index + 1} of ${result.pages.length}`));
       assert.ok(page.includes("Revision 2 | Skid: Skid Example"));
     });
+  });
+});
+
+test("figure captions expand instrument tags and preserve channel locations", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const sample = run.devices[0].channels[0];
+    run.stations[0].name = "rio-a";
+    run.devices = [
+      { tag: "DP-3500#1", unit: "mA" },
+      { tag: "PD-3500#1", unit: "mA" },
+      { tag: "TH-3510", unit: "\u00b0C" },
+      { tag: "V-3511-POS", unit: "mA" },
+    ].map(({ tag, unit }) => ({
+      id: tag, name: tag, status: "Passed",
+      channels: [{
+        ...sample, id: tag, slot: 11, sourceChannel: "Channel 2", symbolicName: tag,
+        status: "Passed", rawStatus: "OK", parameters: [],
+        series: [{ ...sample.series[0], name: tag, unit }],
+      }],
+    }));
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    const text = result.text.replace(/\s+/g, " ");
+    assert.match(text, /Figure 1\. Measured current of differential pressure transducer\. rio-a \| Slot 11 \| Channel 2/);
+    assert.match(text, /Figure 2\. Measured current of pressure transducer\. rio-a \| Slot 11 \| Channel 2/);
+    assert.match(text, /Figure 3\. Measured temperature for thermocouple tag TH-3510\. rio-a \| Slot 11 \| Channel 2/);
+    assert.match(text, /Figure 4\. Measured current of positioner\. rio-a \| Slot 11 \| Channel 2/);
   });
 });
 
