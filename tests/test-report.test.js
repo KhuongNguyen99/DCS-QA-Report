@@ -648,7 +648,8 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
     ];
     run.devices = cases.map((series, index) => ({ id: `vector-${index}`, name: series.name, status: "Not tested", channels: [{
       id: `channel-${index}`, symbolicName: series.name, stationId: "station-1", slot: index + 1,
-      channel: 0, status: "Not tested", parameters: [], series: [{ id: `series-${index}`, unit: "", ...series }],
+      channel: 0, role: series.kind === "digital" ? "Command" : "Input",
+      status: "Not tested", parameters: [], series: [{ id: `series-${index}`, unit: "", ...series }],
     }] }));
     run.unassignedChannels = [];
     const result = await pdfContent(await createTestReportPdf({ state }));
@@ -672,13 +673,18 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
     near(analog[1].from.y, analog[1].to.y); near(analog[1].to.x, right);
 
     const digital = graphLines("Digital steps");
-    assert.equal(digital.length, 3);
-    assert.deepEqual(digital.map(line => line.dash), [[], [], [4, 3]]);
-    near(digital[0].from.x, left + width / 27); near(digital[0].to.x, left + width * 26 / 27);
-    near(digital[0].from.y, digital[0].to.y);
-    same(digital[1].from, digital[0].to); near(digital[1].from.x, digital[1].to.x);
-    assert.notEqual(digital[1].from.y, digital[1].to.y, "digital state changes vertically");
-    same(digital[2].from, digital[1].to); near(digital[2].from.y, digital[2].to.y); near(digital[2].to.x, right);
+    assert.equal(digital.length, 5);
+    assert.deepEqual(digital.map(line => line.dash), [[], [], [], [4, 3], [4, 3]]);
+    const [firstStep, hold, lastStep, initial, tail] = digital;
+    near(initial.from.x, left); near(initial.from.y, initial.to.y);
+    same(initial.to, firstStep.from); same(firstStep.to, hold.from);
+    near(hold.from.x, left + width / 27); near(hold.to.x, left + width * 26 / 27);
+    near(hold.from.y, hold.to.y);
+    same(lastStep.from, hold.to); near(lastStep.from.x, lastStep.to.x);
+    assert.notEqual(lastStep.from.y, lastStep.to.y, "digital state changes vertically");
+    same(tail.from, lastStep.to); near(tail.from.y, tail.to.y); near(tail.to.x, right);
+    near(initial.from.y, tail.to.y);
+    assert.match(result.pages.find(page => page.includes("Digital steps") && /Figure \d+\./.test(page)), /Initial state 0/);
 
     const gap = graphLines("Invalid gap");
     assert.equal(gap.length, 2, "there is no connection across the invalid event");

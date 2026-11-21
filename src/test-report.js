@@ -3,7 +3,7 @@ import { revisionNumber } from "./domain.js";
 import { normalizePronetaStatus } from "./proneta-parser.js";
 import { pronetaSelectionLabel } from "./proneta-selection-labels.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
-import { buildTestChart, formatSourceTime, isTestTimeRange } from "./test-chart.js";
+import { buildTestChart, formatSourceTime, isTestTimeRange, isDigitalOutputChannel } from "./test-chart.js";
 import { testCommentBlocks } from "./test-comment-format.js";
 
 const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 548 };
@@ -351,15 +351,16 @@ function reportWriter(doc, y) {
     }
     y += 12;
   }
-  function prepareChart({ series, description, location }, clock, timeRange, width, title) {
+  function prepareChart({ series, description, location, showInitialState }, clock, timeRange, width, title) {
     const compact = width < WIDTH;
     const geometry = buildTestChart(series, clock, {
       width, height: compact ? 91 : 201,
       padding: compact ? { left: 49, right: 24, top: 8, bottom: 31 } : { left: 57, right: 25, top: 20, bottom: 45 },
       tickCount: width < 250 ? 3 : compact ? 4 : 5,
-      timeRange,
+      timeRange, showInitialState,
     });
-    const legend = `Figure ${++figureNumber}. ${description}.${compact ? "\n" : " "}${location}`;
+    const initial = geometry.initialState === null ? "" : ` | Initial state ${geometry.initialState}`;
+    const legend = `Figure ${++figureNumber}. ${description}.${compact ? "\n" : " "}${location}${initial}`;
     const titleStyle = { size: 10, bold: true, gap: 3, lineHeight: 14.5 };
     const legendStyle = { size: 8, color: COLOR.muted, gap: 10, lineHeight: 11 };
     const heightFor = (value, style) => {
@@ -397,7 +398,7 @@ function reportWriter(doc, y) {
     }
   }
   function drawChart(doc, geometry, left, originY, compact) {
-    const { plot, points, invalidPoints, xTicks, yTicks, connections, extension } = geometry;
+    const { plot, points, invalidPoints, xTicks, yTicks, connections, extension, leading } = geometry;
     const unit = printableText(geometry.unit).replace(/^deg([CF])$/, "\u00b0$1");
     textStyle(doc, compact ? 7.5 : 8.5, true, COLOR.muted);
     const axisCenter = originY + plot.top + plot.height / 2;
@@ -421,12 +422,11 @@ function reportWriter(doc, y) {
     for (const { from, to } of connections) {
       doc.line(left + from.x, originY + from.y, left + to.x, originY + to.y);
     }
-    if (extension) {
-      doc.setLineDashPattern([4, 3], 0);
-      doc.line(left + extension.from.x, originY + extension.from.y,
-        left + extension.to.x, originY + extension.to.y);
-      doc.setLineDashPattern([], 0);
+    doc.setLineDashPattern([4, 3], 0);
+    for (const { from, to } of [leading, extension].filter(Boolean)) {
+      doc.line(left + from.x, originY + from.y, left + to.x, originY + to.y);
     }
+    doc.setLineDashPattern([], 0);
     doc.setFillColor(...COLOR.blue);
     points.forEach((point) => doc.circle(left + point.x, originY + point.y, compact ? 1.4 : 1.8, "F"));
     doc.setDrawColor(...COLOR.red);
@@ -554,7 +554,8 @@ function figureDescription(series, channel, deviceName) {
 function channelDetails(writer, channel, run, { heading = true, charts, deviceName } = {}) {
   const location = `${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}`;
   const details = channel.role ? `${location} | ${channel.role}` : location;
-  const chart = series => ({ series, description: figureDescription(series, channel, deviceName), location });
+  const chart = series => ({ series, description: figureDescription(series, channel, deviceName), location,
+    showInitialState: isDigitalOutputChannel(channel) });
   const name = channel.symbolicName || channelLabel(channel);
   const result = resultLabel(channel.status);
   const { rawStatus } = channel;

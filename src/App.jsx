@@ -27,7 +27,7 @@ import QualityControl from "./QualityControl.jsx";
 import RevisionPanel from "./RevisionPanel.jsx";
 import TestReportsPanel from "./TestReportsPanel.jsx";
 import PhotoGallery from "./PhotoGallery.jsx";
-import { testTimeRangeScope, readTestTimeRanges } from "./test-time-ranges.js";
+import { testTimeRangeScope, readTestTimeRanges, inheritTestTimeRanges } from "./test-time-ranges.js";
 
 const EMPTY = { records: [], photos: [], comments: [], testRuns: [], inspector: null };
 const TARGETS = inspectionTargets(schedule);
@@ -45,6 +45,14 @@ const STATUS = {
 };
 const asset = (name) => `${import.meta.env.BASE_URL}assets/${name}`;
 const selectionKey = (config) => `jeevy-qa-skid:${config.url}`;
+const reportViewKey = (config) => `jeevy-qa-report-view:${config.url}`;
+function rememberedReportView(config) {
+  try {
+    const view = localStorage.getItem(reportViewKey(config));
+    if (view === "report" || view === "tests") return view;
+  } catch { /* A blocked browser store does not prevent navigation. */ }
+  return "layout";
+}
 function rememberedSkid(config) {
   try {
     const id = localStorage.getItem(selectionKey(config));
@@ -125,7 +133,7 @@ function Status({ value, connected = true }) {
 
 function App() {
   const [config, setConfig] = useState(readConfig);
-  const [view, setView] = useState("layout");
+  const [view, setView] = useState(() => rememberedReportView(config));
   const [group, setGroup] = useState(null);
   const [state, setState] = useState(EMPTY);
   const [workspace, setWorkspace] = useState({
@@ -245,6 +253,7 @@ function App() {
         request.current === version &&
         selectedIdRef.current === backend.walkdownId
       ) {
+        inheritTestTimeRanges(config.url, loaded);
         setState(loaded);
         setWorkspace((previous) => ({
           ...previous,
@@ -273,7 +282,7 @@ function App() {
     } finally {
       if (request.current === version) setLoading(false);
     }
-  }, [backend]);
+  }, [backend, config.url]);
 
   useEffect(() => {
     let disposed = false;
@@ -377,6 +386,10 @@ function App() {
 
   function navigate(next, terminal = null) {
     setView(next);
+    try {
+      if (next === "report" || next === "tests") localStorage.setItem(reportViewKey(config), next);
+      else localStorage.removeItem(reportViewKey(config));
+    } catch { /* The page still opens when browser storage is unavailable. */ }
     setGroup(terminal);
     setSearch("");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -549,6 +562,7 @@ function App() {
         : await scope.newRevision();
       if (activeBackend.current === backend && selectedIdRef.current === backend.walkdownId) {
         ++request.current;
+        inheritTestTimeRanges(config.url, saved);
         setState(saved);
         setLoading(false);
         setLastSync(new Date());

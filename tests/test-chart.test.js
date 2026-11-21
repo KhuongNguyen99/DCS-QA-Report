@@ -105,6 +105,26 @@ test("a single timestamp gets a readable time window bounded by the original run
   assert.equal(last.extension, null, "no held reading extends past the test run");
 });
 
+test("digital outputs show the recorded starting state without adding an observation", () => {
+  const series = { kind: "digital", points: [point(20_000, 1, { previousValue: 0 }), point(50_000, 0)] };
+  const original = structuredClone(series);
+  const chart = buildTestChart(series, clock, { showInitialState: true });
+  assert.equal(chart.initialState, 0);
+  assert.deepEqual(chart.leading.from, { x: chart.plot.left, y: yFor(chart, 0) });
+  assert.deepEqual(chart.connections[0], {
+    from: chart.leading.to, to: { x: chart.points[0].x, y: yFor(chart, 1) },
+  });
+  assert.equal(chart.observedCount, 2);
+  const before = buildTestChart(series, clock, { showInitialState: true, timeRange: timeRange(1_000, 10_000) });
+  assert.equal(before.leading.to.x, before.plot.left + before.plot.width);
+  assert.equal(before.points.length, 0);
+  for (const first of [{ ...series.points[0], previousValue: null }, { ...series.points[0], excluded: true }]) {
+    assert.equal(buildTestChart({ ...series, points: [first, series.points[1]] }, clock, { showInitialState: true }).initialState, null);
+  }
+  assert.equal(buildTestChart(series, clock, { showInitialState: true, timeRange: timeRange(25_000, 35_000) }).leading, null);
+  assert.deepEqual(series, original);
+});
+
 test("device slider bounds cover all populated automatic graph spans with outward millisecond rounding", () => {
   const series = [
     { kind: 'analog', points: [point(20_000, 4), point(80_007, 5)] },

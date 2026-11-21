@@ -23,6 +23,8 @@ export function isTestTimeRange(range, clock) {
     && range.startMs < range.endMs && range.startMs >= clock.startMs && range.endMs <= clock.endMs);
 }
 
+export const isDigitalOutputChannel = channel => /(?:^|\s)(?:command|output)$/i.test(channel.role || "");
+
 function automaticTimeRange(series, clock) {
   const runStartMs = clock?.startMs;
   const runEndMs = clock?.endMs;
@@ -68,7 +70,7 @@ export function deviceChartTimeRange(device, clock) {
 export function buildTestChart(series, clock, {
   width = 700, height = 220,
   padding = { left: 62, right: 22, top: 20, bottom: 48 },
-  tickCount = 5, timeRange = null,
+  tickCount = 5, timeRange = null, showInitialState = false,
 } = {}) {
   const manualTimeRange = timeRange !== null;
   if (manualTimeRange && !isTestTimeRange(timeRange, clock))
@@ -153,6 +155,12 @@ export function buildTestChart(series, clock, {
     const clipped = segment(from, to);
     if (clipped) connections.push(clipped);
   };
+  const first = showInitialState && series.kind === "digital" && series.points[0]?.excluded !== true ? sequence[0] : null;
+  const initialState = first && first.previousValid !== false && first.timeMs >= startMs
+    && (first.previousValue === 0 || first.previousValue === 1) ? first.previousValue : null;
+  const initialCoordinate = initialState === null ? null : { x: first.x, y: yFor(initialState) };
+  const leading = initialCoordinate ? segment({ x: plot.left, y: initialCoordinate.y }, initialCoordinate) : null;
+  if (initialCoordinate) connect(initialCoordinate, coordinate(first));
   let previous = null;
   for (const point of sequence) {
     if (previous && point) {
@@ -187,7 +195,7 @@ export function buildTestChart(series, clock, {
       fullLabel: formatSourceTime(timeMs, true, milliseconds),
     })),
     yTicks: yValues.map((value) => ({ value, y: yFor(value), label: formatTestValue(value) })),
-    points, connections, extension,
+    points, connections, extension, initialState, leading,
     invalidPoints: invalid.filter(point => point.x === null || visible(point)),
     observedCount: valid.length,
     visibleObservedCount: points.length,

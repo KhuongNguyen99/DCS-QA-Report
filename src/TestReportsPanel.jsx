@@ -4,10 +4,11 @@ import { revisionNumber } from "./domain.js";
 import PhotoGallery from "./PhotoGallery.jsx";
 import { parsePronetaFiles } from "./proneta-parser.js";
 import { importNoteClarification } from "./proneta-notes.js";
-import { buildTestChart, deviceChartTimeRange, isTestTimeRange, formatSourceTime, formatTestValue } from "./test-chart.js";
+import { buildTestChart, deviceChartTimeRange, isTestTimeRange, formatSourceTime, formatTestValue, isDigitalOutputChannel } from "./test-chart.js";
 import { testCommentDraftScope, readTestCommentDrafts, writeTestCommentDraft, removeTestCommentDraft } from "./test-comment-drafts.js";
 import { testCommentBlocks } from "./test-comment-format.js";
-import { testTimeRangeScope, readDeviceTimeRange, saveDeviceTimeRange, resetDeviceTimeRange } from "./test-time-ranges.js";
+import { testTimeRangeScope, readDeviceTimeRange, saveDeviceTimeRange, resetDeviceTimeRange,
+  readTestSelection, rememberTestSelection } from "./test-time-ranges.js";
 import { createTestEventEdit, setTestEventEdit, applyTestEventEdits } from "./test-event-edits.js";
 import "./test-reports.css";
 
@@ -124,9 +125,9 @@ function TestEventTable({ entries, seriesName = "recorded signal", onExclusionCh
   </table></div>;
 }
 
-export function TestSeriesChart({ series, clock, timeRange = null, onExclusionChange, editsDisabled = false }) {
+export function TestSeriesChart({ series, clock, timeRange = null, onExclusionChange, editsDisabled = false, showInitialState = false }) {
   let chart;
-  try { chart = buildTestChart(series, clock, { timeRange }); }
+  try { chart = buildTestChart(series, clock, { timeRange, showInitialState }); }
   catch (e) { return <p className="field-error">{e.message}</p>; }
   const { plot } = chart;
   const entries = series.points.map((point, index) => ({ point, index }));
@@ -138,7 +139,7 @@ export function TestSeriesChart({ series, clock, timeRange = null, onExclusionCh
       <figcaption><strong>{series.name}</strong><span>{chart.unit}</span></figcaption>
       <div className="test-chart-scroll">
         <svg viewBox={`0 0 ${chart.width} ${chart.height}`} role="img"
-          aria-label={`${series.name}: ${chart.observedCount} recorded values, ${describeTime(graphClock)}`}
+          aria-label={`${series.name}: ${chart.observedCount} recorded values, ${describeTime(graphClock)}${chart.initialState === null ? "" : `, initial state ${chart.initialState}`}`}
           data-time-start={chart.domain.startMs} data-time-end={chart.domain.endMs}>
           {chart.yTicks.map((tick, index) => <g key={`y-${index}`}>
             <line x1={plot.left} y1={tick.y} x2={plot.left + plot.width} y2={tick.y} className="test-gridline" />
@@ -151,6 +152,10 @@ export function TestSeriesChart({ series, clock, timeRange = null, onExclusionCh
           </g>)}
           {chart.connections.map((segment, index) => <line key={`trace-${index}`}
             x1={segment.from.x} y1={segment.from.y} x2={segment.to.x} y2={segment.to.y} className="test-trace" />)}
+          {chart.leading && <line x1={chart.leading.from.x} y1={chart.leading.from.y}
+            x2={chart.leading.to.x} y2={chart.leading.to.y} className="test-held-value test-initial-state">
+            <title>Initial state {chart.initialState} before the first recorded change</title>
+          </line>}
           {chart.extension && <line x1={chart.extension.from.x} y1={chart.extension.from.y}
             x2={chart.extension.to.x} y2={chart.extension.to.y} className="test-held-value">
             <title>Last recorded value held to the end of the graph</title>
@@ -193,9 +198,9 @@ function Parameters({ parameters = [], title = "Set parameters" }) {
 }
 
 export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDisabled = false, editingComments = true,
-  timeRangeScope = null, rangeOverrides = {}, onTimeRangeChange, onEventExclusionChange }) {
+  timeRangeScope = null, selectionScope = null, rangeOverrides = {}, onTimeRangeChange, onEventExclusionChange }) {
   const [search, setSearch] = useState("");
-  const [selected, setSelected] = useState(null);
+  const [selected, setSelected] = useState(() => readTestSelection(selectionScope, runId));
   const [localRanges, setLocalRanges] = useState({});
   const devices = run.devices || [];
   const shown = useMemo(() => devices.filter(device => `${device.name} ${device.status}`.toLowerCase().includes(search.toLowerCase())), [devices, search]);
@@ -237,7 +242,10 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
       <aside className="test-device-picker" aria-label="Tested devices">
         <label className="test-search">Find a device<input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Device name or result…" /></label>
         <div className="test-device-list">{shown.map(item => <button type="button" key={item.id}
-          className={device?.id === item.id ? "selected" : ""} aria-pressed={device?.id === item.id} onClick={() => setSelected(item.id)}>
+          className={device?.id === item.id ? "selected" : ""} aria-pressed={device?.id === item.id} onClick={() => {
+            setSelected(item.id);
+            rememberTestSelection(selectionScope, item.id, runId);
+          }}>
           <strong>{item.name}</strong><TestStatus status={item.status} />
         </button>)}</div>
         {!shown.length && <p className="test-muted">No matching device.</p>}
@@ -259,7 +267,8 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
               {!channel.series?.some(series => series.points?.length) && <p className="test-muted">No signal changes were recorded for this channel in the supplied logs.</p>}
               {(channel.series || []).map((series, seriesIndex) => series.points?.length ?
                 <TestSeriesChart key={series.id || seriesIndex} series={series} clock={run.clock} timeRange={chosenRange.range}
-                  editsDisabled={commentsDisabled} onExclusionChange={onEventExclusionChange && ((pointIndex, excluded) =>
+                  editsDisabled={commentsDisabled} showInitialState={isDigitalOutputChannel(channel)}
+                  onExclusionChange={onEventExclusionChange && ((pointIndex, excluded) =>
                     onEventExclusionChange(device.id, channel.id, seriesIndex, pointIndex, excluded))} /> : null)}
               <Parameters parameters={channel.parameters} />
               {module?.parameters?.length > 0 && <Parameters parameters={module.parameters} title="Shared module parameters" />}
@@ -317,7 +326,7 @@ function ScopedTestReportsPanel({
   const [recovery] = useState(() => readTestCommentDrafts(cacheScope));
   const [draft, setDraft] = useState(() => recover(recovery.drafts));
   const draftRef = useRef(draft);
-  const [selectedId, setSelectedId] = useState(draft?.id || null);
+  const [selectedId, setSelectedId] = useState(() => draft?.id || readTestSelection(cacheScope));
   const [cacheError, setCacheError] = useState(recovery.error);
   const [files, setFiles] = useState([]);
   const [assignments, setAssignments] = useState({});
@@ -459,7 +468,10 @@ function ScopedTestReportsPanel({
       if (access.current.readOnly || access.current.revision !== draft.revision || access.current.walkdownId !== draft.walkdownId)
         throw new Error("This draft belongs to an earlier revision. Discard it and reopen the current report.");
       const saved = await onSave(payload, draft.revision);
-      setSelectedId(saved?.id || draft.id); finishDraft();
+      const savedId = saved?.id || draft.id;
+      setSelectedId(savedId);
+      if (runs.some(run => run.id !== savedId)) rememberTestSelection(cacheScope, savedId);
+      finishDraft();
     } catch (e) { setError(e.message); }
     finally { busyRef.current = false; setBusy(""); }
   }
@@ -527,7 +539,9 @@ function ScopedTestReportsPanel({
         onChange={canComment ? value => changeComment(id, value) : undefined} />)}
     </section>}
     {!draft && runs.length > 0 && <div className="test-run-toolbar">
-      <label>Saved test run<select disabled={blocked || setupDirty} value={selectedRun?.id || ""} onChange={event => { setSelectedId(event.target.value); setConfirmDelete(null); }}>{runs.map(run => <option key={run.id} value={run.id}>{run.name}</option>)}</select></label>
+      <label>Saved test run<select disabled={blocked || setupDirty} value={selectedRun?.id || ""} onChange={event => {
+        setSelectedId(event.target.value); rememberTestSelection(cacheScope, event.target.value); setConfirmDelete(null);
+      }}>{runs.map(run => <option key={run.id} value={run.id}>{run.name}</option>)}</select></label>
       <div className="test-run-actions">
         {selectedRun && canEdit(selectedRun) && <>
           <button type="button" className="small-button" disabled={blocked || setupDirty} onClick={() => begin(selectedRun)}>Edit run</button>
@@ -546,7 +560,7 @@ function ScopedTestReportsPanel({
     {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${revisionNumber(project)}`}</span></header>
       <TestRunDetail key={preview.id || draft?.id} run={preview} onCommentChange={canComment ? changeComment : undefined}
         onEventExclusionChange={canComment ? changeEventExclusion : undefined}
-        commentsDisabled={blocked || setupDirty} editingComments={Boolean(draft)} runId={previewRunId} timeRangeScope={rangeScope}
+        commentsDisabled={blocked || setupDirty} editingComments={Boolean(draft)} runId={previewRunId} timeRangeScope={rangeScope} selectionScope={cacheScope}
         rangeOverrides={timeRangeChanges[rangeScope]?.[previewRunId]} onTimeRangeChange={onTimeRangeChange} /></section>}
     {!preview && !draft && <div className="card test-empty"><Icon name="report" size={36} /><h3>No test runs in this revision</h3><p>{readOnly ? "Start a new revision to import a test run." : "Import the files for your test, review the devices and parameters, then save the run."}</p></div>}
   </section>;

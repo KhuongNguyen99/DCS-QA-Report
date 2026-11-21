@@ -56,3 +56,35 @@ export function readTestTimeRanges(scope, runs, overrides = {}) {
   }
   return Object.fromEntries(ranges);
 }
+
+export function inheritTestTimeRanges(url, { inspector, project, revisions, testRuns }) {
+  if (project?.status !== "draft" || !testRuns?.length
+    || !revisions?.some(item => item.revision === project.revision - 1)) return;
+  const scope = testTimeRangeScope(url, inspector?.id, project.walkdownId, project.revision);
+  if (!scope) return;
+  const previous = testTimeRangeScope(url, inspector.id, project.walkdownId, project.revision - 1);
+  try {
+    const storage = globalThis.localStorage;
+    const inherited = `${scope}inherited`;
+    if (storage.getItem(inherited) !== null) return;
+    for (const [runId, devices] of Object.entries(readTestTimeRanges(previous, testRuns))) {
+      for (const [deviceId, range] of Object.entries(devices)) {
+        const key = rangeKey(scope, runId, deviceId);
+        if (storage.getItem(key) === null) storage.setItem(key, JSON.stringify(range));
+      }
+    }
+    storage.setItem(inherited, "1");
+  } catch { /* Browser storage may be unavailable. */ }
+}
+
+const selectionKey = (scope, runId) => `jeevy-qa-test-selection:v1:${scope}${encodeURIComponent(runId)}`;
+
+export function readTestSelection(scope, runId = "") {
+  try { return scope ? globalThis.localStorage.getItem(selectionKey(scope, runId)) : null; }
+  catch { return null; }
+}
+
+export function rememberTestSelection(scope, id, runId = "") {
+  try { if (scope) globalThis.localStorage.setItem(selectionKey(scope, runId), id); }
+  catch { /* The selection remains available in this tab. */ }
+}

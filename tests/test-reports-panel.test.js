@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { testCommentDraftScope, testCommentDraftKey } from "../src/test-comment-drafts.js";
-import { testTimeRangeScope, readTestTimeRanges } from "../src/test-time-ranges.js";
+import { testTimeRangeScope, readTestTimeRanges, inheritTestTimeRanges, resetDeviceTimeRange } from "../src/test-time-ranges.js";
 
 let directory;
 let bundle;
@@ -862,7 +862,7 @@ test("one manual device range aligns every graph without changing comments or cr
   assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
   await reopened.click(reopened.button('Reset to auto'));
   assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs));
-  assert.deepEqual(reopened.stored(), {});
+  assert.deepEqual(Object.values(reopened.stored()), [run.devices[0].id], 'reset clears the range and keeps the selected device');
   assert.equal(reopened.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea').value, before.devices[0].comment);
 });
 
@@ -903,6 +903,52 @@ test("manual time ranges and pending comment drafts recover independently", asyn
   assert.deepEqual(reopened.stored(), comments, 'resetting the view cannot discard pending report comments');
   assert.equal(reopened.window.dirty.at(-1), true);
   assert.equal(reopened.window.calls.length, 0);
+});
+
+test("reopening a report restores its last run and device with the applied slider values", async t => {
+  const first = savedRun(), second = savedRun({ id: "run-2", name: "Second run" });
+  const device = { ...second.devices[0], id: "other", name: "Second device" };
+  second.devices.push(device);
+  const h = await setup(t, { runs: [first, second] });
+  const select = h.query('.test-run-toolbar select');
+  await h.window.act(async () => { select.value = second.id; select.dispatchEvent(new h.window.Event("change", { bubbles: true })); });
+  await h.click(h.button("Second devicePassed"));
+  await applyRange(h, 10_000, 60_000);
+  const reopened = await setup(t, { runs: [first, second] }, { stored: h.stored() });
+  assert.equal(reopened.query('.test-run-toolbar select').value, second.id);
+  assert.equal(reopened.button("Second devicePassed").getAttribute("aria-pressed"), "true");
+  assert.equal(reopened.query('input[name="rangeStart"]').valueAsNumber, startMs + 10_000);
+  assert.equal(reopened.query('input[name="rangeEnd"]').valueAsNumber, startMs + 60_000);
+});
+
+test("a new draft inherits valid slider ranges once from the previous closed revision", async t => {
+  const run = savedRun();
+  const h = await setup(t, { runs: [run] });
+  await applyRange(h, 10_000, 60_000);
+  const stored = new Map(Object.entries(h.stored()));
+  const originalStorage = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: key => stored.get(key) ?? null,
+    setItem: (key, value) => stored.set(key, value),
+    removeItem: key => stored.delete(key),
+  };
+  const url = 'https://example.supabase.co';
+  const next = { ...project, revision: project.revision + 1 };
+  const scope = testTimeRangeScope(url, 'inspector-1', next.walkdownId, next.revision);
+  const previousScope = testTimeRangeScope(url, 'inspector-1', project.walkdownId, project.revision);
+  const report = { inspector: { id: 'inspector-1' }, project: next, revisions: [{ revision: project.revision }], testRuns: [run] };
+  try {
+    inheritTestTimeRanges(url, report);
+    assert.deepEqual(readTestTimeRanges(scope, [run]), readTestTimeRanges(previousScope, [run]));
+    const reopened = await setup(t, { runs: [run], project: next }, { stored: Object.fromEntries(stored) });
+    assert.equal(reopened.query('input[name="rangeEnd"]').valueAsNumber, startMs + 60_000);
+    resetDeviceTimeRange(scope, run.id, 'valve');
+    inheritTestTimeRanges(url, report);
+    assert.deepEqual(readTestTimeRanges(scope, [run]), {});
+    assert.equal(readTestTimeRanges(previousScope, [run])[run.id].valve.endMs, startMs + 60_000);
+  } finally {
+    if (originalStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = originalStorage;
+  }
 });
 
 test("time ranges remain local and available on approved reports with identity and revision isolation", async t => {
