@@ -59,7 +59,7 @@ function runFixture(id = "run-1") {
     ],
     stations: [{ id: "station-1", name: "Station Example", serialNumber: "SYNTHETIC", macAddress: "00:00:00:00:00:00",
       modules: [{ slot: 3, name: "Analog example", orderNumber: "EXAMPLE-001", serialNumber: "MOD-SYNTHETIC",
-        parameters: [{ name: "Module diagnostic setting", value: "Enabled", rawValue: "1", group: "Module", recordIndex: 128 }] }] }],
+        parameters: [{ name: "Diagnostics: No supply voltage L+", value: "Enabled", rawValue: "1", group: "Module", recordIndex: 128 }] }] }],
     devices: [{ id: "device-1", name: "RTD-EXAMPLE", status: "Failed", channels: [{
       id: "channel-1", stationId: "station-1", slot: 3, channel: 0, sourceChannel: "Channel 1", symbolicName: "RTD-EXAMPLE", role: "Analog input",
       status: "Failed", rawStatus: "Error", comment: "Investigate the wiring before retest.",
@@ -234,7 +234,7 @@ test("approved test PDF preserves evidence and run context while fitting each gr
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
       "Siemens PRONETA Basic", "Version entered by tester", "RTD-EXAMPLE", "VALVE-EXAMPLE", "Test Result: Failed (source: Error)",
       "Test Result: Passed", "Celsius", "7FFFH", "synthetic-log.csv, row 3",
-      "Module diagnostic setting"])
+      "Supply voltage"])
       assert.ok(result.text.includes(text), `Missing report text: ${text}`);
     assert.doesNotMatch(result.text, /Sources and import\s+notes|SHA-256|Synthetic warning retained for review|Unrecognized synthetic event/);
     assert.doesNotMatch(result.text, /N\/A|Not applicable|Unused-channel setting|Unassigned channels|Skipped device comment|Skipped channel setting|Recorded wiring result/i);
@@ -379,23 +379,20 @@ test("export captures the approved payload before asynchronous font loading", as
   } finally { globalThis.fetch = original; }
 });
 
-test("long selected parameters paginate completely above the footer", async () => {
+test("long summarized settings paginate completely above the footer", async () => {
   await withFonts(async () => {
     const state = closedState();
-    const parameters = Array.from({ length: 65 }, (_, index) => ({ name: `Parameter-${index + 1}`, value: `Selected-${index + 1}`, group: "Synthetic group" }));
     const longValue = Array.from({ length: 160 }, (_, index) => `Long-value-piece-${index + 1}`).join(" ");
-    parameters.push({ name: "Oversized selected value", value: longValue });
-    state.testRuns[0].devices[0].channels[0].parameters = parameters;
+    state.testRuns[0].devices[0].channels[0].parameters = [
+      { name: "Type/range of measurement", value: longValue },
+      { name: "Smoothing", value: "Inactive detail to omit" },
+    ];
     const result = await pdfContent(await createTestReportPdf({ state }));
-    for (let index = 1; index <= 65; index++) {
-      assert.ok(result.text.includes(`Parameter-${index}`));
-      assert.ok(result.text.includes(`Selected-${index}`));
-    }
     for (let index = 1; index <= 160; index++) assert.ok(result.text.includes(`Long-value-piece-${index}`));
+    assert.doesNotMatch(result.text, /Inactive detail to omit/);
     const continued = result.pages.filter(page => page.includes("Configured settings (continued)"));
     assert.ok(continued.length > 0);
-    assert.ok(continued.filter(page => /Long-value-piece-|Parameter-\d/.test(page))
-      .every(page => page.includes("Station Example | Slot 3 | Analog example | Channel settings")));
+    assert.ok(continued.filter(page => /Long-value-piece-/.test(page)).every(page => page.includes("Shared diagnostics")));
     for (const page of result.blocks) for (const block of page) {
       if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
@@ -403,52 +400,51 @@ test("long selected parameters paginate completely above the footer", async () =
   });
 });
 
-test("configured settings matrix displays verified selections and preserves unfamiliar codes", async () => {
+test("configured settings group modules and identify different diagnostics and ranges by location", async () => {
   await withFonts(async () => {
     const state = closedState();
     const run = state.testRuns[0];
     const module = run.stations[0].modules[0];
-    module.orderNumber = "6ES7 134-6FF00-0AA1";
+    module.orderNumber = "6ES7 134-6GF00-0AA1";
+    module.name = "AI 8xI";
     module.parameters = [
       { name: "Diagnostics: Undervoltage", value: "1", rawValue: "1", enumId: "Diag:Undervoltage" },
       { name: "Potential group", value: "1", rawValue: "1", enumId: "BaseUnit" },
     ];
-    run.stations[0].modules.push({ slot: 4, name: "Empty module", parameters: [] });
+    const output = (slot, voltage) => ({ slot, name: "DQ 8x24VDC/0.5A HF", orderNumber: "6ES7 132-6BF01-0CA0",
+      parameters: [{ name: "Diagnostics: Wire break", value: "1" }, { name: "Diagnostics: No supply voltage L+", value: voltage }] });
+    run.stations[0].modules.push(output(1, "1"), output(2, "0"), { slot: 4, name: "Empty module", parameters: [] });
     const device = run.devices[0];
     const channel = device.channels[0];
+    channel.role = "Positioner";
+    channel.symbolicName = "V-3501-Y-POS";
+    const range = value => ({ name: "Type/range of measurement", value, enumId: "Measurement type/-area" });
     channel.parameters = [
-      { name: "Diagnostics: No supply voltage L+", value: "1", rawValue: "1", enumId: "Diag:Load voltage" },
-      { name: "Diagnostics: Wire break", value: "0", rawValue: "0", enumId: "Diag:Wire break" },
-      { name: "Check for wire break", value: "1", rawValue: "1", enumId: "Test: wire break" },
-      { name: "Type/range of measurement", value: "265", rawValue: "265", enumId: "Measurement type/-area" },
+      range("770"),
       { name: "Smoothing", value: "0", rawValue: "0", enumId: "Smoothing" },
       { name: "Reaction to CPU STOP", value: "0", rawValue: "0", enumId: "Substitute value behaviour digital" },
     ];
     device.channels.push({ ...structuredClone(channel), id: "second-channel", channel: 1,
-      sourceChannel: "Channel 2", symbolicName: "SECOND-EXAMPLE", parameters: [{ name: "Some flag", value: true }], series: [] });
+      sourceChannel: "Channel 2", symbolicName: "V-3502-POS", parameters: [range("771")], series: [] },
+    { ...structuredClone(channel), id: "third-channel", channel: 2,
+      sourceChannel: "Channel 3", symbolicName: "V-3503-POS", parameters: [range("771")], series: [] });
+    const valve = run.devices[1].channels[0];
+    Object.assign(valve, { role: "Command", symbolicName: "V-3501" });
+    run.devices[1].channels.push({ ...structuredClone(valve), id: "other-output", slot: 2, symbolicName: "V-3502", series: [] });
     run.unassignedChannels = [{ ...structuredClone(channel), id: "legacy-channel", slot: 5,
-      parameters: [{ name: "Type/range of measurement", value: "265", rawValue: "265", enumId: "Measurement type/-area" }],
+      parameters: [range("265")],
       series: [] }];
     const result = await pdfContent(await createTestReportPdf({ state }));
     const summaryPage = result.pages.findIndex(page => page.includes("Device name\nSlot\nChannels\nTest Result"));
     const settings = result.pages.slice(1, summaryPage).join("\n");
-    const settingsWords = settings.replace(/\s+/g, " ");
-    assert.match(settingsWords, /Station Example \| Slot 3 \| Analog example/);
-    for (const label of ["Channel settings", "Channel 1", "Channel 2", "RTD-EXAMPLE", "Diagnostics: No supply voltage L+",
-      "Diagnostics: Wire break", "Check for wire break", "Potential group", "Type/range of measurement", "Smoothing"])
-      assert.ok(settingsWords.includes(label), `Missing configured setting: ${label}`);
-    assert.match(settingsWords, /Potential group Start new power group/);
-    assert.match(settingsWords, /Voltage, \u00b110 V/);
-    assert.match(settings, /^None$/m);
+    assert.match(settings, /Valve commands\nStation Example slots 1, 2\n2 of 16\n24 V DC digital output\nWire break/);
+    assert.match(settings, /Positioner feedback\nStation Example slot 3\n3 of 8\n2-wire current, 4-20 mA\n2 of 3 channels\nUndervoltage/);
+    assert.match(settings, /Settings that differ/);
+    assert.match(settings, /Station Example slot 2\nSupply voltage monitoring\nOff \(on for the other channels in this group\)/);
+    assert.match(settings, /Station Example slot 3 \| Channel 0 \| V-3501-Y-POS\nSignal range\n2-wire current, 0-20 mA/);
     assert.match(settings, /^265$/m, "the code stays visible without the module order number");
-    assert.doesNotMatch(settingsWords, /Reaction to CPU STOP|\(encoded selection\)/i);
-    assert.equal((settings.match(/\nOff\n/g) || []).length, 1, "disabled switch differs from a missing setting");
-    const green = result.streams.slice(1, summaryPage).flatMap(pdfLines).filter(line => line.color.length === 3
-      && line.color.every((value, index) => Math.abs(value - [31, 105, 57][index] / 255) < 0.005));
-    assert.equal(green.length, 8, "four enabled switches are drawn as vector checkmarks");
-    assert.doesNotMatch(result.text, /Empty module|Stations and module parameters|Set parameters/);
-    assert.equal(result.text.replace(/\s+/g, " ").match(/Type\/range of measurement/g)?.length, 2,
-      "settings appear once at the run start");
+    assert.doesNotMatch(settings, /Reaction to CPU STOP|encoded selection|Potential group|Smoothing|Channel settings|Empty module/i);
+    assert.equal(settings.match(/Valve commands/g)?.length, 1, "matching outputs share a summary row");
   });
 });
 

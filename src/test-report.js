@@ -1,10 +1,10 @@
 import { jsPDF } from "jspdf";
 import { revisionNumber } from "./domain.js";
 import { normalizePronetaStatus } from "./proneta-parser.js";
-import { pronetaSelectionLabel } from "./proneta-selection-labels.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
 import { buildTestChart, formatSourceTime, isTestTimeRange, isDigitalOutputChannel } from "./test-chart.js";
 import { testCommentBlocks } from "./test-comment-format.js";
+import { summarizeTestSettings } from "./test-settings-summary.js";
 
 const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 548 };
 const WIDTH = PAGE.width - PAGE.margin * 2;
@@ -16,7 +16,6 @@ const RESULT_LABELS = new Set(["Passed", "Failed", "Not tested", "Not applicable
 const MAX_SETUP_PHOTO_BYTES = 12 * 1024 * 1024;
 const SETUP_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_COMMENT_LENGTH = 4000;
-const CHECKED = Symbol("configured switch enabled");
 
 function validateReportComment(value, label) {
   if (value !== undefined && (typeof value !== "string" || Array.from(value).length > MAX_COMMENT_LENGTH || value.includes("\0")))
@@ -171,26 +170,6 @@ function clockLabel(clock) {
     : clock?.timeZone || "Source clock (unspecified)";
 }
 
-function selectedValue(parameter, selection) {
-  let value = String(selection ?? "");
-  if (parameter.unit && !value.includes(parameter.unit)) value += ` ${parameter.unit}`;
-  return value || "Not specified";
-}
-
-function configuredValue(parameter, orderNumber) {
-  if (!parameter) return "";
-  const recorded = parameter.value ?? parameter.rawValue;
-  const value = pronetaSelectionLabel(orderNumber, parameter.enumId, recorded) ?? recorded;
-  if (typeof value === "boolean") return value ? CHECKED : "Off";
-  const normalized = String(value ?? "").trim().toLowerCase();
-  if (["true", "enabled", "on", "yes"].includes(normalized)) return CHECKED;
-  if (["false", "disabled", "off", "no"].includes(normalized)) return "Off";
-  const switchName = /^(?:(?:group )?diagnostics?:|check for\b|activated$|hardware interrupt\b|failure monitoring$|scalable measuring range$)/i.test(parameter.name || "");
-  const bit = !parameter.dataType || /^(?:bit|bool|boolean)$/i.test(parameter.dataType);
-  if (bit && switchName && (normalized === "1" || normalized === "0")) return normalized === "1" ? CHECKED : "Off";
-  return selectedValue(parameter, value);
-}
-
 async function reportFont(file) {
   const baseUrl = import.meta.env?.BASE_URL || "/";
   let response;
@@ -276,7 +255,6 @@ function reportWriter(doc, y) {
     const widths = columns.map((column) => column.width);
     const textX = (x, index) => x + (columns[index].align === "center" ? widths[index] / 2 : padding);
     const cellLines = (value, column) => {
-      if (value === CHECKED) return [""];
       textStyle(doc, size);
       return printableText(value).split("\n")
         .flatMap((line) => doc.splitTextToSize(line || " ", widths[column] - padding * 2));
@@ -325,14 +303,6 @@ function reportWriter(doc, y) {
         const count = Math.min(totalLines - offset, available);
         let x = PAGE.margin;
         cells.forEach((lines, index) => {
-          if (row[index] === CHECKED && offset === 0) {
-            const center = x + widths[index] / 2;
-            const baseline = y + padding + size;
-            doc.setDrawColor(...COLOR.green);
-            doc.setLineWidth(1.5);
-            doc.line(center - 4, baseline - 3, center - 1, baseline);
-            doc.line(center - 1, baseline, center + 5, baseline - 6);
-          }
           textStyle(doc, size, false, resultColor(row[index]));
           lines.slice(offset, offset + count).forEach((line, lineIndex) =>
             doc.text(line, textX(x, index), y + padding + size + lineIndex * lineHeight, { align: columns[index].align || "left" }));
@@ -475,61 +445,18 @@ async function runSetup(writer, doc, run, backend, onProgress) {
 }
 
 function configuredSettings(writer, run, showRunName) {
-  const modules = new Map();
-  const moduleFor = (stationId, slot) => {
-    const key = `${stationId ?? ""}\0${slot ?? ""}`;
-    if (!modules.has(key)) modules.set(key, { stationId, slot, module: null, channels: [] });
-    return modules.get(key);
-  };
-  for (const station of run.stations || [])
-    for (const module of station.modules || []) moduleFor(station.id, module.slot).module = module;
-  const addChannel = (channel, deviceName) => {
-    const parameters = channel.parameters?.filter(parameter =>
-      !/^\s*reaction to cpu stop\s*$/i.test(parameter.name));
-    if (parameters?.length) moduleFor(channel.stationId, channel.slot).channels.push({ channel, deviceName, parameters });
-  };
-  for (const device of run.devices)
-    for (const channel of device.channels) addChannel(channel, device.name);
-  for (const channel of run.unassignedChannels || []) addChannel(channel, channel.symbolicName || "Unassigned");
-  const configured = [...modules.values()].filter(({ module, channels }) => module?.parameters?.length || channels.length);
-  if (!configured.length) return;
+  const { rows, differences } = summarizeTestSettings(run);
+  if (!rows.length) return;
   writer.page("Configured settings");
   if (showRunName) writer.paragraph(run.name || "Test run", { bold: true });
-  for (const { stationId, slot, module, channels } of configured) {
-    const location = [stationName(run, stationId), `Slot ${slot ?? "unspecified"}`, module?.name].filter(Boolean).join(" | ");
-    if (module?.parameters?.length) {
-      writer.table([
-        { label: "Parameter", width: 360 }, { label: "Selected value", width: WIDTH - 360, align: "center" },
-      ], module.parameters.map((parameter) => [parameter.name, configuredValue(parameter, module.orderNumber)]),
-      { compact: true, caption: `${location} | Module settings` });
-    }
-    if (!channels.length) continue;
-    const names = new Map();
-    const rows = channels.map(({ channel, deviceName, parameters }) => {
-      const settings = new Map();
-      const occurrences = new Map();
-      for (const parameter of parameters) {
-        const count = (occurrences.get(parameter.name) || 0) + 1;
-        occurrences.set(parameter.name, count);
-        const key = `${parameter.name}\0${count}`;
-        if (!names.has(key)) names.set(key, count === 1 ? parameter.name : `${parameter.name} (${count})`);
-        settings.set(key, parameter);
-      }
-      return { channel, deviceName, settings };
-    });
-    const keys = [...names.keys()];
-    const columnsPerGroup = Math.ceil(keys.length / Math.ceil(keys.length / 7));
-    for (let start = 0; start < keys.length; start += columnsPerGroup) {
-      const subset = keys.slice(start, start + columnsPerGroup);
-      const parameterWidth = (WIDTH - 170) / subset.length;
-      writer.table([
-        { label: "Channel", width: 65 }, { label: "Device", width: 105 },
-        ...subset.map((key) => ({ label: names.get(key), width: parameterWidth, align: "center" })),
-      ], rows.map(({ channel, deviceName, settings }) => [channelLabel(channel), deviceName,
-        ...subset.map((key) => configuredValue(settings.get(key), module?.orderNumber))]),
-      { compact: true, caption: `${location} | Channel settings` });
-    }
-  }
+  writer.table([
+    { label: "Function", width: 106 }, { label: "Location", width: 128 },
+    { label: "Channels in use", width: 72, align: "center" }, { label: "Signal", width: 173 },
+    { label: "Shared diagnostics", width: WIDTH - 479 },
+  ], rows);
+  writer.table([
+    { label: "Location", width: 254 }, { label: "Setting", width: 158 }, { label: "Selected value", width: WIDTH - 412 },
+  ], differences, { caption: "Settings that differ" });
 }
 
 function figureDescription(series, channel, deviceName) {
