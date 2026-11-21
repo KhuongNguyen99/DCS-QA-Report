@@ -6,6 +6,7 @@ import { parsePronetaFiles } from "./proneta-parser.js";
 import { importNoteClarification } from "./proneta-notes.js";
 import { buildTestChart, deviceChartTimeRange, isTestTimeRange, formatSourceTime, formatTestValue } from "./test-chart.js";
 import { testCommentDraftScope, readTestCommentDrafts, writeTestCommentDraft, removeTestCommentDraft } from "./test-comment-drafts.js";
+import { testCommentBlocks } from "./test-comment-format.js";
 import { testTimeRangeScope, readDeviceTimeRange, saveDeviceTimeRange, resetDeviceTimeRange } from "./test-time-ranges.js";
 import { createTestEventEdit, setTestEventEdit, applyTestEventEdits } from "./test-event-edits.js";
 import "./test-reports.css";
@@ -20,16 +21,23 @@ function TestStatus({ status }) {
   return <span className={`test-status ${statusClass(status)}`}>{status || "Not tested"}</span>;
 }
 
-function TestComment({ title, label = title, value, onChange, disabled }) {
+function TestComment({ title, label = title, value, onChange, disabled, editing = true }) {
   const text = typeof value === "string" ? value : "";
+  const blocks = testCommentBlocks(text);
+  const hasDiagnostics = blocks.some(block => block.kind === "diagnostics");
   return <section className="test-comment" aria-label={label}>
     <h4>{title}</h4>
-    {onChange ? <>
+    {onChange && (editing || !hasDiagnostics) ? <>
       <label><span className="sr-only">{label}</span><textarea rows={3} maxLength={8000}
         value={text} onChange={event => onChange(Array.from(event.target.value).slice(0, 4000).join(""))}
         disabled={disabled} placeholder="Add a comment…" /></label>
       <small>{Array.from(text).length}/4,000 · Save with Save test run.</small>
-    </> : <p className={text ? "" : "test-muted"}>{text || "No comment added."}</p>}
+    </> : hasDiagnostics ? blocks.map(({ kind, lines }, index) => kind === "diagnostics"
+      ? <ul className="test-comment-diagnostics" key={index}>
+        {lines.map((diagnostic, item) => <li key={item}>{diagnostic} <TestStatus status="Passed" /></li>)}
+      </ul>
+      : lines.join("\n").trim() && <p key={index}>{lines.join("\n").trim()}</p>)
+    : <p className={text ? "" : "test-muted"}>{text || "No comment added."}</p>}
   </section>;
 }
 
@@ -184,7 +192,7 @@ function Parameters({ parameters = [], title = "Set parameters" }) {
   </details>;
 }
 
-export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDisabled = false,
+export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDisabled = false, editingComments = true,
   timeRangeScope = null, rangeOverrides = {}, onTimeRangeChange, onEventExclusionChange }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
@@ -218,7 +226,7 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
       <div><span>Device results</span><strong>{counts.Passed || 0} passed · {counts.Failed || 0} failed · {counts["Not tested"] || 0} not tested</strong></div>
     </div>
     <p className="test-meaning">Passed/Failed comes from the recorded PRONETA wiring result. Graphs show logged signal changes in their original units.</p>
-    <TestComment title="Overall test run comment" value={run.comment} disabled={commentsDisabled}
+    <TestComment title="Overall test run comment" value={run.comment} disabled={commentsDisabled} editing={editingComments}
       onChange={onCommentChange && (value => onCommentChange(null, value))} />
     {run.warnings?.length > 0 && <details className="test-import-notes" open>
       <summary>Import notes ({run.warnings.length})</summary>
@@ -257,7 +265,7 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
               {module?.parameters?.length > 0 && <Parameters parameters={module.parameters} title="Shared module parameters" />}
             </section>;
           })}
-          <TestComment title="Device comment" label={`Device comment for ${device.name}`} value={device.comment}
+          <TestComment title="Device comment" label={`Device comment for ${device.name}`} value={device.comment} editing={editingComments}
             disabled={commentsDisabled} onChange={onCommentChange && (value => onCommentChange(device.id, value))} />
         </> : <p className="test-muted">No named device results to display.</p>}
       </section>
@@ -538,7 +546,7 @@ function ScopedTestReportsPanel({
     {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${revisionNumber(project)}`}</span></header>
       <TestRunDetail key={preview.id || draft?.id} run={preview} onCommentChange={canComment ? changeComment : undefined}
         onEventExclusionChange={canComment ? changeEventExclusion : undefined}
-        commentsDisabled={blocked || setupDirty} runId={previewRunId} timeRangeScope={rangeScope}
+        commentsDisabled={blocked || setupDirty} editingComments={Boolean(draft)} runId={previewRunId} timeRangeScope={rangeScope}
         rangeOverrides={timeRangeChanges[rangeScope]?.[previewRunId]} onTimeRangeChange={onTimeRangeChange} /></section>}
     {!preview && !draft && <div className="card test-empty"><Icon name="report" size={36} /><h3>No test runs in this revision</h3><p>{readOnly ? "Start a new revision to import a test run." : "Import the files for your test, review the devices and parameters, then save the run."}</p></div>}
   </section>;

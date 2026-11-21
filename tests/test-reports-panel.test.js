@@ -497,6 +497,20 @@ test("rereading original files retains saved exclusions and honors pending remov
   await reopened.settle();
 });
 
+test("saved diagnostic comments show Passed bullets and remain editable in the test run", async t => {
+  const run = savedRun();
+  const comment = "Wiring check passed.\n\n- Wire-break — Passed\n- Supply voltage — Passed";
+  run.devices[0].comment = comment;
+  const h = await setup(t, { runs: [run] });
+  const region = '[aria-label="Device comment for VALVE-EXAMPLE"]';
+  assert.equal(h.query(`${region} p`).textContent, "Wiring check passed.");
+  const items = [...h.document.querySelectorAll(`${region} li`)];
+  assert.deepEqual(items.map(item => item.textContent), ["Wire-break Passed", "Supply voltage Passed"]);
+  assert.ok(items.every(item => item.querySelector('.test-status.passed')?.textContent === "Passed"));
+  await h.click(h.button("Edit run"));
+  assert.equal(h.query(`${region} textarea`).value, comment);
+});
+
 test("run and device comments start a pending edit, retain failed saves, and preserve imported evidence", async t => {
   const run = savedRun({ comment: "Original overall note" });
   run.devices[0].comment = "Original device note";

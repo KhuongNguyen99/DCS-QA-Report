@@ -4,6 +4,7 @@ import { normalizePronetaStatus } from "./proneta-parser.js";
 import { pronetaSelectionLabel } from "./proneta-selection-labels.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
 import { buildTestChart, formatSourceTime, isTestTimeRange } from "./test-chart.js";
+import { testCommentBlocks } from "./test-comment-format.js";
 
 const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 548 };
 const WIDTH = PAGE.width - PAGE.margin * 2;
@@ -25,7 +26,14 @@ function validateReportComment(value, label) {
 function reportComment(writer, label, value) {
   if (!value?.trim()) return;
   writer.heading(label, 10, COLOR.blue);
-  writer.paragraph(value, { color: COLOR.blue });
+  const blocks = testCommentBlocks(value);
+  for (const { kind, lines } of blocks) {
+    if (kind === "diagnostics") writer.diagnostics(lines);
+    else {
+      const text = blocks.length === 1 ? value : lines.join("\n").trim();
+      if (text) writer.paragraph(text, { color: COLOR.blue });
+    }
+  }
 }
 
 function isTimeRangeMap(value) {
@@ -238,6 +246,28 @@ function reportWriter(doc, y) {
     ensure(size * 1.5 + 28);
     paragraph(value, { size, bold: true, color, gap: 7 });
   }
+  function diagnostics(labels) {
+    const size = 9, lineHeight = 13, left = PAGE.margin + 14, gap = 7;
+    textStyle(doc, size, true, COLOR.green);
+    const labelWidth = WIDTH - (left - PAGE.margin) - gap - doc.getTextWidth("Passed");
+    for (const label of labels) {
+      textStyle(doc, size, false, COLOR.blue);
+      const lines = paragraphLines(doc, label, labelWidth);
+      for (const [index, line] of lines.entries()) {
+        ensure(lineHeight);
+        textStyle(doc, size, false, COLOR.blue);
+        if (index === 0) doc.text("•", PAGE.margin + 4, y + size);
+        doc.text(line, left, y + size);
+        if (index === lines.length - 1) {
+          const statusLeft = left + doc.getTextWidth(line) + gap;
+          textStyle(doc, size, true, COLOR.green);
+          doc.text("Passed", statusLeft, y + size);
+        }
+        y += lineHeight;
+      }
+    }
+    y += gap;
+  }
   function table(columns, rows, { compact = false, caption = "" } = {}) {
     if (!rows.length) return;
     const size = 8.2;
@@ -423,7 +453,7 @@ function reportWriter(doc, y) {
     y += boxHeight + 12;
     if (caption) paragraph(caption, { size: 9 });
   }
-  return { page, paragraph, heading, table, chartGrid, setupPhoto };
+  return { page, paragraph, heading, table, chartGrid, setupPhoto, diagnostics };
 }
 
 async function runSetup(writer, doc, run, backend, onProgress) {

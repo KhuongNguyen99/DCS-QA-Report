@@ -129,7 +129,11 @@
 .test-comment { margin: 16px 0; padding: 14px; border: 1px solid #c5dbea; border-radius: 8px; background: #f1f7fc; }
 .test-comment h4,
 .test-reports .test-comment textarea,
-.test-comment p:not(.test-muted) { color: #186ca1; }
+.test-comment p:not(.test-muted),
+.test-comment-diagnostics { color: #186ca1; }
+.test-comment-diagnostics { padding-left: 20px; margin: 8px 0; overflow-wrap: anywhere; }
+.test-comment-diagnostics li + li { margin-top: 4px; }
+.test-comment-diagnostics .test-status { margin-left: 3px; }
 .test-comment h4 { margin: 0 0 10px; font-size: 13px; }
 .test-comment textarea { display: block; width: 100%; resize: vertical; }
 .test-comment small { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; }

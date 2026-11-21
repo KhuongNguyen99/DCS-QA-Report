@@ -810,7 +810,7 @@ test("run and device comments preserve multiline Unicode separately from importe
     const state = closedState();
     const run = state.testRuns[0];
     run.comment = "Kiểm tra tổng thể hoàn tất.\nΔοκιμή συνολική";
-    run.devices[0].comment = "Nhiệt độ ổn định tại 25°C.\nПроверено устройство";
+    run.devices[0].comment = "Nhiệt độ ổn định tại 25°C.\nПроверено устройство\n\n- Wire-break — Passed\n- Supply voltage — Passed";
     run.devices[1].comment = "  \n \t";
     const saved = structuredClone(state);
     const result = await pdfContent(await createTestReportPdf({ state }));
@@ -830,6 +830,15 @@ test("run and device comments preserve multiline Unicode separately from importe
       const color = blocks.find(block => block.text === text)?.color;
       assert.ok(color?.every((value, index) => Math.abs(value - [24, 108, 161][index] / 255) < 0.005),
         `Expected blue text for ${text}`);
+    }
+    const deviceBlocks = result.blocks[result.pages.indexOf(devicePage)];
+    for (const text of ["Wire-break", "Supply voltage"]) {
+      const row = deviceBlocks.find(block => block.text === text);
+      assert.ok(row, `Missing diagnostic ${text}`);
+      assert.ok(deviceBlocks.some(block => block.text === "•" && block.y === row.y && block.x < row.x));
+      const passed = deviceBlocks.find(block => block.text === "Passed" && block.y === row.y && block.x > row.x);
+      assert.ok(passed?.color?.every((value, index) => Math.abs(value - [31, 105, 57][index] / 255) < 0.005),
+        `Expected green Passed status for ${text}`);
     }
     assert.deepEqual(state, saved);
   });
