@@ -484,7 +484,7 @@ test("SVG graphs connect observations and draw a separate horizontal final-value
   assert.equal(series.points.length, 2);
 });
 
-test("SVG feedback graphs start at 0.0 V and retain measured voltage steps without resetting later manual views", async t => {
+test("SVG feedback graphs keep automatic 0.0 V steps when a -FB source is renamed and support explicit styles without resetting later manual views", async t => {
   const run = savedRun();
   const [linear, feedback] = run.devices[0].channels.map(channel => channel.series[0]);
   const sample = linear.points[0];
@@ -492,7 +492,7 @@ test("SVG feedback graphs start at 0.0 V and retain measured voltage steps witho
     { ...sample, timeMs: startMs + 1000, value: 4, rawValue: "4 mA" },
     { ...sample, timeMs: startMs + 30_000, value: 20, rawValue: "20 mA" },
   ] });
-  Object.assign(feedback, { name: "V-3501_fb", kind: "analog", unit: "V", points: [
+  Object.assign(feedback, { name: "V-3511-Y-FB", kind: "analog", unit: "V", points: [
     { ...sample, timeMs: startMs + 10_000, value: 0.3, rawValue: "0.3 V" },
     { ...sample, timeMs: startMs + 20_000, value: 0.1, rawValue: "0.1 V", previousValue: 0.3, previousRawValue: "0.3 V" },
   ] });
@@ -501,7 +501,7 @@ test("SVG feedback graphs start at 0.0 V and retain measured voltage steps witho
   const h = await setup(t, { runs: [run] });
   expectSharedAxis(h, startMs, startMs + 31_160);
   const figures = Array.from(h.document.querySelectorAll(".test-chart"));
-  const figure = figures.find(item => item.querySelector("figcaption strong").textContent === "V-3501_fb");
+  const figure = figures.find(item => item.querySelector("figcaption strong").textContent === "V-3511-Y-FB");
   const dots = figure.querySelectorAll(".test-observation");
   const traces = figure.querySelectorAll(".test-trace");
   assert.equal(figure.querySelector("figcaption span").textContent, "V");
@@ -546,6 +546,28 @@ test("SVG feedback graphs start at 0.0 V and retain measured voltage steps witho
   assert.equal(other.querySelectorAll(".test-trace").length, 1);
   assert.notEqual(diagonal.getAttribute("x1"), diagonal.getAttribute("x2"));
   assert.notEqual(diagonal.getAttribute("y1"), diagonal.getAttribute("y2"));
+  const coordinates = line => ["x1", "y1", "x2", "y2"].map(attribute => line.getAttribute(attribute));
+  const automaticTrace = Array.from(traces, coordinates);
+  const automaticBaseline = coordinates(initial);
+  await h.click(figure.querySelector(".test-graph-tools-editor summary"));
+  await h.fill(figure.querySelector(".test-display-name-editor input"), "V-3511-Y_FB");
+  await h.click(figure.querySelector('form[aria-label="graph display name"] button[type="submit"]'));
+  assert.equal(figure.querySelector("figcaption strong").textContent, "V-3511-Y_FB");
+  assert.match(figure.querySelector("figcaption").textContent, /Source: V-3511-Y-FB/);
+  const style = () => figure.querySelector(".test-graph-style select");
+  assert.equal(style().value, "auto");
+  assert.deepEqual(Array.from(figure.querySelectorAll(".test-trace"), coordinates), automaticTrace,
+    "a display alias preserves the original -FB signal's automatic step geometry");
+  assert.deepEqual(coordinates(figure.querySelector(".test-initial-state")), automaticBaseline);
+  assert.match(figure.querySelector("svg").getAttribute("aria-label"), /Initial value 0\.0 V/);
+  await h.select(style(), "line");
+  assert.ok(Array.from(figure.querySelectorAll("line.test-trace")).some(line =>
+    line.getAttribute("x1") !== line.getAttribute("x2") && line.getAttribute("y1") !== line.getAttribute("y2")),
+  "an explicit line style overrides automatic steps for the feedback readings");
+  assert.deepEqual(coordinates(figure.querySelector(".test-initial-state")), automaticBaseline,
+    "the feedback zero baseline remains independent of the selected connection style");
+  await h.select(style(), "auto");
+  assert.deepEqual(Array.from(figure.querySelectorAll(".test-trace"), coordinates), automaticTrace);
   const firstVoltageY = dots[0].getAttribute("cy");
   await applyRange(h, 15_000, 18_000);
   expectSharedAxis(h, startMs + 15_000, startMs + 18_000);
@@ -555,6 +577,14 @@ test("SVG feedback graphs start at 0.0 V and retain measured voltage steps witho
   assert.equal(clipped.length, 1);
   assert.equal(clipped[0].getAttribute("y1"), firstVoltageY);
   assert.equal(clipped[0].getAttribute("y2"), firstVoltageY, "the measured 0.3 V value is held across this later window");
+  await h.click(h.button("Save test run"));
+  const payload = structuredClone(h.window.calls[0].payload);
+  assert.deepEqual(payload.devices[0].channels, before.devices[0].channels,
+    "saved aliases and styles leave source tags and measured readings unchanged");
+  assert.equal(payload.devices[0].name, before.devices[0].name);
+  assert.equal(payload.graphTools.graphs[0].name, "V-3511-Y_FB");
+  assert.equal(payload.graphTools.graphs[0].style, "auto");
+  await h.settle();
   assert.deepEqual(run, before, "rendering steps leaves the saved measurements and timestamps unchanged");
 });
 

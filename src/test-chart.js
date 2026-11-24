@@ -178,7 +178,7 @@ export function buildTestChart(series, clock, {
   const signalName = String(series.name || "").replace(/\s+/g, "");
   // Feedback tags hold their measured value until the next recorded change.
   // This affects connections only; voltage/current values retain their own scale.
-  const feedback = /_FB$/i.test(signalName);
+  const feedback = /[-_]FB$/i.test(signalName);
   const interpolation = style === "auto" ? series.kind === "digital" || feedback ? "step" : "linear"
     : style === "line" ? "linear" : style;
   // The requested zero-voltage start is display-only. A leading invalid or

@@ -421,7 +421,8 @@ test("digital connections hold the previous state until each recorded transition
 });
 
 test("feedback voltage starts at zero and uses steps without changing source observations", () => {
-  for (const name of ["V-3501_FB", "v-3501_fb", " V - 3501_FB "]) {
+  for (const name of ["V-3501_FB", "v-3501_fb", " V - 3501_FB ",
+    "V-3511-Y-FB", "V-3511-Y_FB", "v-3511-y-fb", " V - 3511 - Y - FB "]) {
     const series = { name, kind: "analog", unit: "V", points: [
       point(1000, 0.1, { previousValue: 0 }), point(2000, 0.3), point(3000, 0.2),
     ] };
@@ -453,13 +454,14 @@ test("feedback voltage starts at zero and uses steps without changing source obs
   }
 });
 
-test("analog tags that do not end in _FB keep linear connections", () => {
-  for (const name of ["V-3501-POS", "PD-3500#1", "V-3501_FB_EXTRA", "FB-3501", "V-3501-FB"]) {
+test("analog tags that do not end in _FB or -FB keep linear connections", () => {
+  for (const name of ["V-3501-POS", "PD-3500#1", "V-3501_FB_EXTRA", "V-3501-FB_EXTRA", "FB-3501", "V-3501FB"]) {
     const chart = buildTestChart({ name, kind: "analog", unit: "V", points: [point(1000, 0), point(2000, 0.3)] }, clock);
     assert.equal(chart.interpolation, "linear", name);
     assert.equal(chart.connections.length, 1);
     assert.notEqual(chart.connections[0].from.x, chart.connections[0].to.x);
     assert.notEqual(chart.connections[0].from.y, chart.connections[0].to.y);
+    assert.equal(chart.initialLabel, null);
   }
   assert.equal(buildTestChart({ name: "Output", kind: "digital", points: [point(1000, 0), point(2000, 1)] }, clock).interpolation, "step");
 });
@@ -467,18 +469,22 @@ test("analog tags that do not end in _FB keep linear connections", () => {
 test("explicit line, step and smooth styles change only connections while automatic feedback and digital rules remain", () => {
   const feedback = { name: "V-3501_FB", kind: "analog", unit: "V", points: [point(1000, 0.1), point(2000, 0.3), point(4000, 0.2)] };
   const original = structuredClone(feedback);
-  const automatic = buildTestChart(feedback, clock);
-  assert.deepEqual(buildTestChart(feedback, clock, { style: "auto" }), automatic);
-  for (const [style, interpolation] of [["line", "linear"], ["step", "step"], ["smooth", "smooth"]]) {
-    const chart = buildTestChart(feedback, clock, { style });
-    assert.equal(chart.interpolation, interpolation);
-    assert.deepEqual(chart.points, automatic.points);
-    assert.deepEqual(chart.domain, automatic.domain);
-    assert.deepEqual(chart.leading, automatic.leading);
-    assert.deepEqual(chart.extension, automatic.extension);
-    assert.equal(chart.initialLabel, "Initial value 0.0 V");
-    assert.equal(chart.observedCount, 3);
-    assertBounded(chart);
+  for (const name of [feedback.name, "V-3511-Y-FB"]) {
+    const series = { ...feedback, name };
+    const automatic = buildTestChart(series, clock);
+    assert.deepEqual(buildTestChart(series, clock, { style: "auto" }), automatic);
+    assert.equal(automatic.interpolation, "step");
+    for (const [style, interpolation] of [["line", "linear"], ["step", "step"], ["smooth", "smooth"]]) {
+      const chart = buildTestChart(series, clock, { style });
+      assert.equal(chart.interpolation, interpolation);
+      assert.deepEqual(chart.points, automatic.points);
+      assert.deepEqual(chart.domain, automatic.domain);
+      assert.deepEqual(chart.leading, automatic.leading);
+      assert.deepEqual(chart.extension, automatic.extension);
+      assert.equal(chart.initialLabel, "Initial value 0.0 V");
+      assert.equal(chart.observedCount, 3);
+      assertBounded(chart);
+    }
   }
   const analogStep = buildTestChart({ ...feedback, name: "Position" }, clock, { style: "step" });
   assert.equal(analogStep.connections.length, 4);
