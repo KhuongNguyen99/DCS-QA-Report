@@ -703,6 +703,57 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
   });
 });
 
+test("PDF feedback traces use voltage-preserving steps while non-feedback analog traces stay linear", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const points = values => values.map((value, index) => ({
+      timeMs: startMs + 50_000 + index * 50_000, time: `Recorded event ${index + 1}`,
+      value, valid: true, rawValue: String(value), previousValue: index ? values[index - 1] : 0,
+      previousRawValue: String(index ? values[index - 1] : 0), sourceId: "source-log", sourceRow: index + 2,
+    }));
+    const channel = (id, name, unit, values) => ({
+      id, symbolicName: name, stationId: "station-1", slot: id === "feedback" ? 2 : 3, channel: 0,
+      role: id === "feedback" ? "Feedback" : "Positioner", status: "Passed", parameters: [],
+      series: [{ id: `${id}-series`, name, kind: "analog", unit, points: points(values) }],
+    });
+    run.devices = [{ id: "feedback-example", name: "Valve example", status: "Passed", channels: [
+      channel("feedback", "V-3501_FB", "V", [0.3, 0, 0.15]),
+      channel("position", "V-3501-POS", "mA", [4, 20, 12]),
+    ] }];
+    run.unassignedChannels = [];
+    const before = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    const feedback = readPlot(result, "V-3501_FB");
+    const solid = feedback.traces.filter(line => line.dash.length === 0);
+    const tails = feedback.traces.filter(line => line.dash.length > 0);
+    const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.01, `${actual} differs from ${expected}`);
+    const same = (a, b) => { near(a.x, b.x); near(a.y, b.y); };
+    assert.equal(solid.length, 4, "three fractional voltage observations create two horizontal/vertical steps");
+    for (let index = 0; index < solid.length; index += 2) {
+      const [hold, jump] = solid.slice(index, index + 2);
+      assert.ok(hold.to.x > hold.from.x);
+      near(hold.from.y, hold.to.y);
+      same(hold.to, jump.from);
+      near(jump.from.x, jump.to.x);
+      assert.notEqual(jump.from.y, jump.to.y);
+      if (index + 2 < solid.length) same(jump.to, solid[index + 2].from);
+    }
+    assert.equal(tails.length, 1, "analog feedback has a final held tail but no invented initial state");
+    assert.deepEqual(tails[0].dash, [4, 3]);
+    same(tails[0].from, solid.at(-1).to);
+    near(tails[0].from.y, tails[0].to.y);
+    near(tails[0].to.x, feedback.right);
+    assert.ok(solid[0].from.x > feedback.left, "the trace starts at its first recorded value");
+    assert.ok(result.blocks[feedback.page].some(block => block.text === "V"), "the PDF keeps the original voltage unit");
+    const position = readPlot(result, "V-3501-POS");
+    const diagonals = position.traces.filter(line => line.dash.length === 0);
+    assert.equal(diagonals.length, 2);
+    assert.ok(diagonals.every(line => line.from.x !== line.to.x && line.from.y !== line.to.y));
+    assert.deepEqual(state, before, "export cannot rewrite approved kinds, voltages, or timestamps");
+  });
+});
+
 test("PDF separates mixed-unit and same-unit signals within a device while printing its comment once", async () => {
   await withFonts(async () => {
     const state = closedState();

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import Icon from "./Icons.jsx";
 import { revisionNumber } from "./domain.js";
 import PhotoGallery from "./PhotoGallery.jsx";
@@ -10,6 +10,7 @@ import { testCommentBlocks } from "./test-comment-format.js";
 import { testTimeRangeScope, readDeviceTimeRange, saveDeviceTimeRange, resetDeviceTimeRange,
   readTestSelection, rememberTestSelection } from "./test-time-ranges.js";
 import { createTestEventEdit, setTestEventEdit, applyTestEventEdits } from "./test-event-edits.js";
+import { UNKNOWN_TIME_ZONE, getLocalTimeZone, getTimeZoneOptions } from "./test-timezones.js";
 import "./test-reports.css";
 
 const statusClass = (status) => status === "Passed" ? "passed" : status === "Failed" ? "failed" : "untested";
@@ -169,7 +170,7 @@ export function TestSeriesChart({ series, clock, timeRange = null, onExclusionCh
             </path>)}
         </svg>
       </div>
-      <p>{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}{chart.excludedCount ? ` · ${chart.excludedCount} removed events` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "The time axis automatically fits this series."}{clock.basis === "absolute" && " Times are UTC."}</p>
+      <p>{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}{chart.excludedCount ? ` · ${chart.excludedCount} removed events` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : chart.interpolation === "step" ? "Steps hold each recorded value until the next reading" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "The time axis automatically fits this series."}{clock.basis === "absolute" && " Times are UTC."}</p>
       <details className="test-events"><summary>View recorded events ({retained.length})</summary>
         <TestEventTable entries={retained} seriesName={series.name} onExclusionChange={onExclusionChange} disabled={editsDisabled} />
       </details>
@@ -311,6 +312,8 @@ function ScopedTestReportsPanel({
   getPhotoUrl, onAddSetupPhoto, onUpdateSetupPhoto, onRemoveSetupPhoto, onReorderSetupPhotos, cacheScope, storageScope,
   timeRangeChanges = {}, onTimeRangeChange,
 }) {
+  const timeZoneId = useId();
+  const computerTimeZone = getLocalTimeZone();
   function recover(records) {
     const cached = records.find(item => item.revision === project.revision) || records[0];
     if (!cached) return null;
@@ -319,12 +322,15 @@ function ScopedTestReportsPanel({
     try { if (run && !cached.requiresFiles) data = applyTestEventEdits(run, cached.eventEdits || []); }
     catch (failure) { eventReplayError = failure.message; }
     return { ...cached, walkdownId: project.walkdownId, recovered: true,
+      timeZone: cached.timeZone?.trim() ? cached.timeZone : UNKNOWN_TIME_ZONE,
       eventEdits: cached.eventEdits || [], eventReplayError,
       reselectSources: cached.requiresFiles ? cached.sources : null,
       data };
   }
   const [recovery] = useState(() => readTestCommentDrafts(cacheScope));
   const [draft, setDraft] = useState(() => recover(recovery.drafts));
+  const timeZoneOptions = useMemo(() => draft ? getTimeZoneOptions(draft.timeZone, computerTimeZone) : [],
+    [draft?.timeZone, computerTimeZone]);
   const draftRef = useRef(draft);
   const [selectedId, setSelectedId] = useState(() => draft?.id || readTestSelection(cacheScope));
   const [cacheError, setCacheError] = useState(recovery.error);
@@ -368,7 +374,9 @@ function ScopedTestReportsPanel({
       revision: project.revision, walkdownId: project.walkdownId,
       id: run?.id || crypto.randomUUID(), runVersion: run?.runVersion ?? null,
       name: run?.name || "Control box I/O test", software: { ...(run?.software || EMPTY_SOFTWARE) },
-      timeZone: run?.clock?.timeZone || "Source clock (timezone not recorded)",
+      timeZone: run
+        ? (run.clock?.timeZone?.trim() ? run.clock.timeZone : UNKNOWN_TIME_ZONE)
+        : getLocalTimeZone() || UNKNOWN_TIME_ZONE,
       comment: run?.comment || "",
       deviceComments: Object.fromEntries((run?.devices || []).map(device => [device.id, device.comment || ""])),
       deviceNames: Object.fromEntries((run?.devices || []).map(device => [device.id, device.name])),
@@ -461,7 +469,7 @@ function ScopedTestReportsPanel({
     }
     const payload = { ...preview, id: draft.id, runVersion: draft.runVersion,
       name: draft.name.trim(), software: { name: draft.software.name.trim(), version: draft.software.version.trim() },
-      clock: { ...draft.data.clock, timeZone: draft.timeZone.trim() || "Source clock (timezone not recorded)" },
+      clock: { ...draft.data.clock, timeZone: draft.timeZone.trim() || UNKNOWN_TIME_ZONE },
     };
     busyRef.current = true; setBusy("save"); setError("");
     try {
@@ -511,7 +519,18 @@ function ScopedTestReportsPanel({
           <label>Test run name<input value={draft.name} maxLength={160} onChange={event => updateDraft(previous => ({ ...previous, name: event.target.value }))} /></label>
           <label>Software name<input value={draft.software.name} maxLength={120} onChange={event => updateDraft(previous => ({ ...previous, software: { ...previous.software, name: event.target.value } }))} /></label>
           <label>Software version<input value={draft.software.version} placeholder="Version used for this test" maxLength={80} onChange={event => updateDraft(previous => ({ ...previous, software: { ...previous.software, version: event.target.value } }))} /></label>
-          <label>Source clock / timezone<input value={draft.timeZone} maxLength={120} onChange={event => updateDraft(previous => ({ ...previous, timeZone: event.target.value }))} /></label>
+          <div className="test-timezone-field">
+            <label htmlFor={timeZoneId}>Source clock / timezone</label>
+            <select id={timeZoneId} value={draft.timeZone} aria-describedby={`${timeZoneId}-help`}
+              onChange={event => updateDraft(previous => ({ ...previous, timeZone: event.target.value }))}>
+              {timeZoneOptions.map(zone => <option key={zone} value={zone}>
+                {zone}{zone === computerTimeZone ? " (this computer)" : ""}
+              </option>)}
+            </select>
+            <p id={`${timeZoneId}-help`} className="test-timezone-help">{computerTimeZone
+              ? "New imports use this computer’s timezone. Choose a different timezone if the test was recorded elsewhere."
+              : "The local timezone could not be detected. Choose the timezone used to record this test."}</p>
+          </div>
         </div>
         <p className="test-muted">Use the software version you ran. Module firmware versions in the files are recorded separately. Times stay as recorded by the source computer.</p>
         <label className="test-file-choice">{draft.data ? "Replace source files" : "Source files"}<input type="file" multiple accept=".csv,.mpr,text/csv,application/xml,text/xml" onChange={chooseFiles} /></label>

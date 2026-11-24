@@ -115,6 +115,9 @@ export function buildTestChart(series, clock, {
   let max;
   const unit = String(series.unit || "").replace(/\s+/g, "").toLowerCase();
   const signalName = String(series.name || "").replace(/\s+/g, "");
+  // Feedback tags hold their measured value until the next recorded change.
+  // This affects connections only; voltage/current values retain their own scale.
+  const interpolation = series.kind === "digital" || /_FB$/i.test(signalName) ? "step" : "linear";
   const defaultRange = unit === "ma" && /(?:[-_]POS$|^(?:PD|DP)-)/i.test(signalName)
     ? [0, 25] : unit === "°c" ? [20, 30] : null;
   if (series.kind === "digital") {
@@ -166,7 +169,7 @@ export function buildTestChart(series, clock, {
     if (previous && point) {
       const from = coordinate(previous);
       const to = coordinate(point);
-      if (series.kind === "digital") {
+      if (interpolation === "step") {
         const corner = { x: to.x, y: from.y };
         connect(from, corner);
         connect(corner, to);
@@ -186,7 +189,7 @@ export function buildTestChart(series, clock, {
   const yValues = series.kind === "digital" ? [0, 1]
     : Array.from({ length: 5 }, (_, index) => min + (max - min) * index / 4);
   return {
-    width, height, plot,
+    width, height, plot, interpolation,
     domain: { startMs, endMs, min, max },
     unit: series.unit || (series.kind === "digital" ? "State" : "Recorded value"),
     xTicks: ticks.map((timeMs) => ({

@@ -81,7 +81,8 @@ function savedRun(overrides = {}) {
     software: { name: "Siemens PRONETA Basic", version: "Entered 1.0" }, ...overrides };
 }
 
-async function setup(t, props = {}, { stored = {}, storageBlocked = false } = {}) {
+async function setup(t, props = {}, { stored = {}, storageBlocked = false,
+  localTimeZone = "America/Chicago", supportedTimeZones = ["America/Chicago", "Asia/Tokyo", "Europe/London"] } = {}) {
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", error => errors.push(error.message));
@@ -91,9 +92,22 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false } = {}
   });
   const { window } = dom;
   Object.assign(window, {
-    IS_REACT_ACT_ENVIRONMENT: true, structuredClone, calls: [], parses: [], dirty: [], exports: [], reviews: [],
+    IS_REACT_ACT_ENVIRONMENT: true, structuredClone, calls: [], parses: [], dirty: [], exports: [], reviews: [], localTimeZone,
     initialProps: { project, runs: [], inspector: { id: "inspector-1", isAdmin: false }, storageScope: "https://example.supabase.co", ...props },
   });
+  const DateTimeFormat = window.Intl.DateTimeFormat;
+  const localFormatter = (formatter, args) => {
+    if (!args[1]?.timeZone) {
+      const resolved = formatter.resolvedOptions.bind(formatter);
+      formatter.resolvedOptions = () => ({ ...resolved(), timeZone: window.localTimeZone });
+    }
+    return formatter;
+  };
+  window.Intl.DateTimeFormat = new Proxy(DateTimeFormat, {
+    apply: (target, receiver, args) => localFormatter(Reflect.apply(target, receiver, args), args),
+    construct: (target, args) => localFormatter(Reflect.construct(target, args), args),
+  });
+  window.Intl.supportedValuesOf = () => [...supportedTimeZones];
   for (const [key, value] of Object.entries(stored)) window.localStorage.setItem(key, value);
   if (storageBlocked) Object.defineProperty(window, "localStorage", { get() { throw new Error("Blocked"); } });
   window.MessageChannel = class {
@@ -122,7 +136,7 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false } = {}
     query: selector => document.querySelector(selector),
     text: () => document.body.textContent.replace(/\s+/g, " "),
     button: name => [...document.querySelectorAll("button")].find(button => button.textContent.trim() === name || button.getAttribute('aria-label') === name),
-    field: name => [...document.querySelectorAll("label")].find(label => label.textContent.trim() === name)?.querySelector("input"),
+    field: name => [...document.querySelectorAll("label")].find(label => label.textContent.trim() === name)?.control,
     async click(button) { assert.ok(button, "button exists"); await window.act(async () => button.click()); },
     async configure(changes) { await window.act(async () => window.configure(changes)); },
     async fill(input, value) {
@@ -131,6 +145,14 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false } = {}
         const prototype = input.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
         Object.getOwnPropertyDescriptor(prototype, "value").set.call(input, value);
         input.dispatchEvent(new window.Event("input", { bubbles: true }));
+      });
+    },
+    async select(input, value) {
+      assert.equal(input?.tagName, "SELECT", "field is a native select");
+      assert.ok(Array.from(input.options, option => option.value).includes(value), "requested timezone is selectable");
+      await window.act(async () => {
+        input.value = value;
+        input.dispatchEvent(new window.Event("change", { bubbles: true }));
       });
     },
     async choose(names = ["synthetic-results.csv", "synthetic-log.csv", "synthetic-parameters.mpr"]) {
@@ -178,7 +200,7 @@ test("multi-file preview leaves the software version blank and shows separate si
   await h.fill(h.field("Test run name"), "  Reviewed run  ");
   await h.fill(h.field("Software name"), "  Siemens PRONETA Basic  ");
   await h.fill(h.field("Software version"), "  Tester-entered 8.4  ");
-  await h.fill(h.field("Source clock / timezone"), "Source computer clock");
+  await h.select(h.field("Source clock / timezone"), "Europe/London");
   const save = h.button("Save test run");
   await h.window.act(async () => { save.click(); save.click(); });
   assert.equal(h.window.calls.length, 1, "rapid duplicate clicks cannot submit twice");
@@ -187,7 +209,7 @@ test("multi-file preview leaves the software version blank and shows separate si
   assert.equal(call.payload.runVersion, null);
   assert.equal(call.payload.name, "Reviewed run");
   assert.equal(call.payload.software.version, "Tester-entered 8.4");
-  assert.equal(call.payload.clock.timeZone, "Source computer clock");
+  assert.equal(call.payload.clock.timeZone, "Europe/London");
   assert.equal(call.payload.devices[0].channels.length, 2);
   await h.settle();
   assert.equal(h.query('[aria-label="Import test run"]'), null);
@@ -200,6 +222,7 @@ test("failed save retains the exact local preview and metadata for retry", async
   await h.importPreview();
   await h.fill(h.field("Software version"), "Retained version");
   await h.fill(h.field("Test run name"), "Retained run");
+  await h.select(h.field("Source clock / timezone"), "Asia/Tokyo");
   await h.click(h.button("Save test run"));
   const initialPayload = structuredClone(h.window.calls[0].payload);
   await h.settle("Network interrupted; retry the save.");
@@ -207,6 +230,7 @@ test("failed save retains the exact local preview and metadata for retry", async
   assert.match(h.text(), /Unsaved preview/);
   assert.equal(h.field("Software version").value, "Retained version");
   assert.equal(h.field("Test run name").value, "Retained run");
+  assert.equal(h.field("Source clock / timezone").value, "Asia/Tokyo");
   assert.equal(h.window.dirty.at(-1), true);
   const retry = h.button("Save test run");
   assert.equal(retry.disabled, false);
@@ -218,17 +242,107 @@ test("failed save retains the exact local preview and metadata for retry", async
 });
 
 test("editing metadata preserves the saved run ID and optimistic run version", async t => {
-  const h = await setup(t, { runs: [savedRun()] });
+  const run = savedRun();
+  run.clock.timeZone = "America/Chicago (Central Time)";
+  const h = await setup(t, { runs: [run] }, { localTimeZone: "Asia/Tokyo" });
   await h.click(h.button("Edit run"));
   assert.equal(h.field("Software version").value, "Entered 1.0");
+  assert.equal(h.field("Source clock / timezone").value, "America/Chicago (Central Time)", "saved legacy labels remain selected");
   await h.fill(h.field("Software version"), "Corrected 1.1");
   await h.click(h.button("Save test run"));
   assert.equal(h.window.parses.length, 0, "metadata edits reuse the normalized saved evidence");
   assert.equal(h.window.calls[0].payload.id, "run-1");
   assert.equal(h.window.calls[0].payload.runVersion, 7);
   assert.equal(h.window.calls[0].payload.software.version, "Corrected 1.1");
+  assert.equal(h.window.calls[0].payload.clock.timeZone, "America/Chicago (Central Time)");
   assert.equal(h.window.calls[0].revision, 4);
   await h.settle();
+});
+
+test("new imports select the local computer timezone without replacing a draft's selection on rerender", async t => {
+  const h = await setup(t, {}, { localTimeZone: "America/Chicago", supportedTimeZones: ["Asia/Tokyo", "Europe/London"] });
+  await h.click(h.button("Import test run"));
+  const picker = h.field("Source clock / timezone");
+  assert.equal(picker.tagName, "SELECT");
+  assert.equal(picker.value, "America/Chicago", "the local identifier is retained even when enumeration omits it");
+  assert.ok(Array.from(picker.options, option => option.value).includes("UTC"));
+  assert.ok(h.document.getElementById(picker.getAttribute("aria-describedby")), "the select has associated guidance");
+  h.window.localTimeZone = "Asia/Tokyo";
+  await h.fill(h.field("Test run name"), "Draft started in Chicago");
+  assert.equal(picker.value, "America/Chicago", "an existing draft is not silently changed with the computer setting");
+  await h.click(h.button("Discard changes"));
+  await h.click(h.button("Import test run"));
+  assert.equal(h.field("Source clock / timezone").value, "Asia/Tokyo", "a newly started import uses the current computer setting");
+
+  const unavailable = await setup(t, {}, { localTimeZone: null });
+  await unavailable.click(unavailable.button("Import test run"));
+  assert.equal(unavailable.field("Source clock / timezone").value, "Source clock (timezone not recorded)");
+  assert.match(unavailable.text(), /local timezone could not be detected/i);
+  assert.equal(unavailable.window.calls.length, 0);
+});
+
+for (const basis of ["source-local", "absolute"]) {
+  test(`manual timezone selection survives file rereads without shifting ${basis} timestamps or graphs`, async t => {
+    const h = await setup(t);
+    const parsed = parsedRun();
+    parsed.clock.basis = basis;
+    const timestamps = run => run.devices.flatMap(device => device.channels.flatMap(channel =>
+      channel.series.flatMap(series => series.points.map(point => [point.time, point.timeMs]))));
+    const originalTimes = timestamps(parsed);
+    await h.click(h.button("Import test run"));
+    await h.select(h.field("Source clock / timezone"), "Asia/Tokyo");
+    await h.fill(h.field("Software version"), "8.4");
+    await h.choose();
+    assert.equal(h.window.parses[0].options.timeZone, "Asia/Tokyo");
+    await h.finishParse(parsed);
+    const coordinates = () => Array.from(h.document.querySelectorAll("svg[data-time-start]"), chart => ({
+      start: chart.dataset.timeStart, end: chart.dataset.timeEnd,
+      points: Array.from(chart.querySelectorAll("circle.test-observation"), point => [point.getAttribute("cx"), point.getAttribute("cy")]),
+    }));
+    const originalGraphs = coordinates();
+    await h.select(h.field("Source clock / timezone"), "Europe/London");
+    assert.deepEqual(coordinates(), originalGraphs);
+    if (basis === "absolute") assert.match(h.query(".test-run-facts").textContent, /Graphs use UTC/);
+    await h.click(h.button("Read files again"));
+    assert.equal(h.window.parses[1].options.timeZone, "Europe/London");
+    await h.finishParse(parsed);
+    assert.equal(h.field("Source clock / timezone").value, "Europe/London");
+    assert.deepEqual(coordinates(), originalGraphs);
+    await h.click(h.button("Save test run"));
+    const payload = h.window.calls[0].payload;
+    assert.equal(payload.clock.timeZone, "Europe/London");
+    assert.equal(payload.clock.basis, basis);
+    assert.equal(payload.clock.startMs, startMs);
+    assert.equal(payload.clock.endMs, startMs + 392_000);
+    assert.deepEqual(timestamps(payload), originalTimes, "timezone selection changes metadata only");
+    await h.settle();
+  });
+}
+
+test("reopening a draft keeps its selected timezone and shows an honest unknown value for empty legacy drafts", async t => {
+  const run = savedRun();
+  const h = await setup(t, { runs: [run] });
+  await h.click(h.button("Edit run"));
+  await h.select(h.field("Source clock / timezone"), "Asia/Tokyo");
+  const stored = h.stored();
+  await h.unmount();
+  const reopened = await setup(t, { runs: [run] }, { stored, localTimeZone: "Europe/London" });
+  assert.equal(reopened.field("Source clock / timezone").value, "Asia/Tokyo");
+  assert.deepEqual(reopened.stored(), stored, "mounting does not overwrite a recovered selection");
+  await reopened.click(reopened.button("Save test run"));
+  assert.equal(reopened.window.calls[0].payload.clock.timeZone, "Asia/Tokyo");
+  await reopened.settle();
+
+  const key = Object.keys(stored)[0];
+  for (const empty of ["", "   "]) {
+    const legacy = { [key]: JSON.stringify({ ...JSON.parse(stored[key]), timeZone: empty }) };
+    const recovered = await setup(t, { runs: [run] }, { stored: legacy, localTimeZone: "Europe/London" });
+    assert.equal(recovered.field("Source clock / timezone").value, "Source clock (timezone not recorded)",
+      "empty saved metadata must not visually select the first available timezone");
+    await recovered.click(recovered.button("Save test run"));
+    assert.equal(recovered.window.calls[0].payload.clock.timeZone, "Source clock (timezone not recorded)");
+    await recovered.settle();
+  }
 });
 
 test("a revision closing during parsing retains the preview but prevents writes in the closed or next revision", async t => {
@@ -328,6 +442,48 @@ test("SVG graphs connect observations and draw a separate horizontal final-value
   assert.ok(Number(tail.getAttribute("x2")) > Number(tail.getAttribute("x1")));
   assert.match(h.text(), /the dashed tail holds the last value to the graph end/);
   assert.equal(series.points.length, 2);
+});
+
+test("SVG feedback graphs hold analog voltages until each recorded change while other analog traces remain linear", async t => {
+  const run = savedRun();
+  const [linear, feedback] = run.devices[0].channels.map(channel => channel.series[0]);
+  const sample = linear.points[0];
+  Object.assign(linear, { name: "V-3501-POS", kind: "analog", unit: "mA", points: [
+    { ...sample, timeMs: startMs + 1000, value: 4, rawValue: "4 mA" },
+    { ...sample, timeMs: startMs + 5000, value: 20, rawValue: "20 mA" },
+  ] });
+  Object.assign(feedback, { name: "V-3501_fb", kind: "analog", unit: "V", points: [
+    { ...sample, timeMs: startMs + 1000, value: 0.3, rawValue: "0.3 V" },
+    { ...sample, timeMs: startMs + 5000, value: 0, rawValue: "0 V", previousValue: 0.3, previousRawValue: "0.3 V" },
+  ] });
+  run.devices[0].channels[1].role = "Feedback";
+  const before = structuredClone(run);
+  const h = await setup(t, { runs: [run] });
+  const figures = Array.from(h.document.querySelectorAll(".test-chart"));
+  const figure = figures.find(item => item.querySelector("figcaption strong").textContent === "V-3501_fb");
+  const dots = figure.querySelectorAll(".test-observation");
+  const traces = figure.querySelectorAll(".test-trace");
+  assert.equal(figure.querySelector("figcaption span").textContent, "V");
+  assert.equal(dots.length, 2, "fractional voltage readings stay valid analog observations");
+  assert.equal(figure.querySelector(".test-invalid-observation"), null);
+  assert.equal(figure.querySelector(".test-initial-state"), null, "feedback interpolation does not invent an initial state");
+  assert.equal(traces.length, 2);
+  const [hold, jump] = traces;
+  assert.equal(hold.getAttribute("x1"), dots[0].getAttribute("cx"));
+  assert.equal(hold.getAttribute("x2"), dots[1].getAttribute("cx"));
+  assert.equal(hold.getAttribute("y1"), dots[0].getAttribute("cy"));
+  assert.equal(hold.getAttribute("y2"), dots[0].getAttribute("cy"));
+  assert.equal(jump.getAttribute("x1"), dots[1].getAttribute("cx"));
+  assert.equal(jump.getAttribute("x2"), dots[1].getAttribute("cx"));
+  assert.equal(jump.getAttribute("y1"), dots[0].getAttribute("cy"));
+  assert.equal(jump.getAttribute("y2"), dots[1].getAttribute("cy"));
+  assert.match(figure.querySelector("p").textContent, /Steps/);
+  const other = figures.find(item => item.querySelector("figcaption strong").textContent === "V-3501-POS");
+  const diagonal = other.querySelector(".test-trace");
+  assert.equal(other.querySelectorAll(".test-trace").length, 1);
+  assert.notEqual(diagonal.getAttribute("x1"), diagonal.getAttribute("x2"));
+  assert.notEqual(diagonal.getAttribute("y1"), diagonal.getAttribute("y2"));
+  assert.deepEqual(run, before, "rendering steps leaves the saved measurements and timestamps unchanged");
 });
 
 test("a device shows separate mixed-unit graphs with individual scales and one shared device comment", async t => {

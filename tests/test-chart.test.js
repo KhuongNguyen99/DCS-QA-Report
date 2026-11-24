@@ -243,6 +243,95 @@ test("digital connections hold the previous state until each recorded transition
   assert.equal(chart.extension.to.y, third.y);
 });
 
+test("feedback tags use steps while preserving measured voltage, scale, and source observations", () => {
+  for (const name of ["V-3501_FB", "v-3501_fb", " V - 3501_FB "]) {
+    const series = { name, kind: "analog", unit: "V", points: [
+      point(1000, 0.1, { previousValue: 0 }), point(2000, 0.3), point(3000, 0.2),
+    ] };
+    const original = structuredClone(series);
+    const chart = buildTestChart(series, clock, { showInitialState: true });
+    const linear = buildTestChart({ ...series, name: "Other voltage" }, clock);
+    const [first, second, third] = chart.points;
+    assert.equal(chart.interpolation, "step");
+    assert.equal(chart.unit, "V");
+    assert.deepEqual(chart.domain, linear.domain, "feedback retains the analog axis rather than a binary 0/1 scale");
+    assert.deepEqual(chart.points.map(point => point.value), [0.1, 0.3, 0.2]);
+    assert.equal(chart.invalidCount, 0);
+    assert.deepEqual(chart.connections, [
+      { from: { x: first.x, y: first.y }, to: { x: second.x, y: first.y } },
+      { from: { x: second.x, y: first.y }, to: { x: second.x, y: second.y } },
+      { from: { x: second.x, y: second.y }, to: { x: third.x, y: second.y } },
+      { from: { x: third.x, y: second.y }, to: { x: third.x, y: third.y } },
+    ]);
+    assert.equal(chart.observedCount, 3, "step corners are not new readings");
+    assert.equal(chart.initialState, null, "analog feedback does not acquire an invented digital starting state");
+    assert.equal(chart.leading, null);
+    assert.equal(chart.extension.from.y, third.y);
+    assert.equal(chart.extension.to.y, third.y);
+    assert.deepEqual(series, original);
+  }
+});
+
+test("analog tags that do not end in _FB keep linear connections", () => {
+  for (const name of ["V-3501-POS", "PD-3500#1", "V-3501_FB_EXTRA", "FB-3501", "V-3501-FB"]) {
+    const chart = buildTestChart({ name, kind: "analog", unit: "V", points: [point(1000, 0), point(2000, 0.3)] }, clock);
+    assert.equal(chart.interpolation, "linear", name);
+    assert.equal(chart.connections.length, 1);
+    assert.notEqual(chart.connections[0].from.x, chart.connections[0].to.x);
+    assert.notEqual(chart.connections[0].from.y, chart.connections[0].to.y);
+  }
+  assert.equal(buildTestChart({ name: "Output", kind: "digital", points: [point(1000, 0), point(2000, 1)] }, clock).interpolation, "step");
+});
+
+test("manual feedback windows carry measured values across their edges and preserve equal-time transitions", () => {
+  const series = { name: "V-3501_FB", kind: "analog", unit: "V", points: [
+    point(0, 0.1), point(10000, 0.3), point(10000, 0.2), point(20000, 0.4),
+  ] };
+  const chart = buildTestChart(series, clock, { timeRange: timeRange(5000, 15000) });
+  const left = chart.plot.left, right = left + chart.plot.width, middle = (left + right) / 2;
+  assert.deepEqual(chart.connections, [
+    { from: { x: left, y: yFor(chart, 0.1) }, to: { x: middle, y: yFor(chart, 0.1) } },
+    { from: { x: middle, y: yFor(chart, 0.1) }, to: { x: middle, y: yFor(chart, 0.3) } },
+    { from: { x: middle, y: yFor(chart, 0.3) }, to: { x: middle, y: yFor(chart, 0.2) } },
+    { from: { x: middle, y: yFor(chart, 0.2) }, to: { x: right, y: yFor(chart, 0.2) } },
+  ]);
+  assert.deepEqual(chart.points.map(point => point.value), [0.3, 0.2]);
+  assert.equal(chart.observedCount, 4);
+  assert.equal(chart.visibleObservedCount, 2);
+  assert.equal(chart.extension, null);
+  assertBounded(chart);
+  const between = buildTestChart(series, clock, { timeRange: timeRange(11000, 15000) });
+  assert.deepEqual(between.points, []);
+  assert.deepEqual(between.connections, [{
+    from: { x: left, y: yFor(between, 0.2) }, to: { x: right, y: yFor(between, 0.2) },
+  }]);
+  assertBounded(between);
+});
+
+test("feedback steps preserve invalid gaps and excluded events without extending invalid final readings", () => {
+  const series = { name: "V-3501_FB", kind: "analog", unit: "V", points: [
+    point(0, 0.1), point(5000, null, { valid: false }), point(10000, 0.3),
+    point(15000, 0.9, { excluded: true }), point(20000, 0.4), point(25000, null, { valid: false }),
+  ] };
+  const original = structuredClone(series);
+  const chart = buildTestChart(series, clock);
+  assert.equal(chart.connections.length, 2, "only the two valid neighbors after the gap are connected");
+  assert.equal(chart.connections[0].from.x, chart.points[1].x);
+  assert.equal(chart.connections[1].to.x, chart.points[2].x);
+  assert.ok(chart.connections.every(({ from, to }) => from.x === to.x || from.y === to.y));
+  assert.equal(chart.invalidCount, 2);
+  assert.equal(chart.excludedCount, 1);
+  assert.equal(chart.observedCount, 3);
+  assert.equal(chart.extension, null);
+  const gapRemoved = { ...series, points: series.points.map((point, index) => index === 1 ? { ...point, excluded: true } : point) };
+  const connected = buildTestChart(gapRemoved, clock);
+  assert.equal(connected.connections.length, 4);
+  assert.equal(connected.invalidCount, 1);
+  assert.equal(connected.excludedCount, 2);
+  assert.equal(connected.extension, null);
+  assert.deepEqual(series, original);
+});
+
 test("invalid observations break connections and stop a trailing held value", () => {
   const chart = buildTestChart({ kind: "analog", points: [
     point(0, 4), point(1000, null, { valid: false }), point(2000, 8), point(3000, 10),
