@@ -329,7 +329,7 @@ function reportWriter(doc, y) {
       tickCount: width < 250 ? 3 : compact ? 4 : 5,
       timeRange, showInitialState,
     });
-    const initial = geometry.initialState === null ? "" : ` | Initial state ${geometry.initialState}`;
+    const initial = geometry.initialLabel ? ` | ${geometry.initialLabel}` : "";
     const legend = `Figure ${++figureNumber}. ${description}.${compact ? "\n" : " "}${location}${initial}`;
     const titleStyle = { size: 10, bold: true, gap: 3, lineHeight: 14.5 };
     const legendStyle = { size: 8, color: COLOR.muted, gap: 10, lineHeight: 11 };

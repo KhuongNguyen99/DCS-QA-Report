@@ -110,6 +110,7 @@ test("digital outputs show the recorded starting state without adding an observa
   const original = structuredClone(series);
   const chart = buildTestChart(series, clock, { showInitialState: true });
   assert.equal(chart.initialState, 0);
+  assert.equal(chart.initialLabel, "Initial state 0");
   assert.deepEqual(chart.leading.from, { x: chart.plot.left, y: yFor(chart, 0) });
   assert.deepEqual(chart.connections[0], {
     from: chart.leading.to, to: { x: chart.points[0].x, y: yFor(chart, 1) },
@@ -243,29 +244,33 @@ test("digital connections hold the previous state until each recorded transition
   assert.equal(chart.extension.to.y, third.y);
 });
 
-test("feedback tags use steps while preserving measured voltage, scale, and source observations", () => {
+test("feedback voltage starts at zero and uses steps without changing source observations", () => {
   for (const name of ["V-3501_FB", "v-3501_fb", " V - 3501_FB "]) {
     const series = { name, kind: "analog", unit: "V", points: [
       point(1000, 0.1, { previousValue: 0 }), point(2000, 0.3), point(3000, 0.2),
     ] };
     const original = structuredClone(series);
     const chart = buildTestChart(series, clock, { showInitialState: true });
-    const linear = buildTestChart({ ...series, name: "Other voltage" }, clock);
     const [first, second, third] = chart.points;
     assert.equal(chart.interpolation, "step");
     assert.equal(chart.unit, "V");
-    assert.deepEqual(chart.domain, linear.domain, "feedback retains the analog axis rather than a binary 0/1 scale");
+    assert.ok(chart.domain.min < 0 && chart.domain.max > 0.3 && chart.domain.max < 1,
+      "the analog axis includes zero and measured voltage without becoming a binary scale");
     assert.deepEqual(chart.points.map(point => point.value), [0.1, 0.3, 0.2]);
     assert.equal(chart.invalidCount, 0);
     assert.deepEqual(chart.connections, [
+      { from: { x: first.x, y: yFor(chart, 0) }, to: { x: first.x, y: first.y } },
       { from: { x: first.x, y: first.y }, to: { x: second.x, y: first.y } },
       { from: { x: second.x, y: first.y }, to: { x: second.x, y: second.y } },
       { from: { x: second.x, y: second.y }, to: { x: third.x, y: second.y } },
       { from: { x: third.x, y: second.y }, to: { x: third.x, y: third.y } },
     ]);
     assert.equal(chart.observedCount, 3, "step corners are not new readings");
-    assert.equal(chart.initialState, null, "analog feedback does not acquire an invented digital starting state");
-    assert.equal(chart.leading, null);
+    assert.equal(chart.initialState, 0);
+    assert.equal(chart.initialLabel, "Initial value 0.0 V");
+    assert.deepEqual(chart.leading, {
+      from: { x: chart.plot.left, y: yFor(chart, 0) }, to: { x: first.x, y: yFor(chart, 0) },
+    });
     assert.equal(chart.extension.from.y, third.y);
     assert.equal(chart.extension.to.y, third.y);
     assert.deepEqual(series, original);
@@ -310,7 +315,7 @@ test("manual feedback windows carry measured values across their edges and prese
 
 test("feedback steps preserve invalid gaps and excluded events without extending invalid final readings", () => {
   const series = { name: "V-3501_FB", kind: "analog", unit: "V", points: [
-    point(0, 0.1), point(5000, null, { valid: false }), point(10000, 0.3),
+    point(0, 0), point(5000, null, { valid: false }), point(10000, 0.3),
     point(15000, 0.9, { excluded: true }), point(20000, 0.4), point(25000, null, { valid: false }),
   ] };
   const original = structuredClone(series);
@@ -330,6 +335,113 @@ test("feedback steps preserve invalid gaps and excluded events without extending
   assert.equal(connected.excludedCount, 2);
   assert.equal(connected.extension, null);
   assert.deepEqual(series, original);
+});
+
+test("feedback's initial zero is visible before the first reading and never resets later manual windows", () => {
+  const series = { name: "V-3501_FB", kind: "analog", unit: "V", points: [point(20000, 0.3), point(50000, 0.1)] };
+  const original = structuredClone(series);
+  const automatic = buildTestChart(series, clock);
+  const before = buildTestChart(series, clock, { timeRange: timeRange(1000, 10000) });
+  assert.equal(before.initialLabel, "Initial value 0.0 V");
+  assert.equal(before.initialState, 0);
+  assert.deepEqual(before.leading, {
+    from: { x: before.plot.left, y: yFor(before, 0) },
+    to: { x: before.plot.left + before.plot.width, y: yFor(before, 0) },
+  });
+  assert.deepEqual(before.points, []);
+  assert.deepEqual(before.connections, []);
+  assert.equal(before.extension, null);
+  assert.equal(before.observedCount, 2, "the initial zero is never counted as source evidence");
+
+  const crossing = buildTestChart(series, clock, { timeRange: timeRange(10000, 30000) });
+  assert.equal(crossing.initialLabel, "Initial value 0.0 V");
+  assert.equal(crossing.leading.to.x, crossing.points[0].x);
+  assert.deepEqual(crossing.connections[0], {
+    from: crossing.leading.to, to: { x: crossing.points[0].x, y: crossing.points[0].y },
+  });
+  const after = buildTestChart(series, clock, { timeRange: timeRange(25000, 35000) });
+  assert.equal(after.initialState, null);
+  assert.equal(after.initialLabel, null);
+  assert.equal(after.leading, null);
+  assert.deepEqual(after.connections, [{
+    from: { x: after.plot.left, y: yFor(after, 0.3) },
+    to: { x: after.plot.left + after.plot.width, y: yFor(after, 0.3) },
+  }]);
+  const tail = buildTestChart(series, clock, { timeRange: timeRange(60000, 70000) });
+  assert.equal(tail.initialLabel, null);
+  assert.equal(tail.leading, null);
+  assert.deepEqual(tail.extension, {
+    from: { x: tail.plot.left, y: yFor(tail, 0.1) },
+    to: { x: tail.plot.left + tail.plot.width, y: yFor(tail, 0.1) },
+  });
+  for (const chart of [before, crossing, after, tail]) {
+    assert.equal(chart.domain.min, automatic.domain.min, "cropping time does not remove zero from the voltage scale");
+    assert.equal(chart.domain.max, automatic.domain.max);
+    assertBounded(chart);
+  }
+  assert.deepEqual(series, original);
+});
+
+test("feedback baseline follows retained evidence without bridging leading invalid or unknown events", () => {
+  const series = { name: "V-3501_FB", kind: "analog", unit: "V" };
+  for (const leading of [point(1000, null, { valid: false }), { value: 0.2 }]) {
+    const points = [leading, point(20000, 0.3), point(30000, 0.1)];
+    for (const options of [{}, { timeRange: timeRange(5000, 15000) }]) {
+      const chart = buildTestChart({ ...series, points }, clock, options);
+      assert.equal(chart.initialState, null);
+      assert.equal(chart.initialLabel, null);
+      assert.equal(chart.leading, null, "earlier unknown evidence cannot be replaced with a zero plateau");
+      assert.equal(chart.invalidCount, 1);
+    }
+  }
+  const excludedFirst = buildTestChart({ ...series, points: [
+    point(1000, 0.2, { excluded: true }), point(20000, 0.3),
+  ] }, clock);
+  assert.equal(excludedFirst.initialState, 0);
+  assert.equal(excludedFirst.initialLabel, "Initial value 0.0 V");
+  assert.equal(excludedFirst.observedCount, 1);
+  assert.equal(excludedFirst.excludedCount, 1);
+  assert.equal(excludedFirst.leading.to.x, excludedFirst.points[0].x);
+  const invalidRemains = buildTestChart({ ...series, points: [
+    point(1000, 0.2, { excluded: true }), point(5000, null, { valid: false }), point(20000, 0.3),
+  ] }, clock);
+  assert.equal(invalidRemains.initialLabel, null);
+  for (const points of [[], [point(1000, null, { valid: false })], [{ value: 0.3 }],
+    [point(1000, 0.3, { excluded: true })]]) {
+    const chart = buildTestChart({ ...series, points }, clock);
+    assert.equal(chart.initialState, null);
+    assert.equal(chart.initialLabel, null);
+    assert.equal(chart.leading, null);
+    assert.deepEqual(chart.connections, []);
+  }
+});
+
+test("zero-voltage feedback baselines preserve negative readings and do not change other measurement kinds", () => {
+  const voltage = buildTestChart({ name: "V-3501_FB", kind: "analog", unit: "V",
+    points: [point(1000, -0.1), point(2000, 0.3)] }, clock);
+  assert.ok(voltage.domain.min < -0.1 && voltage.domain.max > 0.3);
+  assert.deepEqual(voltage.points.map(point => point.value), [-0.1, 0.3]);
+  assert.ok(voltage.connections[0].from.y < voltage.connections[0].to.y, "the first negative reading stays below the zero baseline");
+  const millivolts = buildTestChart({ name: "V-3501_FB", kind: "analog", unit: "mV",
+    points: [point(1000, 300), point(2000, 100)] }, clock);
+  assert.equal(millivolts.initialLabel, "Initial value 0.0 mV");
+  assert.equal(millivolts.unit, "mV");
+  assert.deepEqual(millivolts.points.map(point => point.value), [300, 100]);
+  for (const metadata of [
+    { name: "V-3501_FB", kind: "analog", unit: "mA" },
+    { name: "TH-3510_FB", kind: "analog", unit: "°C" },
+    { name: "V-3501_FB", kind: "analog", unit: "" },
+    { name: "V-3501-POS", kind: "analog", unit: "V" },
+  ]) {
+    const chart = buildTestChart({ ...metadata, points: [point(1000, 4), point(2000, 8)] }, clock);
+    assert.equal(chart.initialState, null);
+    assert.equal(chart.initialLabel, null);
+    assert.equal(chart.leading, null);
+  }
+  const digital = buildTestChart({ name: "V-3501_FB", kind: "digital", unit: "",
+    points: [point(1000, 0, { previousValue: 1 }), point(2000, 1)] }, clock, { showInitialState: true });
+  assert.equal(digital.initialState, 1, "recorded digital starting states retain their existing semantics");
+  assert.equal(digital.initialLabel, "Initial state 1");
 });
 
 test("invalid observations break connections and stop a trailing held value", () => {

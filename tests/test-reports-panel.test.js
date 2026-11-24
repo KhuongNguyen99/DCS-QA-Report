@@ -444,7 +444,7 @@ test("SVG graphs connect observations and draw a separate horizontal final-value
   assert.equal(series.points.length, 2);
 });
 
-test("SVG feedback graphs hold analog voltages until each recorded change while other analog traces remain linear", async t => {
+test("SVG feedback graphs start at 0.0 V and retain measured voltage steps without resetting later manual views", async t => {
   const run = savedRun();
   const [linear, feedback] = run.devices[0].channels.map(channel => channel.series[0]);
   const sample = linear.points[0];
@@ -454,7 +454,7 @@ test("SVG feedback graphs hold analog voltages until each recorded change while 
   ] });
   Object.assign(feedback, { name: "V-3501_fb", kind: "analog", unit: "V", points: [
     { ...sample, timeMs: startMs + 1000, value: 0.3, rawValue: "0.3 V" },
-    { ...sample, timeMs: startMs + 5000, value: 0, rawValue: "0 V", previousValue: 0.3, previousRawValue: "0.3 V" },
+    { ...sample, timeMs: startMs + 5000, value: 0.1, rawValue: "0.1 V", previousValue: 0.3, previousRawValue: "0.3 V" },
   ] });
   run.devices[0].channels[1].role = "Feedback";
   const before = structuredClone(run);
@@ -466,9 +466,26 @@ test("SVG feedback graphs hold analog voltages until each recorded change while 
   assert.equal(figure.querySelector("figcaption span").textContent, "V");
   assert.equal(dots.length, 2, "fractional voltage readings stay valid analog observations");
   assert.equal(figure.querySelector(".test-invalid-observation"), null);
-  assert.equal(figure.querySelector(".test-initial-state"), null, "feedback interpolation does not invent an initial state");
-  assert.equal(traces.length, 2);
-  const [hold, jump] = traces;
+  const initial = figure.querySelector(".test-initial-state");
+  assert.ok(initial, "the requested display baseline is drawn before the first measured value");
+  assert.match(initial.textContent, /Initial value 0\.0 V/);
+  assert.match(figure.querySelector("svg").getAttribute("aria-label"), /Initial value 0\.0 V/i);
+  const zeroY = Number(dots[0].getAttribute("cy"))
+    + (Number(dots[1].getAttribute("cy")) - Number(dots[0].getAttribute("cy"))) * (0 - 0.3) / (0.1 - 0.3);
+  assert.ok(Math.abs(Number(initial.getAttribute("y1")) - zeroY) < 0.001, "the baseline represents exactly 0.0 V");
+  assert.equal(initial.getAttribute("y1"), initial.getAttribute("y2"));
+  assert.ok(Number(initial.getAttribute("x1")) < Number(initial.getAttribute("x2")));
+  const gridY = Array.from(figure.querySelectorAll(".test-gridline"))
+    .filter(line => line.getAttribute("y1") === line.getAttribute("y2"))
+    .map(line => Number(line.getAttribute("y1")));
+  assert.ok(zeroY >= Math.min(...gridY) && zeroY <= Math.max(...gridY), "the zero baseline fits inside the plot even when every measured voltage is positive");
+  assert.equal(traces.length, 3);
+  const [firstJump, hold, jump] = traces;
+  assert.equal(initial.getAttribute("x2"), dots[0].getAttribute("cx"));
+  assert.equal(firstJump.getAttribute("x1"), dots[0].getAttribute("cx"));
+  assert.equal(firstJump.getAttribute("x2"), dots[0].getAttribute("cx"));
+  assert.equal(firstJump.getAttribute("y1"), initial.getAttribute("y2"));
+  assert.equal(firstJump.getAttribute("y2"), dots[0].getAttribute("cy"));
   assert.equal(hold.getAttribute("x1"), dots[0].getAttribute("cx"));
   assert.equal(hold.getAttribute("x2"), dots[1].getAttribute("cx"));
   assert.equal(hold.getAttribute("y1"), dots[0].getAttribute("cy"));
@@ -483,6 +500,14 @@ test("SVG feedback graphs hold analog voltages until each recorded change while 
   assert.equal(other.querySelectorAll(".test-trace").length, 1);
   assert.notEqual(diagonal.getAttribute("x1"), diagonal.getAttribute("x2"));
   assert.notEqual(diagonal.getAttribute("y1"), diagonal.getAttribute("y2"));
+  const firstVoltageY = dots[0].getAttribute("cy");
+  await applyRange(h, 2000, 4000);
+  assert.equal(figure.querySelector(".test-initial-state"), null, "a later manual window must not restart feedback at zero");
+  assert.doesNotMatch(figure.querySelector("svg").getAttribute("aria-label"), /Initial value/);
+  const clipped = figure.querySelectorAll(".test-trace");
+  assert.equal(clipped.length, 1);
+  assert.equal(clipped[0].getAttribute("y1"), firstVoltageY);
+  assert.equal(clipped[0].getAttribute("y2"), firstVoltageY, "the measured 0.3 V value is held across this later window");
   assert.deepEqual(run, before, "rendering steps leaves the saved measurements and timestamps unchanged");
 });
 

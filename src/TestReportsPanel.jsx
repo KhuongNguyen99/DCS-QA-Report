@@ -140,7 +140,7 @@ export function TestSeriesChart({ series, clock, timeRange = null, onExclusionCh
       <figcaption><strong>{series.name}</strong><span>{chart.unit}</span></figcaption>
       <div className="test-chart-scroll">
         <svg viewBox={`0 0 ${chart.width} ${chart.height}`} role="img"
-          aria-label={`${series.name}: ${chart.observedCount} recorded values, ${describeTime(graphClock)}${chart.initialState === null ? "" : `, initial state ${chart.initialState}`}`}
+          aria-label={`${series.name}: ${chart.observedCount} recorded values, ${describeTime(graphClock)}${chart.initialLabel ? `, ${chart.initialLabel}` : ""}`}
           data-time-start={chart.domain.startMs} data-time-end={chart.domain.endMs}>
           {chart.yTicks.map((tick, index) => <g key={`y-${index}`}>
             <line x1={plot.left} y1={tick.y} x2={plot.left + plot.width} y2={tick.y} className="test-gridline" />
@@ -155,7 +155,7 @@ export function TestSeriesChart({ series, clock, timeRange = null, onExclusionCh
             x1={segment.from.x} y1={segment.from.y} x2={segment.to.x} y2={segment.to.y} className="test-trace" />)}
           {chart.leading && <line x1={chart.leading.from.x} y1={chart.leading.from.y}
             x2={chart.leading.to.x} y2={chart.leading.to.y} className="test-held-value test-initial-state">
-            <title>Initial state {chart.initialState} before the first recorded change</title>
+            <title>{chart.initialLabel} before the first recorded change</title>
           </line>}
           {chart.extension && <line x1={chart.extension.from.x} y1={chart.extension.from.y}
             x2={chart.extension.to.x} y2={chart.extension.to.y} className="test-held-value">
@@ -170,7 +170,7 @@ export function TestSeriesChart({ series, clock, timeRange = null, onExclusionCh
             </path>)}
         </svg>
       </div>
-      <p>{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}{chart.excludedCount ? ` · ${chart.excludedCount} removed events` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : chart.interpolation === "step" ? "Steps hold each recorded value until the next reading" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "The time axis automatically fits this series."}{clock.basis === "absolute" && " Times are UTC."}</p>
+      <p>{chart.initialLabel && <>{chart.initialLabel}. </>}{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}{chart.excludedCount ? ` · ${chart.excludedCount} removed events` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : chart.interpolation === "step" ? "Steps hold each recorded value until the next reading" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "The time axis automatically fits this series."}{clock.basis === "absolute" && " Times are UTC."}</p>
       <details className="test-events"><summary>View recorded events ({retained.length})</summary>
         <TestEventTable entries={retained} seriesName={series.name} onExclusionChange={onExclusionChange} disabled={editsDisabled} />
       </details>

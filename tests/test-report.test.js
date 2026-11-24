@@ -703,7 +703,7 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
   });
 });
 
-test("PDF feedback traces use voltage-preserving steps while non-feedback analog traces stay linear", async () => {
+test("PDF feedback traces start at 0.0 V, keep measured steps, and do not reset later manual views", async () => {
   await withFonts(async () => {
     const state = closedState();
     const run = state.testRuns[0];
@@ -718,7 +718,7 @@ test("PDF feedback traces use voltage-preserving steps while non-feedback analog
       series: [{ id: `${id}-series`, name, kind: "analog", unit, points: points(values) }],
     });
     run.devices = [{ id: "feedback-example", name: "Valve example", status: "Passed", channels: [
-      channel("feedback", "V-3501_FB", "V", [0.3, 0, 0.15]),
+      channel("feedback", "V-3501_FB", "V", [0.3, 0.1, 0.15]),
       channel("position", "V-3501-POS", "mA", [4, 20, 12]),
     ] }];
     run.unassignedChannels = [];
@@ -729,27 +729,45 @@ test("PDF feedback traces use voltage-preserving steps while non-feedback analog
     const tails = feedback.traces.filter(line => line.dash.length > 0);
     const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.01, `${actual} differs from ${expected}`);
     const same = (a, b) => { near(a.x, b.x); near(a.y, b.y); };
-    assert.equal(solid.length, 4, "three fractional voltage observations create two horizontal/vertical steps");
-    for (let index = 0; index < solid.length; index += 2) {
-      const [hold, jump] = solid.slice(index, index + 2);
+    assert.equal(solid.length, 5, "the first measured voltage follows the initial zero transition and two recorded steps");
+    assert.equal(tails.length, 2, "the initial zero and final held value are separate dashed segments");
+    const [initial, tail] = tails;
+    const [firstJump, ...steps] = solid;
+    assert.deepEqual(initial.dash, [4, 3]);
+    near(initial.from.x, feedback.left);
+    near(initial.from.y, initial.to.y);
+    same(initial.to, firstJump.from);
+    near(firstJump.from.x, firstJump.to.x);
+    same(firstJump.to, steps[0].from);
+    const firstVoltageY = firstJump.to.y;
+    const secondVoltageY = steps[1].to.y;
+    near(initial.from.y, firstVoltageY + (secondVoltageY - firstVoltageY) * (0 - 0.3) / (0.1 - 0.3));
+    assert.match(result.pages[feedback.page], /Initial value 0\.0 V/);
+    for (let index = 0; index < steps.length; index += 2) {
+      const [hold, jump] = steps.slice(index, index + 2);
       assert.ok(hold.to.x > hold.from.x);
       near(hold.from.y, hold.to.y);
       same(hold.to, jump.from);
       near(jump.from.x, jump.to.x);
       assert.notEqual(jump.from.y, jump.to.y);
-      if (index + 2 < solid.length) same(jump.to, solid[index + 2].from);
+      if (index + 2 < steps.length) same(jump.to, steps[index + 2].from);
     }
-    assert.equal(tails.length, 1, "analog feedback has a final held tail but no invented initial state");
-    assert.deepEqual(tails[0].dash, [4, 3]);
-    same(tails[0].from, solid.at(-1).to);
-    near(tails[0].from.y, tails[0].to.y);
-    near(tails[0].to.x, feedback.right);
-    assert.ok(solid[0].from.x > feedback.left, "the trace starts at its first recorded value");
+    assert.deepEqual(tail.dash, [4, 3]);
+    same(tail.from, solid.at(-1).to);
+    near(tail.from.y, tail.to.y);
+    near(tail.to.x, feedback.right);
     assert.ok(result.blocks[feedback.page].some(block => block.text === "V"), "the PDF keeps the original voltage unit");
     const position = readPlot(result, "V-3501-POS");
     const diagonals = position.traces.filter(line => line.dash.length === 0);
     assert.equal(diagonals.length, 2);
     assert.ok(diagonals.every(line => line.from.x !== line.to.x && line.from.y !== line.to.y));
+    const later = await pdfContent(await createTestReportPdf({ state,
+      timeRanges: { [run.id]: { "feedback-example": { startMs: startMs + 75_000, endMs: startMs + 125_000 } } },
+    }));
+    const laterFeedback = readPlot(later, "V-3501_FB");
+    assert.equal(laterFeedback.traces.length, 3);
+    assert.ok(laterFeedback.traces.every(line => line.dash.length === 0), "a later manual view does not add a new zero baseline");
+    assert.doesNotMatch(later.text, /Initial value 0\.0 V/);
     assert.deepEqual(state, before, "export cannot rewrite approved kinds, voltages, or timestamps");
   });
 });

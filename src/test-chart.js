@@ -117,7 +117,12 @@ export function buildTestChart(series, clock, {
   const signalName = String(series.name || "").replace(/\s+/g, "");
   // Feedback tags hold their measured value until the next recorded change.
   // This affects connections only; voltage/current values retain their own scale.
-  const interpolation = series.kind === "digital" || /_FB$/i.test(signalName) ? "step" : "linear";
+  const feedback = /_FB$/i.test(signalName);
+  const interpolation = series.kind === "digital" || feedback ? "step" : "linear";
+  // The requested zero-voltage start is display-only. A leading invalid or
+  // undated retained event leaves the earlier state unknown instead.
+  const feedbackInitialPoint = feedback && series.kind === "analog" && ["v", "mv"].includes(unit)
+    ? sequence[0] : null;
   const defaultRange = unit === "ma" && /(?:[-_]POS$|^(?:PD|DP)-)/i.test(signalName)
     ? [0, 25] : unit === "°c" ? [20, 30] : null;
   if (series.kind === "digital") {
@@ -128,6 +133,7 @@ export function buildTestChart(series, clock, {
       min = Math.min(min, point.value);
       max = Math.max(max, point.value);
     }
+    if (feedbackInitialPoint) { min = Math.min(min, 0); max = Math.max(max, 0); }
     const margin = min === max ? Math.max(Math.abs(min) * 0.05, 0.1) : (max - min) * 0.08;
     // Keep the standard frame unless a valid observation needs more room.
     if (!defaultRange || min < defaultRange[0]) min -= margin;
@@ -158,12 +164,21 @@ export function buildTestChart(series, clock, {
     const clipped = segment(from, to);
     if (clipped) connections.push(clipped);
   };
-  const first = showInitialState && series.kind === "digital" && series.points[0]?.excluded !== true ? sequence[0] : null;
-  const initialState = first && first.previousValid !== false && first.timeMs >= startMs
-    && (first.previousValue === 0 || first.previousValue === 1) ? first.previousValue : null;
+  const digitalInitialPoint = showInitialState && series.kind === "digital" && series.points[0]?.excluded !== true ? sequence[0] : null;
+  const first = feedbackInitialPoint || digitalInitialPoint;
+  let initialState = null;
+  if (first && first.timeMs >= startMs) {
+    if (feedbackInitialPoint) initialState = 0;
+    else if (first.previousValid !== false && (first.previousValue === 0 || first.previousValue === 1))
+      initialState = first.previousValue;
+  }
   const initialCoordinate = initialState === null ? null : { x: first.x, y: yFor(initialState) };
   const leading = initialCoordinate ? segment({ x: plot.left, y: initialCoordinate.y }, initialCoordinate) : null;
-  if (initialCoordinate) connect(initialCoordinate, coordinate(first));
+  const initialTransition = initialCoordinate ? segment(initialCoordinate, coordinate(first)) : null;
+  if (initialTransition) connections.push(initialTransition);
+  const initialLabel = leading || initialTransition
+    ? feedbackInitialPoint ? `Initial value 0.0 ${unit === "mv" ? "mV" : "V"}` : `Initial state ${initialState}`
+    : null;
   let previous = null;
   for (const point of sequence) {
     if (previous && point) {
@@ -198,7 +213,7 @@ export function buildTestChart(series, clock, {
       fullLabel: formatSourceTime(timeMs, true, milliseconds),
     })),
     yTicks: yValues.map((value) => ({ value, y: yFor(value), label: formatTestValue(value) })),
-    points, connections, extension, initialState, leading,
+    points, connections, extension, initialState, initialLabel, leading,
     invalidPoints: invalid.filter(point => point.x === null || visible(point)),
     observedCount: valid.length,
     visibleObservedCount: points.length,
