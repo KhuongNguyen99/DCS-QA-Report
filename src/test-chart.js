@@ -69,6 +69,53 @@ export function deviceChartTimeRange(device, clock) {
     : { startMs: Math.floor(startMs), endMs: Math.ceil(endMs) };
 }
 
+// Monotone cubic Hermite segments interpolate observations without overshooting
+// neighboring values. Only strictly increasing X coordinates belong to a span.
+function smoothSegments(points) {
+  if (points.length < 2) return [];
+  const widths = [], slopes = [];
+  for (let index = 1; index < points.length; index++) {
+    const width = points[index].x - points[index - 1].x;
+    widths.push(width);
+    slopes.push((points[index].y - points[index - 1].y) / width);
+  }
+  const tangents = [slopes[0]];
+  for (let index = 1; index < points.length - 1; index++) {
+    const before = slopes[index - 1], after = slopes[index];
+    const firstWeight = 2 * widths[index] + widths[index - 1];
+    const secondWeight = widths[index] + 2 * widths[index - 1];
+    tangents.push(before === 0 || after === 0 || Math.sign(before) !== Math.sign(after)
+      ? 0 : (firstWeight + secondWeight) / (firstWeight / before + secondWeight / after));
+  }
+  tangents.push(slopes.at(-1));
+  return points.slice(1).map((to, index) => {
+    const from = points[index], third = widths[index] / 3;
+    const boundedY = y => Math.min(Math.max(from.y, to.y), Math.max(Math.min(from.y, to.y), y));
+    return { from, control1: { x: from.x + third, y: boundedY(from.y + tangents[index] * third) },
+      control2: { x: to.x - third, y: boundedY(to.y - tangents[index + 1] * third) }, to };
+  });
+}
+
+function splitCurve(curve, t) {
+  const mix = (a, b) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+  const a = mix(curve.from, curve.control1), b = mix(curve.control1, curve.control2), c = mix(curve.control2, curve.to);
+  const d = mix(a, b), e = mix(b, c), middle = mix(d, e);
+  return [{ from: curve.from, control1: a, control2: d, to: middle },
+    { from: middle, control1: e, control2: c, to: curve.to }];
+}
+
+function clipCurve(curve, left, right) {
+  const width = curve.to.x - curve.from.x;
+  const start = Math.max(0, (left - curve.from.x) / width), end = Math.min(1, (right - curve.from.x) / width);
+  if (end <= start) return null;
+  // X control points are equally spaced, so the cubic's X coordinate is linear
+  // in t. De Casteljau preserves the exact curve when trimming either edge.
+  if (end < 1) curve = splitCurve(curve, end)[0];
+  if (start > 0) curve = splitCurve(curve, start / end)[1];
+  return Object.fromEntries(Object.entries(curve).map(([key, point]) => [key,
+    { x: Math.max(left, Math.min(right, point.x)), y: point.y }]));
+}
+
 /**
  * Geometry shared by the SVG preview and vector PDF chart. The run-wide clock
  * validates timestamps; a device range aligns its graphs unless a manual range
@@ -79,8 +126,9 @@ export function deviceChartTimeRange(device, clock) {
 export function buildTestChart(series, clock, {
   width = 700, height = 220,
   padding = { left: 62, right: 22, top: 20, bottom: 48 },
-  tickCount = 5, timeRange = null, deviceTimeRange = null, showInitialState = false,
+  tickCount = 5, timeRange = null, deviceTimeRange = null, showInitialState = false, style = "auto",
 } = {}) {
+  if (!["auto", "line", "step", "smooth"].includes(style)) throw new Error("Choose an automatic, line, step, or smooth graph style.");
   const manualTimeRange = timeRange !== null;
   if (manualTimeRange && !isTestTimeRange(timeRange, clock))
     throw new Error("Choose an increasing whole-millisecond time range within the test run.");
@@ -102,7 +150,7 @@ export function buildTestChart(series, clock, {
   const invalid = [];
   const sequence = [];
   let latestTime = -Infinity, excludedCount = 0;
-  for (const point of series.points) {
+  for (const [pointIndex, point] of series.points.entries()) {
     if (Number.isFinite(point.timeMs)) {
       if (point.timeMs < latestTime)
         throw new Error("Observations must be ordered by time before connecting the graph.");
@@ -110,11 +158,11 @@ export function buildTestChart(series, clock, {
     }
     if (point.excluded === true) { excludedCount += 1; continue; }
     if (!Number.isFinite(point.timeMs)) {
-      invalid.push({ ...point, x: null });
+      invalid.push({ ...point, pointIndex, x: null });
       sequence.push(null);
       continue;
     }
-    const candidate = { ...point, x: xFor(point.timeMs) };
+    const candidate = { ...point, pointIndex, x: xFor(point.timeMs) };
     if (point.valid === false || !Number.isFinite(point.value)
       || (series.kind === "digital" && point.value !== 0 && point.value !== 1)) {
       invalid.push(candidate);
@@ -131,7 +179,8 @@ export function buildTestChart(series, clock, {
   // Feedback tags hold their measured value until the next recorded change.
   // This affects connections only; voltage/current values retain their own scale.
   const feedback = /_FB$/i.test(signalName);
-  const interpolation = series.kind === "digital" || feedback ? "step" : "linear";
+  const interpolation = style === "auto" ? series.kind === "digital" || feedback ? "step" : "linear"
+    : style === "line" ? "linear" : style;
   // The requested zero-voltage start is display-only. A leading invalid or
   // undated retained event leaves the earlier state unknown instead.
   const feedbackInitialPoint = feedback && series.kind === "analog" && ["v", "mv"].includes(unit)
@@ -158,6 +207,7 @@ export function buildTestChart(series, clock, {
   const visible = point => !clipToRange || (point.timeMs >= startMs && point.timeMs <= endMs);
   const points = valid.filter(visible).map((point) => ({ ...point, y: yFor(point.value) }));
   const connections = [];
+  const curves = [];
   const coordinate = (point) => ({ x: point.x, y: yFor(point.value) });
   const segment = (from, to) => {
     if (clipToRange) {
@@ -192,9 +242,25 @@ export function buildTestChart(series, clock, {
   const initialLabel = leading || initialTransition
     ? feedbackInitialPoint ? `Initial value 0.0 ${unit === "mv" ? "mV" : "V"}` : `Initial state ${initialState}`
     : null;
-  let previous = null;
+  let previous = null, smoothSpan = [];
+  const finishSmoothSpan = () => {
+    for (let curve of smoothSegments(smoothSpan)) {
+      if (clipToRange) curve = clipCurve(curve, plot.left, plot.left + plot.width);
+      if (curve) curves.push(curve);
+    }
+    smoothSpan = [];
+  };
   for (const point of sequence) {
-    if (previous && point) {
+    if (interpolation === "smooth") {
+      if (!point) finishSmoothSpan();
+      else {
+        if (previous && point.x <= previous.x) {
+          finishSmoothSpan();
+          connect(coordinate(previous), coordinate(point));
+        }
+        smoothSpan.push(coordinate(point));
+      }
+    } else if (previous && point) {
       const from = coordinate(previous);
       const to = coordinate(point);
       if (interpolation === "step") {
@@ -206,6 +272,7 @@ export function buildTestChart(series, clock, {
     // An invalid observation breaks the trace, including a held final value.
     previous = point;
   }
+  if (interpolation === "smooth") finishSmoothSpan();
   const extension = previous && previous.timeMs < endMs
     ? segment(coordinate(previous), { x: plot.left + plot.width, y: yFor(previous.value) })
     : null;
@@ -226,7 +293,7 @@ export function buildTestChart(series, clock, {
       fullLabel: formatSourceTime(timeMs, true, milliseconds),
     })),
     yTicks: yValues.map((value) => ({ value, y: yFor(value), label: formatTestValue(value) })),
-    points, connections, extension, initialState, initialLabel, leading,
+    points, connections, curves, extension, initialState, initialLabel, leading,
     invalidPoints: invalid.filter(point => point.x === null || visible(point)),
     observedCount: valid.length,
     visibleObservedCount: points.length,

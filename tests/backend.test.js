@@ -181,6 +181,38 @@ test("functional test runs retain provenance and are saved or removed only in th
   await assert.rejects(denied.backend.deleteTestRun(id, 2), /Only the importing inspector/);
 });
 
+test("authored graph tools are validated and saved beside unchanged source evidence", async () => {
+  const h = fixture();
+  const graphTools = { version: 1, deviceNames: [{ deviceId: "valve", name: "V-3511-Y_FB" }], graphs: [{
+    deviceId: "valve", graphKey: "graph:v1:signal:0", name: "Feedback", style: "smooth", measurements: [{
+      id: "delay", name: "Feedback delay", unit: "s", start: { kind: "time", timeMs: 1000 },
+      end: { kind: "trigger", deviceId: "other-valve", graphKey: "graph:v1:other:0", operator: ">=", threshold: 0.3 },
+    }],
+  }] };
+  const run = { id: "66666666-6666-4666-8666-666666666666", schemaVersion: 1,
+    name: "Graph tool test", software: { name: "PRONETA Basic", version: "3.9" }, graphTools,
+    devices: [{ id: "valve", name: "Original source device", channels: [{ id: "channel-a", symbolicName: "Source signal",
+      series: [{ name: "Original signal", kind: "analog", points: [{ timeMs: 1000, value: 0.3, valid: true }] }] }] }] };
+  await h.backend.saveTestRun(run);
+  assert.deepEqual(h.calls.at(-1)[1].p_data.graphTools, graphTools);
+  assert.deepEqual(h.calls.at(-1)[1].p_data.devices, run.devices);
+  h.calls.length = 0;
+  const variants = [null, {}, { ...graphTools, version: 2 }];
+  for (const mutate of [
+    value => { value.graphs[0].style = "bezier"; },
+    value => { value.graphs[0].measurements[0].unit = ["s"]; },
+    value => { value.graphs[0].measurements[0].end.operator = "="; },
+    value => { value.graphs[0].measurements[0].end.threshold = Infinity; },
+    value => { value.graphs[0].measurements[0].end.threshold = "0.3"; },
+    value => { value.graphs[0].measurements[0].start.timeMs = NaN; },
+    value => { value.graphs[0].measurements[0].name = ""; },
+    value => { value.deviceNames[0].name = "Name\nwith a newline"; },
+    value => value.graphs.push(value.graphs[0]),
+  ]) { const invalid = structuredClone(graphTools); mutate(invalid); variants.push(invalid); }
+  for (const invalid of variants) await assert.rejects(h.backend.saveTestRun({ ...run, graphTools: invalid }), /graph names, styles, or duration calculations/i);
+  assert.deepEqual(h.calls, [], "invalid graph tools never reach the write RPC");
+});
+
 test("test run and device comments validate optional text without changing imported evidence", async () => {
   const h = fixture();
   const run = { id: "66666666-6666-4666-8666-666666666666", schemaVersion: 1, runVersion: 2,

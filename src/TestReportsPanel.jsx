@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import Icon from "./Icons.jsx";
 import { revisionNumber } from "./domain.js";
 import PhotoGallery from "./PhotoGallery.jsx";
@@ -13,6 +13,8 @@ import { testGraphOrderScope, normalizeGraphOrder, orderDeviceGraphs,
   readDeviceGraphOrder, saveDeviceGraphOrder, resetDeviceGraphOrder } from "./test-graph-order.js";
 import { createTestEventEdit, setTestEventEdit, applyTestEventEdits } from "./test-event-edits.js";
 import { UNKNOWN_TIME_ZONE, getLocalTimeZone, getTimeZoneOptions } from "./test-timezones.js";
+import GraphToolsPanel, { DisplayNameEditor } from "./GraphToolsPanel.jsx";
+import { emptyGraphTools, assertGraphTools, getDeviceDisplayName, getGraphSettings, runGraphEntries, createPointEndpoint } from "./test-graph-tools.js";
 import "./test-reports.css";
 
 const statusClass = (status) => status === "Passed" ? "passed" : status === "Failed" ? "failed" : "untested";
@@ -113,7 +115,7 @@ function DeviceTimeAxis({ clock, timeRange, onChange, warning }) {
   </form>;
 }
 
-function DeviceGraphOrder({ entries, onChange, warning }) {
+function DeviceGraphOrder({ entries, onChange, warning, disabled = false }) {
   const [draggedKey, setDraggedKey] = useState(null);
   const [dropKey, setDropKey] = useState(null);
   const [announcement, setAnnouncement] = useState("");
@@ -121,7 +123,8 @@ function DeviceGraphOrder({ entries, onChange, warning }) {
   const buttons = useRef(new Map());
   const pendingFocus = useRef(null);
   const nameCounts = new Map();
-  for (const entry of entries) nameCounts.set(entry.series.name, (nameCounts.get(entry.series.name) || 0) + 1);
+  const graphName = entry => entry.displayName || entry.series.name;
+  for (const entry of entries) nameCounts.set(graphName(entry), (nameCounts.get(graphName(entry)) || 0) + 1);
   useEffect(() => {
     const pending = pendingFocus.current;
     if (!pending) return;
@@ -132,22 +135,23 @@ function DeviceGraphOrder({ entries, onChange, warning }) {
   }, [entries]);
   function move(key, targetIndex, direction = null) {
     const index = entries.findIndex(entry => entry.key === key);
-    if (index < 0 || index === targetIndex || targetIndex < 0 || targetIndex >= entries.length) return;
+    if (disabled || index < 0 || index === targetIndex || targetIndex < 0 || targetIndex >= entries.length) return;
     const next = entries.map(entry => entry.key);
     next.splice(targetIndex, 0, next.splice(index, 1)[0]);
     if (direction) pendingFocus.current = { key, direction };
     onChange(next);
-    setAnnouncement(`${entries[index].series.name} moved to position ${targetIndex + 1} of ${entries.length}.`);
+    setAnnouncement(`${graphName(entries[index])} moved to position ${targetIndex + 1} of ${entries.length}.`);
   }
   function finishDrag() { dragged.current = null; setDraggedKey(null); setDropKey(null); }
   return <details className="test-graph-order">
     <summary>Arrange graphs</summary>
     <p>Drag graphs or use the buttons. Your order saves in this browser and applies to this device’s PDF.</p>
     <ol aria-label="Graph order">{entries.map((entry, index) => {
-      const label = nameCounts.get(entry.series.name) > 1 ? `${entry.series.name} (graph ${index + 1} of ${entries.length})` : entry.series.name;
-      return <li key={entry.key} draggable
+      const label = nameCounts.get(graphName(entry)) > 1 ? `${graphName(entry)} (graph ${index + 1} of ${entries.length})` : graphName(entry);
+      return <li key={entry.key} draggable={!disabled}
       className={[draggedKey === entry.key && "is-dragging", dropKey === entry.key && "is-drop-target"].filter(Boolean).join(" ")}
       onDragStart={event => {
+        if (disabled) { event.preventDefault(); return; }
         dragged.current = entry.key; setDraggedKey(entry.key);
         if (event.dataTransfer) { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", entry.key); }
       }} onDragOver={event => {
@@ -160,18 +164,18 @@ function DeviceGraphOrder({ entries, onChange, warning }) {
         event.preventDefault(); move(dragged.current, index); finishDrag();
       }} onDragEnd={finishDrag}>
       <span className="test-graph-drag-handle" aria-hidden="true">⠿</span>
-      <div className="test-graph-order-label"><strong>{entry.series.name}</strong>
+      <div className="test-graph-order-label"><strong>{graphName(entry)}</strong>
         <span>{entry.series.unit || (entry.series.kind === "digital" ? "State" : "Recorded value")}</span>
         <small>{entry.channel.symbolicName || `Channel ${entry.channel.channel}`}</small>
       </div>
       <div className="test-graph-order-actions">{["up", "down"].map(direction => <button key={direction} type="button" className="small-button"
         ref={button => { const key = `${entry.key}:${direction}`; if (button) buttons.current.set(key, button); else buttons.current.delete(key); }}
-        disabled={direction === "up" ? index === 0 : index === entries.length - 1}
+        disabled={disabled || (direction === "up" ? index === 0 : index === entries.length - 1)}
         aria-label={`Move ${label} ${direction}`}
         onClick={() => move(entry.key, index + (direction === "up" ? -1 : 1), direction)}>Move {direction}</button>)}</div>
     </li>;
     })}</ol>
-    <button type="button" className="small-button" onClick={() => {
+    <button type="button" className="small-button" disabled={disabled} onClick={() => {
       onChange(null); setAnnouncement("Graph order reset to the original order.");
     }}>Reset graph order</button>
     <p className="test-graph-order-feedback" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>
@@ -212,9 +216,23 @@ function TestEventTable({ entries, seriesName = "recorded signal", onExclusionCh
   </table></div>;
 }
 
-export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRange = null, onExclusionChange, editsDisabled = false, showInitialState = false }) {
+export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRange = null, onExclusionChange, editsDisabled = false, showInitialState = false,
+  run, deviceId, graphKey, settings = {}, graphChoices = [], graphEditorScope, onGraphSettingsChange, onGraphEditorDirty }) {
+  const [picker, setPicker] = useState(null);
+  const [pickError, setPickError] = useState("");
+  const figure = useRef(null);
+  const cancelPicking = useCallback(() => { setPicker(null); setPickError(""); }, []);
+  const canPick = Boolean(picker && onGraphSettingsChange && !editsDisabled);
+  const displayName = settings.name || series.name;
+  useEffect(() => { if (picker) figure.current?.querySelector('.test-observation[role="button"]')?.focus(); }, [picker]);
+  useEffect(() => { if (!onGraphSettingsChange || editsDisabled) setPicker(null); }, [onGraphSettingsChange, editsDisabled]);
+  function pick(point) {
+    if (!canPick) return;
+    try { picker.choose(createPointEndpoint(run, deviceId, graphKey, point.pointIndex)); setPicker(null); setPickError(""); }
+    catch (failure) { setPickError(failure.message); }
+  }
   let chart;
-  try { chart = buildTestChart(series, clock, { timeRange, deviceTimeRange, showInitialState }); }
+  try { chart = buildTestChart(series, clock, { timeRange, deviceTimeRange, showInitialState, style: settings.style || "auto" }); }
   catch (e) { return <p className="field-error">{e.message}</p>; }
   const { plot } = chart;
   const entries = series.points.map((point, index) => ({ point, index }));
@@ -222,11 +240,18 @@ export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRan
   const removed = entries.filter(({ point }) => point.excluded === true);
   const graphClock = { ...clock, startMs: chart.domain.startMs, endMs: chart.domain.endMs };
   return (
-    <figure className="test-chart">
-      <figcaption><strong>{series.name}</strong><span>{chart.unit}</span></figcaption>
+    <figure className="test-chart" ref={figure} onKeyDown={event => { if (event.key === "Escape" && picker) { event.preventDefault(); setPicker(null); } }}>
+      <figcaption><div><strong>{displayName}</strong>{displayName !== series.name && <small>Source: {series.name}</small>}</div><span>{chart.unit}</span></figcaption>
+      {canPick && <div className="test-point-picker" role="status">
+        <strong>Picking {picker.field} point on {displayName}</strong>
+        <p>Choose a recorded dot with the pointer or keyboard. You can also choose Manual time in the calculation editor.</p>
+        {!chart.points.length && <p>No recorded points are visible. Reset the time range or enter a manual time.</p>}
+        <button type="button" className="small-button" onClick={() => setPicker(null)}>Cancel point picking</button>
+      </div>}
+      {pickError && <p className="field-error" role="alert">{pickError}</p>}
       <div className="test-chart-scroll">
-        <svg viewBox={`0 0 ${chart.width} ${chart.height}`} role="img"
-          aria-label={`${series.name}: ${chart.observedCount} recorded values, ${describeTime(graphClock)}${chart.initialLabel ? `, ${chart.initialLabel}` : ""}`}
+        <svg viewBox={`0 0 ${chart.width} ${chart.height}`} role={canPick ? "group" : "img"}
+          aria-label={`${displayName}: ${chart.observedCount} recorded values, ${describeTime(graphClock)}${chart.initialLabel ? `, ${chart.initialLabel}` : ""}`}
           data-time-start={chart.domain.startMs} data-time-end={chart.domain.endMs}>
           {chart.yTicks.map((tick, index) => <g key={`y-${index}`}>
             <line x1={plot.left} y1={tick.y} x2={plot.left + plot.width} y2={tick.y} className="test-gridline" />
@@ -239,6 +264,8 @@ export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRan
           </g>)}
           {chart.connections.map((segment, index) => <line key={`trace-${index}`}
             x1={segment.from.x} y1={segment.from.y} x2={segment.to.x} y2={segment.to.y} className="test-trace" />)}
+          {chart.curves.map((curve, index) => <path key={`curve-${index}`} className="test-trace test-smooth-trace"
+            d={`M ${curve.from.x} ${curve.from.y} C ${curve.control1.x} ${curve.control1.y} ${curve.control2.x} ${curve.control2.y} ${curve.to.x} ${curve.to.y}`} />)}
           {chart.leading && <line x1={chart.leading.from.x} y1={chart.leading.from.y}
             x2={chart.leading.to.x} y2={chart.leading.to.y} className="test-held-value test-initial-state">
             <title>{chart.initialLabel} before the first recorded change</title>
@@ -247,7 +274,13 @@ export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRan
             x2={chart.extension.to.x} y2={chart.extension.to.y} className="test-held-value">
             <title>Last recorded value held to the end of the graph</title>
           </line>}
-          {chart.points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={3} className="test-observation">
+          {chart.points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={canPick ? 7 : 3}
+            className={`test-observation${canPick ? " is-pickable" : ""}`} data-point-index={point.pointIndex}
+            role={canPick ? "button" : undefined} tabIndex={canPick ? 0 : undefined}
+            aria-label={canPick ? `Choose ${picker.field}: ${formatSourceTime(point.timeMs, true, true)}, ${formatTestValue(point.value)} ${chart.unit}, source row ${point.sourceRow ?? point.pointIndex + 1}` : undefined}
+            onClick={() => pick(point)} onKeyDown={event => {
+              if (canPick && ["Enter", " "].includes(event.key)) { event.preventDefault(); pick(point); }
+            }}>
             <title>{formatSourceTime(point.timeMs, true)}: {formatTestValue(point.value)} {series.unit} · source row {point.sourceRow}</title>
           </circle>)}
           {chart.invalidPoints.filter(point => point.x !== null).map((point, index) =>
@@ -256,7 +289,12 @@ export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRan
             </path>)}
         </svg>
       </div>
-      <p>{chart.initialLabel && <>{chart.initialLabel}. </>}{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}{chart.excludedCount ? ` · ${chart.excludedCount} removed events` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : chart.interpolation === "step" ? "Steps hold each recorded value until the next reading" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "All graphs for this device share the same automatic time axis."}{clock.basis === "absolute" && " Times are UTC."}</p>
+      <p>{chart.initialLabel && <>{chart.initialLabel}. </>}{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}{chart.excludedCount ? ` · ${chart.excludedCount} removed events` : ""}. {chart.interpolation === "step" ? series.kind === "digital" ? "Steps connect recorded states" : "Steps hold each recorded value until the next reading" : chart.interpolation === "smooth" ? "Smooth curves connect recorded readings" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "All graphs for this device share the same automatic time axis."}{clock.basis === "absolute" && " Times are UTC."}</p>
+      {run && graphKey && <GraphToolsPanel run={run} deviceId={deviceId} graphKey={graphKey} sourceName={series.name} settings={settings}
+        graphChoices={graphChoices} scope={graphEditorScope} canEdit={Boolean(onGraphSettingsChange)} disabled={editsDisabled}
+        editorKey={JSON.stringify([run.id, deviceId, graphKey])} onDirtyChange={onGraphEditorDirty} onChange={onGraphSettingsChange}
+        picking={canPick ? picker.field : null} onStartPick={(field, choose) => { setPicker({ field, choose }); setPickError(""); }}
+        onCancelPick={cancelPicking} />}
       <details className="test-events"><summary>View recorded events ({retained.length})</summary>
         <TestEventTable entries={retained} seriesName={series.name} onExclusionChange={onExclusionChange} disabled={editsDisabled} />
       </details>
@@ -286,14 +324,19 @@ function Parameters({ parameters = [], title = "Set parameters" }) {
 
 export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDisabled = false, editingComments = true,
   timeRangeScope = null, selectionScope = null, rangeOverrides = {}, onTimeRangeChange, onEventExclusionChange,
-  graphOrderScope = null, orderOverrides = {}, onGraphOrderChange }) {
+  graphOrderScope = null, orderOverrides = {}, onGraphOrderChange,
+  onGraphToolsChange, graphEditorDirty = false, onGraphEditorDirty, graphEditorScope }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(() => readTestSelection(selectionScope, runId));
   const [localRanges, setLocalRanges] = useState({});
   const [localOrders, setLocalOrders] = useState({});
   const devices = run.devices || [];
-  const shown = useMemo(() => devices.filter(device => `${device.name} ${device.status}`.toLowerCase().includes(search.toLowerCase())), [devices, search]);
+  const shown = useMemo(() => devices.filter(device => `${getDeviceDisplayName(device, run.graphTools)} ${device.name} ${device.status}`.toLowerCase().includes(search.toLowerCase())), [devices, run.graphTools, search]);
   const device = shown.find(item => item.id === selected) || shown[0];
+  const displayDeviceName = getDeviceDisplayName(device, run.graphTools);
+  const graphChoices = useMemo(() => runGraphEntries(run), [run]);
+  const availableGraphs = new Set(graphChoices.map(entry => JSON.stringify([entry.deviceId, entry.graphKey])));
+  const unmatchedTools = (run.graphTools?.graphs || []).filter(entry => !availableGraphs.has(JSON.stringify([entry.deviceId, entry.graphKey])));
   const viewKey = JSON.stringify([timeRangeScope, runId, device?.id, run.clock?.startMs, run.clock?.endMs]);
   const storedRange = useMemo(() => readDeviceTimeRange(timeRangeScope, runId, device?.id, run.clock),
     [timeRangeScope, runId, device?.id, run.clock?.startMs, run.clock?.endMs]);
@@ -309,7 +352,8 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
   const storedOrder = useMemo(() => readDeviceGraphOrder(graphOrderScope, runId, device), [graphOrderScope, runId, device]);
   const chosenOrder = localOrders[orderViewKey] || (Object.hasOwn(orderOverrides, device?.id)
     ? { order: orderOverrides[device?.id], error: "" } : storedOrder);
-  const orderedGraphs = useMemo(() => orderDeviceGraphs(device, chosenOrder.order), [device, chosenOrder.order]);
+  const orderedGraphs = useMemo(() => orderDeviceGraphs(device, chosenOrder.order).map(entry => ({ ...entry,
+    displayName: getGraphSettings(run.graphTools, device?.id, entry.key).name || entry.series.name })), [device, chosenOrder.order, run.graphTools]);
   const graphGroups = graphChannelGroups(device, orderedGraphs);
   function changeTimeRange(range) {
     const error = range ? saveDeviceTimeRange(timeRangeScope, runId, device.id, run.clock, range)
@@ -318,6 +362,7 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
     onTimeRangeChange?.(timeRangeScope, runId, device.id, range);
   }
   function changeGraphOrder(order) {
+    if (graphEditorDirty) return;
     const normalized = order === null ? null : normalizeGraphOrder(device, order);
     const error = normalized ? saveDeviceGraphOrder(graphOrderScope, runId, device, normalized)
       : resetDeviceGraphOrder(graphOrderScope, runId, device.id);
@@ -333,6 +378,12 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
       <div><span>Device results</span><strong>{counts.Passed || 0} passed · {counts.Failed || 0} failed · {counts["Not tested"] || 0} not tested</strong></div>
     </div>
     <p className="test-meaning">Passed/Failed comes from the recorded PRONETA wiring result. Graphs show logged signal changes in their original units.</p>
+    {unmatchedTools.length > 0 && <details className="test-unmatched-graph-tools" open>
+      <summary>{unmatchedTools.length} saved graph configuration{unmatchedTools.length === 1 ? " has" : "s have"} no matching graph</summary>
+      <p>These names, styles, and calculations are retained. Restore the matching source files to view them with their graph.</p>
+      <ul>{unmatchedTools.map(item => <li key={JSON.stringify([item.deviceId, item.graphKey])}>{item.name || "Previously configured graph"}
+        {item.measurements?.length ? ` · ${item.measurements.map(measurement => measurement.name).join(", ")}` : ""}</li>)}</ul>
+    </details>}
     <TestComment title="Overall test run comment" value={run.comment} disabled={commentsDisabled} editing={editingComments}
       onChange={onCommentChange && (value => onCommentChange(null, value))} />
     {run.warnings?.length > 0 && <details className="test-import-notes" open>
@@ -342,23 +393,31 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
     </details>}
     <div className="test-device-layout">
       <aside className="test-device-picker" aria-label="Tested devices">
-        <label className="test-search">Find a device<input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Device name or result…" /></label>
+        <label className="test-search">Find a device<input type="search" value={search} disabled={graphEditorDirty} onChange={event => setSearch(event.target.value)} placeholder="Device name or result…" /></label>
         <div className="test-device-list">{shown.map(item => <button type="button" key={item.id}
-          className={device?.id === item.id ? "selected" : ""} aria-pressed={device?.id === item.id} onClick={() => {
+          className={device?.id === item.id ? "selected" : ""} aria-pressed={device?.id === item.id} disabled={graphEditorDirty} onClick={() => {
             setSelected(item.id);
             rememberTestSelection(selectionScope, item.id, runId);
           }}>
-          <strong>{item.name}</strong><TestStatus status={item.status} />
+          <strong>{getDeviceDisplayName(item, run.graphTools)}</strong><TestStatus status={item.status} />
         </button>)}</div>
         {!shown.length && <p className="test-muted">No matching device.</p>}
       </aside>
       <section className="test-device-content" aria-label="Device test results">
         {device ? <>
-          <div className="test-device-heading"><h3>{device.name}</h3><TestStatus status={device.status} /></div>
+          <div className="test-device-heading"><div><h3>{displayDeviceName}</h3>{displayDeviceName !== device.name && <small>Source: {device.name}</small>}</div><TestStatus status={device.status} /></div>
+          <details className="test-device-name-tools"><summary>{onGraphToolsChange ? "Rename device" : "Device display name"}</summary>
+            <DisplayNameEditor kind="device" sourceName={device.name} value={run.graphTools?.deviceNames?.find(item => item.deviceId === device.id)?.name}
+              scope={graphEditorScope} canEdit={Boolean(onGraphToolsChange)} disabled={commentsDisabled}
+              editorKey={JSON.stringify([runId, device.id, "device-name"])} onDirtyChange={onGraphEditorDirty}
+              onApply={name => onGraphToolsChange(previous => ({ ...previous,
+                deviceNames: [...previous.deviceNames.filter(item => item.deviceId !== device.id), ...(name === null ? [] : [{ deviceId: device.id, name }])] }))} />
+            {!onGraphToolsChange && <p>{displayDeviceName}{displayDeviceName !== device.name ? ` · Source: ${device.name}` : ""}</p>}
+          </details>
           <DeviceTimeAxis key={sliderKey} clock={sliderClock} timeRange={chosenRange.range}
             onChange={changeTimeRange} warning={chosenRange.error} />
           {orderedGraphs.length > 1 && <DeviceGraphOrder key={orderViewKey} entries={orderedGraphs}
-            onChange={changeGraphOrder} warning={chosenOrder.error} />}
+            onChange={changeGraphOrder} warning={chosenOrder.error} disabled={graphEditorDirty} />}
           {graphGroups.map(group => {
             const { channel } = group;
             const station = run.stations?.find(item => item.id === channel.stationId);
@@ -373,6 +432,14 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
               {group.entries.map(({ key, series, seriesIndex }) =>
                 <TestSeriesChart key={key} series={series} clock={run.clock}
                   timeRange={chosenRange.range} deviceTimeRange={automaticRange}
+                  run={run} deviceId={device.id} graphKey={key} settings={getGraphSettings(run.graphTools, device.id, key)}
+                  graphChoices={graphChoices} graphEditorScope={graphEditorScope} onGraphEditorDirty={onGraphEditorDirty}
+                  onGraphSettingsChange={onGraphToolsChange && (settings => onGraphToolsChange(previous => {
+                    const next = { ...settings, deviceId: device.id, graphKey: key };
+                    const position = previous.graphs.findIndex(item => item.deviceId === device.id && item.graphKey === key);
+                    return { ...previous, graphs: position < 0 ? [...previous.graphs, next]
+                      : previous.graphs.map((item, index) => index === position ? next : item) };
+                  }))}
                   editsDisabled={commentsDisabled} showInitialState={isDigitalOutputChannel(channel)}
                   onExclusionChange={onEventExclusionChange && ((pointIndex, excluded) =>
                     onEventExclusionChange(device.id, channel.id, seriesIndex, pointIndex, excluded))} />)}
@@ -380,7 +447,7 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
               {module?.parameters?.length > 0 && <Parameters parameters={module.parameters} title="Shared module parameters" />}
             </section>;
           })}
-          <TestComment title="Device comment" label={`Device comment for ${device.name}`} value={device.comment} editing={editingComments}
+          <TestComment title="Device comment" label={`Device comment for ${displayDeviceName}`} value={device.comment} editing={editingComments}
             disabled={commentsDisabled} onChange={onCommentChange && (value => onCommentChange(device.id, value))} />
         </> : <p className="test-muted">No named device results to display.</p>}
       </section>
@@ -428,6 +495,7 @@ function ScopedTestReportsPanel({
     catch (failure) { eventReplayError = failure.message; }
     return { ...cached, walkdownId: project.walkdownId, recovered: true,
       timeZone: cached.timeZone?.trim() ? cached.timeZone : UNKNOWN_TIME_ZONE,
+      graphTools: cached.graphTools ?? run?.graphTools,
       eventEdits: cached.eventEdits || [], eventReplayError,
       reselectSources: cached.requiresFiles ? cached.sources : null,
       data };
@@ -445,6 +513,15 @@ function ScopedTestReportsPanel({
   const [error, setError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [setupDirty, setSetupDirty] = useState(false);
+  const [graphEditors, setGraphEditors] = useState({});
+  const graphEditorDirty = Object.keys(graphEditors).length > 0;
+  const changeGraphEditorDirty = useCallback((key, dirty) => {
+    setGraphEditors(previous => {
+      if (Boolean(previous[key]) === Boolean(dirty)) return previous;
+      if (dirty) return { ...previous, [key]: true };
+      const next = { ...previous }; delete next[key]; return next;
+    });
+  }, []);
   const busyRef = useRef(false);
   const parseRef = useRef(0);
   const access = useRef(null);
@@ -458,15 +535,15 @@ function ScopedTestReportsPanel({
   const canEdit = run => !readOnly && Boolean(inspector?.id && (inspector.isAdmin || inspector.id === run.createdBy));
   const confirmsRun = run => confirmDelete?.id === run.id && confirmDelete.revision === project.revision
     && confirmDelete.walkdownId === project.walkdownId && confirmDelete.runVersion === run.runVersion;
-  useEffect(() => { onDirtyChange?.(Boolean(draft) || setupDirty); }, [draft, setupDirty, onDirtyChange]);
+  useEffect(() => { onDirtyChange?.(Boolean(draft) || setupDirty || graphEditorDirty); }, [draft, setupDirty, graphEditorDirty, onDirtyChange]);
   useEffect(() => () => { ++parseRef.current; onDirtyChange?.(false); }, [onDirtyChange]);
   useEffect(() => { setConfirmDelete(null); }, [readOnly, project.revision, project.walkdownId, selectedRun?.id, selectedRun?.runVersion]);
   useEffect(() => {
-    if (!draft && !setupDirty) return;
+    if (!draft && !setupDirty && !graphEditorDirty) return;
     const preventDiscard = event => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", preventDiscard);
     return () => window.removeEventListener("beforeunload", preventDiscard);
-  }, [Boolean(draft), setupDirty]);
+  }, [Boolean(draft), setupDirty, graphEditorDirty]);
 
   function draftFrom(run) {
     const eventEdits = [];
@@ -483,6 +560,7 @@ function ScopedTestReportsPanel({
         ? (run.clock?.timeZone?.trim() ? run.clock.timeZone : UNKNOWN_TIME_ZONE)
         : getLocalTimeZone() || UNKNOWN_TIME_ZONE,
       comment: run?.comment || "",
+      graphTools: run?.graphTools === undefined ? undefined : structuredClone(run.graphTools),
       deviceComments: Object.fromEntries((run?.devices || []).map(device => [device.id, device.comment || ""])),
       deviceNames: Object.fromEntries((run?.devices || []).map(device => [device.id, device.name])),
       sources: (run?.sources || []).map(({ name, sha256 }) => ({ name, sha256 })),
@@ -507,7 +585,7 @@ function ScopedTestReportsPanel({
     setCacheError(warning || remaining.error);
   }
   function begin(run = null) {
-    if (readOnly || blocked || setupDirty || draft || (run && !canEdit(run))) return;
+    if (readOnly || blocked || setupDirty || graphEditorDirty || draft || (run && !canEdit(run))) return;
     setError(""); setFiles([]); setAssignments({}); setConfirmDelete(null);
     updateDraft(draftFrom(run));
   }
@@ -531,12 +609,22 @@ function ScopedTestReportsPanel({
       setConfirmDelete(null); setError("");
     } catch (failure) { setError(failure.message); }
   }
+  function changeGraphTools(update) {
+    if (readOnly || stale || blocked || setupDirty || busyRef.current || (!draft && (!selectedRun || !canEdit(selectedRun))))
+      throw new Error("Graph tools cannot be changed in this report right now. Your editor is retained.");
+    const next = draftRef.current || draftFrom(selectedRun);
+    const current = next.graphTools || emptyGraphTools();
+    const graphTools = assertGraphTools(update(current));
+    if (JSON.stringify(graphTools) === JSON.stringify(current)) return;
+    updateDraft({ ...next, graphTools: structuredClone(graphTools) });
+    setConfirmDelete(null); setError("");
+  }
   function discard() {
-    if (busyRef.current) return;
+    if (busyRef.current || graphEditorDirty) return;
     ++parseRef.current; finishDraft(); setError("");
   }
   async function parseFiles(incoming = files, stationAssignments = assignments) {
-    if (!draft || busyRef.current || readOnly || stale) return;
+    if (!draft || busyRef.current || readOnly || stale || graphEditorDirty) return;
     if (!incoming.length) { setError("Choose the CSV results, event logs, and parameter files for one test run."); return; }
     const run = ++parseRef.current;
     busyRef.current = true; setBusy("parse"); setError("");
@@ -561,6 +649,7 @@ function ScopedTestReportsPanel({
     }
   }
   async function chooseFiles(event) {
+    if (readOnly || stale || blocked || graphEditorDirty) return;
     const chosen = Array.from(event.target.files || []); event.target.value = "";
     if (!chosen.length) return;
     updateDraft(previous => previous && ({ ...previous, requiresFiles: true }));
@@ -568,7 +657,7 @@ function ScopedTestReportsPanel({
     await parseFiles(chosen, {});
   }
   async function save() {
-    if (!draft?.data || blocked || busyRef.current || readOnly || stale) return;
+    if (!draft?.data || blocked || busyRef.current || readOnly || stale || graphEditorDirty) return;
     if (!draft.name.trim() || !draft.software.name.trim() || !draft.software.version.trim()) {
       setError("Enter the test run name, software name, and software version before saving."); return;
     }
@@ -589,7 +678,7 @@ function ScopedTestReportsPanel({
     finally { busyRef.current = false; setBusy(""); }
   }
   async function remove(run) {
-    if (!canEdit(run) || blocked || setupDirty || busyRef.current || !confirmsRun(run)) return;
+    if (!canEdit(run) || blocked || setupDirty || graphEditorDirty || busyRef.current || !confirmsRun(run)) return;
     busyRef.current = true; setBusy("delete"); setError("");
     try { await onDelete(run, project.revision); setConfirmDelete(null); }
     catch (e) { setError(e.message); }
@@ -597,6 +686,7 @@ function ScopedTestReportsPanel({
   }
   const preview = draft ? (draft.data ? { ...draft.data, name: draft.name, software: draft.software,
     comment: draft.comment,
+    ...(draft.graphTools === undefined ? {} : { graphTools: draft.graphTools }),
     devices: draft.data.devices.map(device => ({ ...device,
       comment: Object.hasOwn(draft.deviceComments, device.id) ? draft.deviceComments[device.id] : device.comment ?? "" })),
     clock: { ...draft.data.clock, timeZone: draft.timeZone } } : null) : selectedRun;
@@ -604,16 +694,18 @@ function ScopedTestReportsPanel({
   const rangeScope = testTimeRangeScope(storageScope, inspector?.id, draft?.walkdownId || project.walkdownId, draft?.revision || project.revision);
   const orderScope = testGraphOrderScope(storageScope, inspector?.id, draft?.walkdownId || project.walkdownId, draft?.revision || project.revision);
   const previewRunId = preview?.id || draft?.id;
+  const graphEditorScope = JSON.stringify([project.walkdownId, draft?.revision || project.revision, previewRunId, draft?.runVersion ?? preview?.runVersion ?? null]);
   return <section className="test-reports" aria-label="I/O test reports">
     <div className="card test-intro">
       <div><span className="eyebrow">SOFTWARE TEST EVIDENCE</span><h2>I/O test reports</h2>
         <p>Import all PRONETA CSV results, event logs, and .mpr parameter files from one run together.</p></div>
-      {!readOnly && !draft && <button className="button primary" type="button" onClick={() => begin()} disabled={blocked || setupDirty}><Icon name="upload" />Import test run</button>}
+      {!readOnly && !draft && <button className="button primary" type="button" onClick={() => begin()} disabled={blocked || setupDirty || graphEditorDirty}><Icon name="upload" />Import test run</button>}
       <button type="button" className="button secondary" onClick={onReview}>Revision {revisionNumber(project)} · {project.status === "closed" ? "Approved & closed" : "Review & approve"}</button>
     </div>
     {exportProgress && <p className="test-export-progress" role="status"><span className="spinner" />{exportProgress}</p>}
     {error && <p className="message error" role="alert">{error}</p>}
     {cacheError && <p className="message error" role="alert">{cacheError}</p>}
+    {graphEditorDirty && <p className="test-graph-editor-notice" role="status">Apply or cancel the open graph name or calculation editor before saving or switching devices. Keep this tab open until the editor is applied; applied changes are saved with Save test run.</p>}
     {draft && <section className="card test-import-form" aria-label="Import test run">
       <h3>{draft.runVersion ? "Edit test run" : "Import a test run"}</h3>
       {draft.recovered && <p role="status">Recovered pending {draft.eventEdits?.length ? "comments and event edits" : "comments"} for {draft.name || "this test run"}, revision {revisionNumber(project, draft.revision)}. They remain unsaved until Save test run.</p>}
@@ -622,7 +714,7 @@ function ScopedTestReportsPanel({
         ? "Save Checked by to resume this test run. Your pending changes are retained and will be available after the name is saved."
         : "This revision or test run was closed or changed. Your local preview is retained for review and copying. Discard this draft and reopen the current run before saving."}</p>}
       {draft.recovered && draft.requiresFiles && !draft.data && <p role="status">Reselect the original source files to restore this import before saving: {draft.sources.map(source => source.name).join(", ") || "the files for this test run"}.</p>}
-      <fieldset disabled={blocked || readOnly || stale}>
+      <fieldset disabled={blocked || readOnly || stale || graphEditorDirty}>
         <div className="test-metadata-grid">
           <label>Test run name<input value={draft.name} maxLength={160} onChange={event => updateDraft(previous => ({ ...previous, name: event.target.value }))} /></label>
           <label>Software name<input value={draft.software.name} maxLength={120} onChange={event => updateDraft(previous => ({ ...previous, software: { ...previous.software, name: event.target.value } }))} /></label>
@@ -651,8 +743,8 @@ function ScopedTestReportsPanel({
         </div>}
       </fieldset>
       <div className="test-import-actions">
-        <button type="button" className="button secondary" disabled={Boolean(busy)} onClick={discard}>Discard changes</button>
-        <button type="button" className="button primary" disabled={!draft.data || blocked || readOnly || stale} onClick={save}>
+        <button type="button" className="button secondary" disabled={Boolean(busy) || graphEditorDirty} onClick={discard}>Discard changes</button>
+        <button type="button" className="button primary" disabled={!draft.data || blocked || readOnly || stale || graphEditorDirty} onClick={save}>
           {busy === "parse" ? "Reading files…" : busy === "save" ? "Saving…" : "Save test run"}
         </button>
         <small>Save the reviewed import, then add setup photos before approving the skid revision.</small>
@@ -666,16 +758,16 @@ function ScopedTestReportsPanel({
         onChange={canComment ? value => changeComment(id, value) : undefined} />)}
     </section>}
     {!draft && runs.length > 0 && <div className="test-run-toolbar">
-      <label>Saved test run<select disabled={blocked || setupDirty} value={selectedRun?.id || ""} onChange={event => {
+      <label>Saved test run<select disabled={blocked || setupDirty || graphEditorDirty} value={selectedRun?.id || ""} onChange={event => {
         setSelectedId(event.target.value); rememberTestSelection(cacheScope, event.target.value); setConfirmDelete(null);
       }}>{runs.map(run => <option key={run.id} value={run.id}>{run.name}</option>)}</select></label>
       <div className="test-run-actions">
         {selectedRun && canEdit(selectedRun) && <>
-          <button type="button" className="small-button" disabled={blocked || setupDirty} onClick={() => begin(selectedRun)}>Edit run</button>
+          <button type="button" className="small-button" disabled={blocked || setupDirty || graphEditorDirty} onClick={() => begin(selectedRun)}>Edit run</button>
           {confirmsRun(selectedRun) ? <>
             <span>Remove from this draft?</span><button className="small-button" type="button" disabled={blocked} onClick={() => setConfirmDelete(null)}>Cancel</button>
-            <button className="small-button test-remove" type="button" disabled={blocked || setupDirty} onClick={() => remove(selectedRun)}>Confirm removal</button>
-          </> : <button type="button" className="small-button test-remove" disabled={blocked || setupDirty} onClick={() => setConfirmDelete({ id: selectedRun.id, runVersion: selectedRun.runVersion, revision: project.revision, walkdownId: project.walkdownId })}>Remove run</button>}
+            <button className="small-button test-remove" type="button" disabled={blocked || setupDirty || graphEditorDirty} onClick={() => remove(selectedRun)}>Confirm removal</button>
+          </> : <button type="button" className="small-button test-remove" disabled={blocked || setupDirty || graphEditorDirty} onClick={() => setConfirmDelete({ id: selectedRun.id, runVersion: selectedRun.runVersion, revision: project.revision, walkdownId: project.walkdownId })}>Remove run</button>}
         </>}
         <button type="button" className="button primary" disabled={blocked || project.status !== "closed"} onClick={() => onExport(selectedRun?.id)}><Icon name="download" />{exportProgress ? "Exporting…" : "Export test PDF"}</button>
       </div>
@@ -687,6 +779,8 @@ function ScopedTestReportsPanel({
     {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${revisionNumber(project)}`}</span></header>
       <TestRunDetail key={preview.id || draft?.id} run={preview} onCommentChange={canComment ? changeComment : undefined}
         onEventExclusionChange={canComment ? changeEventExclusion : undefined}
+        onGraphToolsChange={canComment ? changeGraphTools : undefined} graphEditorDirty={graphEditorDirty}
+        graphEditorScope={graphEditorScope} onGraphEditorDirty={changeGraphEditorDirty}
         commentsDisabled={blocked || setupDirty} editingComments={Boolean(draft)} runId={previewRunId} timeRangeScope={rangeScope} selectionScope={cacheScope}
         rangeOverrides={timeRangeChanges[rangeScope]?.[previewRunId]} onTimeRangeChange={onTimeRangeChange}
         graphOrderScope={orderScope} orderOverrides={graphOrderChanges[orderScope]?.[previewRunId]} onGraphOrderChange={onGraphOrderChange} /></section>}

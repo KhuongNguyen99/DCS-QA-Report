@@ -675,6 +675,97 @@ function graphOrderRun() {
     })) }] };
 }
 
+function labeledField(document, label, root = document) {
+  const element = [...root.querySelectorAll("label")].find(item => item.textContent.trim() === label
+    || item.firstChild?.textContent?.trim() === label);
+  return element?.control || element?.querySelector("input,select,textarea") || document.getElementById(element?.htmlFor);
+}
+
+async function selectField(h, label, value, root = h.document) {
+  const element = labeledField(h.document, label, root);
+  assert.ok(element, `${label} exists`);
+  await h.window.act(async () => {
+    element.value = value;
+    element.dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  });
+}
+
+test("App keeps a new calculation editor through navigation and blocks approval before it is applied or canceled", async t => {
+  const h = await setup(t);
+  h.server.state.testRuns = [graphOrderRun()];
+  await h.notify(); await h.nav("Test reports");
+  const figure = h.document.querySelector(".test-chart");
+  await h.click(figure.querySelector(".test-graph-tools-editor summary"));
+  await h.click(h.button("Add duration calculation", figure));
+  await h.fill(labeledField(h.document, "Calculation name", figure), "Retain this editor");
+  assert.equal(h.document.querySelector("#skid-report").disabled, true);
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, true);
+  await h.nav("Test reports");
+  assert.equal(labeledField(h.document, "Calculation name", figure).value, "Retain this editor");
+  await h.click(h.button("Cancel calculation", figure));
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, false);
+  assert.deepEqual(h.server.calls, [], "an unapplied formula never sends a write");
+});
+
+test("App saves graph aliases, smooth rendering and mixed-source duration calculations in the approved report", async t => {
+  const h = await setup(t), run = graphOrderRun();
+  const originalDevices = copy(run.devices);
+  const feedbackKey = deviceGraphEntries(run.devices[0])[1].key;
+  h.server.state.testRuns = [run];
+  await h.notify(); await h.nav("Test reports");
+  await h.click(h.document.querySelector(".test-device-name-tools summary"));
+  await h.fill(labeledField(h.document, "Device display name"), "V-3511-Y");
+  await h.click(h.button("Apply device name"));
+  let figure = h.document.querySelector(".test-chart");
+  await h.click(figure.querySelector(".test-graph-tools-editor summary"));
+  await h.fill(labeledField(h.document, "Graph display name", figure), "V-3511-Y_FB");
+  await h.click(h.button("Apply graph name", figure));
+  await selectField(h, "Graph style", "smooth", figure);
+  assert.ok(figure.querySelector(".test-smooth-trace"), "the selected type changes the rendered trace");
+  await h.click(h.button("Add duration calculation", figure));
+  await h.fill(labeledField(h.document, "Calculation name", figure), "Feedback response");
+  await selectField(h, "Duration unit", "min", figure);
+  await selectField(h, "Start time source", "trigger", figure);
+  await selectField(h, "Start threshold graph", JSON.stringify(["valve", feedbackKey]), figure);
+  await selectField(h, "Start comparison", ">=", figure);
+  await h.fill(labeledField(h.document, "Start threshold", figure), "0.3");
+  await h.click(h.button("Pick end point", figure));
+  const point = figure.querySelector('circle[data-point-index="2"][role="button"]');
+  assert.ok(point, "only an original plotted observation is selectable");
+  await h.window.act(async () => point.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+  assert.match(figure.querySelector(".test-duration-result").textContent, /0\.5 minutes/);
+  await h.click(h.button("Add calculation", figure));
+  await h.click(h.button("Save test run"));
+  const saved = h.server.state.testRuns[0];
+  assert.deepEqual(saved.devices.map(({ comment, ...source }) => source), originalDevices, "names and drawing styles leave source evidence intact");
+  assert.equal(saved.graphTools.deviceNames[0].name, "V-3511-Y");
+  assert.equal(saved.graphTools.graphs[0].name, "V-3511-Y_FB");
+  assert.equal(saved.graphTools.graphs[0].style, "smooth");
+  const calculation = saved.graphTools.graphs[0].measurements[0];
+  assert.equal(calculation.start.kind, "trigger");
+  assert.equal(calculation.start.graphKey, feedbackKey);
+  assert.equal(calculation.end.kind, "point");
+  assert.equal(calculation.end.pointIndex, 2);
+  assert.equal(calculation.unit, "min");
+  await h.nav("Report");
+  await h.click(h.button("Approve & close")); await h.click(h.button("Confirm approval & close"));
+  await h.nav("Test reports");
+  assert.equal(h.button("Add duration calculation"), undefined);
+  assert.equal(labeledField(h.document, "Graph display name"), null);
+  await h.click(h.button("Export test PDF"));
+  assert.deepEqual(copy(h.window.testPdfExports.at(-1).state.testRuns[0].graphTools), saved.graphTools);
+  await h.nav("Report"); await h.click(h.button("New revision")); await checkReport(h);
+  await h.nav("Test reports");
+  if (!h.document.querySelector(".test-device-name-tools").open)
+    await h.click(h.document.querySelector(".test-device-name-tools summary"));
+  await h.fill(labeledField(h.document, "Device display name"), "Next revision name");
+  await h.click(h.button("Apply device name")); await h.click(h.button("Save test run"));
+  assert.equal(h.server.state.testRuns[0].graphTools.deviceNames[0].name, "Next revision name");
+  assert.equal(h.server.archives.get(7).testRuns[0].graphTools.deviceNames[0].name, "V-3511-Y");
+});
+
 async function chooseTestSetupPhotos(h, ...names) {
   const input = h.document.querySelector('.test-setup-bulk-dialog input[aria-label="Choose test setup photos"]');
   assert.ok(input, "the real test setup upload dialog is open");

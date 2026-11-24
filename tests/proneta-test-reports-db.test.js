@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
+import { deviceGraphEntries } from "../src/test-graph-order.js";
 
 const sql = (name) => readFile(new URL(`../supabase/${name}`, import.meta.url), "utf8");
 const schema = await sql("schema.sql");
@@ -76,6 +77,92 @@ async function setupPhoto(h, walkdownId, runId, revision, userId = admin) {
   const photo = await h.rpc("qa_add_test_setup_photo", walkdownId, runId, id, revision);
   return { id, path, photo };
 }
+
+function authoredGraphTools(data = runData()) {
+  const deviceId = data.devices[0].id;
+  const graphKey = deviceGraphEntries(data.devices[0])[0].key;
+  const point = data.devices[0].channels[0].series[0].points[1];
+  return { version: 1, deviceNames: [{ deviceId, name: "Checked valve" }], graphs: [{
+    deviceId, graphKey, name: "V-3511-Y_FB", style: "step", measurements: [{
+      id: "response-time", name: "Feedback response", unit: "s",
+      start: { kind: "trigger", deviceId, graphKey, operator: "<=", threshold: 0 },
+      end: { kind: "point", deviceId, graphKey, pointIndex: 1, timeMs: point.timeMs,
+        value: point.value, sourceId: point.sourceId, sourceRow: point.sourceRow },
+    }, { id: "manual-time", name: "Manual interval", unit: "min",
+      start: { kind: "time", timeMs: data.clock.startMs }, end: { kind: "time", timeMs: data.clock.endMs } }],
+  }] };
+}
+
+test("graph names, drawing styles and named calculations save with the run and freeze in approved snapshots", async t => {
+  const h = await database(t), report = await h.rpc("qa_create_walkdown", "Graph tool report");
+  await h.rpc("qa_set_checked_by", report.id, "Graph checker", 1, null);
+  const data = runData(), evidence = structuredClone(data.devices);
+  data.graphTools = authoredGraphTools(data);
+  const id = crypto.randomUUID();
+  const saved = await h.rpc("qa_save_test_run", report.id, id, data, 1, null);
+  assert.deepEqual(saved.graphTools, data.graphTools);
+  assert.deepEqual(saved.devices, evidence, "display edits do not rename or replace imported evidence");
+  const current = await h.state(report.id);
+  await h.rpc("qa_approve_revision", report.id, 1, current.project.contentVersion);
+  const archived = await h.rpc("qa_load_revision", report.id, 1);
+  await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Next checker", 2, null);
+  const changed = structuredClone(data);
+  changed.graphTools.deviceNames[0].name = "New display name";
+  changed.graphTools.graphs[0].style = "smooth";
+  changed.graphTools.graphs[0].measurements[0].unit = "h";
+  changed.graphTools.graphs[0].measurements[0].start.graphKey = "graph:v1:unavailable:0";
+  const next = await h.rpc("qa_save_test_run", report.id, id, changed, 2, saved.runVersion);
+  assert.deepEqual(next.graphTools, changed.graphTools, "unavailable graph references remain available for an explicit unresolved result");
+  assert.deepEqual(next.devices, evidence);
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, archived.testRuns);
+  await h.db.exec("reset role");
+  await h.db.exec(qcMigration);
+  await h.db.exec(migration);
+  await h.db.exec(setupMigration);
+  await h.db.exec(schema);
+  await h.user();
+  assert.deepEqual((await h.state(report.id)).testRuns[0].graphTools, changed.graphTools);
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, archived.testRuns);
+  await assert.rejects(h.db.query("select qa_private.validate_graph_tools($1::jsonb)", [JSON.stringify(data.graphTools)]), /permission denied/);
+});
+
+test("graph tools reject malformed formulas, duplicate references and unsupported fields before changing a run", async t => {
+  const h = await database(t), report = await h.rpc("qa_create_walkdown", "Graph validation");
+  await h.rpc("qa_set_checked_by", report.id, "Graph checker", 1, null);
+  const base = runData(), tools = authoredGraphTools(base), id = crypto.randomUUID();
+  const saved = await h.rpc("qa_save_test_run", report.id, id, base, 1, null);
+  const before = await h.state(report.id);
+  const variants = [null, [], {}, { ...tools, version: 2 }, { ...tools, unexpected: true }];
+  const mutate = operation => { const value = structuredClone(tools); operation(value); variants.push(value); };
+  mutate(value => { value.deviceNames[0].name = " "; });
+  mutate(value => { value.deviceNames[0].name = "\u00a0Name\u00a0"; });
+  mutate(value => { value.deviceNames[0].name = "Name\u0085break"; });
+  mutate(value => { value.deviceNames[0].name = "x".repeat(161); });
+  mutate(value => value.deviceNames.push(value.deviceNames[0]));
+  mutate(value => { value.deviceNames = Array.from({ length: 251 }, (_, index) => ({ deviceId: `d${index}`, name: "Alias" })); });
+  mutate(value => value.graphs.push(value.graphs[0]));
+  mutate(value => { value.graphs[0].style = "spline"; });
+  mutate(value => { value.graphs[0].unexpected = true; });
+  mutate(value => { value.graphs[0].measurements = null; });
+  mutate(value => value.graphs[0].measurements.push(value.graphs[0].measurements[0]));
+  mutate(value => { value.graphs[0].measurements[0].unit = "days"; });
+  mutate(value => { value.graphs[0].measurements[0].name = "Bad\nname"; });
+  mutate(value => { value.graphs[0].measurements[0].start.operator = "=="; });
+  mutate(value => { value.graphs[0].measurements[0].start.threshold = "0"; });
+  mutate(value => { value.graphs[0].measurements[0].start.deviceId = ""; });
+  mutate(value => { value.graphs[0].measurements[0].start.unexpected = true; });
+  mutate(value => { value.graphs[0].measurements[0].end.pointIndex = 10000; });
+  mutate(value => { value.graphs[0].measurements[0].end.pointIndex = 0.5; });
+  mutate(value => { value.graphs[0].measurements[0].end.timeMs = 8640000000000001; });
+  mutate(value => { value.graphs[0].measurements[0].end.value = null; });
+  mutate(value => { value.graphs[0].measurements[0].end.sourceRow = 0; });
+  mutate(value => { value.graphs[0].measurements[1].start.timeMs = 0.5; });
+  mutate(value => { value.graphs[0].measurements[1].end = { kind: "other", timeMs: base.clock.endMs }; });
+  for (const graphTools of variants)
+    await assert.rejects(h.rpc("qa_save_test_run", report.id, id, { ...base, graphTools }, 1, saved.runVersion), /graph|calculation/i);
+  assert.deepEqual(await h.state(report.id), before, "invalid settings cannot alter source data, versions, or approval review tokens");
+});
 
 test("functional test data, comments and setup photos all require the current draft's manual checker", async t => {
   const h = await database(t), report = await h.rpc("qa_create_walkdown", "Unchecked functional test");

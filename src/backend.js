@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { assertGraphTools } from "./test-graph-tools.js";
 
 const BUCKET = "qa-evidence";
 const MAX_PHOTO_BYTES = 12 * 1024 * 1024;
@@ -91,6 +92,7 @@ function testRunPayload(run) {
   if (!run || typeof run !== "object" || Array.isArray(run))
     throw new Error("Import the test files before saving a run.");
   const { id, walkdownId, runVersion, createdAt, createdBy, updatedAt, updatedBy, deletedAt, deletedBy, setupPhotos, ...data } = run;
+  if (Object.hasOwn(data, "graphTools")) assertGraphTools(data.graphTools);
   if (data.schemaVersion !== 1 || typeof data.name !== "string" || !data.name.trim() || data.name.length > 160)
     throw new Error("Enter a test run name between 1 and 160 characters.");
   if (typeof data.software?.name !== "string" || !data.software.name.trim() || data.software.name.length > 120

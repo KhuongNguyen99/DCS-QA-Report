@@ -2,8 +2,9 @@ import { jsPDF } from "jspdf";
 import { revisionNumber } from "./domain.js";
 import { normalizePronetaStatus } from "./proneta-parser.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText, reportSignatories } from "./report.js";
-import { buildTestChart, deviceChartTimeRange, formatSourceTime, isTestTimeRange, isDigitalOutputChannel } from "./test-chart.js";
+import { buildTestChart, deviceChartTimeRange, formatSourceTime, formatTestValue, isTestTimeRange, isDigitalOutputChannel } from "./test-chart.js";
 import { isGraphOrder, orderDeviceGraphs } from "./test-graph-order.js";
+import { assertGraphTools, getDeviceDisplayName, runGraphEntries, resolveGraphMeasurement } from "./test-graph-tools.js";
 import { testCommentBlocks } from "./test-comment-format.js";
 import { summarizeTestSettings } from "./test-settings-summary.js";
 
@@ -322,16 +323,18 @@ function reportWriter(doc, y) {
     }
     y += 12;
   }
-  function prepareChart({ series, description, location, showInitialState }, clock, timeRange, deviceTimeRange, width, title) {
+  function prepareChart({ series, name, style, description, location, showInitialState }, clock, timeRange, deviceTimeRange, width, title) {
     const compact = width < WIDTH;
     const geometry = buildTestChart(series, clock, {
       width, height: compact ? 91 : 201,
       padding: compact ? { left: 49, right: 24, top: 8, bottom: 31 } : { left: 57, right: 25, top: 20, bottom: 45 },
       tickCount: width < 250 ? 3 : compact ? 4 : 5,
-      timeRange, deviceTimeRange, showInitialState,
+      timeRange, deviceTimeRange, showInitialState, style,
     });
     const initial = geometry.initialLabel ? ` | ${geometry.initialLabel}` : "";
-    const legend = `Figure ${++figureNumber}. ${description}.${compact ? "\n" : " "}${location}${initial}`;
+    const source = name !== (series.name || "Recorded signal") ? ` | Source graph: ${series.name || "Recorded signal"}` : "";
+    const displayStyle = style !== "auto" ? ` | Style: ${style}` : "";
+    const legend = `Figure ${++figureNumber}. ${description}.${compact ? "\n" : " "}${location}${source}${displayStyle}${initial}`;
     const titleStyle = { size: 10, bold: true, gap: 3, lineHeight: 14.5 };
     const legendStyle = { size: 8, color: COLOR.muted, gap: 10, lineHeight: 11 };
     const heightFor = (value, style) => {
@@ -353,7 +356,7 @@ function reportWriter(doc, y) {
     for (let start = 0; start < charts.length; start += columns) {
       const row = charts.slice(start, start + columns)
         .map(chart => {
-          const name = chart.series.name;
+          const name = chart.name;
           const title = charts.length > 1 || name !== sectionTitle ? name : "";
           return prepareChart(chart, clock, timeRange, deviceTimeRange, width, title);
         });
@@ -369,7 +372,7 @@ function reportWriter(doc, y) {
     }
   }
   function drawChart(doc, geometry, left, originY, compact) {
-    const { plot, points, invalidPoints, xTicks, yTicks, connections, extension, leading } = geometry;
+    const { plot, points, invalidPoints, xTicks, yTicks, connections, curves = [], extension, leading } = geometry;
     const unit = printableText(geometry.unit).replace(/^deg([CF])$/, "\u00b0$1");
     textStyle(doc, compact ? 7.5 : 8.5, true, COLOR.muted);
     const axisCenter = originY + plot.top + plot.height / 2;
@@ -392,6 +395,12 @@ function reportWriter(doc, y) {
     doc.setLineDashPattern([], 0);
     for (const { from, to } of connections) {
       doc.line(left + from.x, originY + from.y, left + to.x, originY + to.y);
+    }
+    for (const { from, control1, control2, to } of curves) {
+      doc.moveTo(left + from.x, originY + from.y);
+      doc.curveTo(left + control1.x, originY + control1.y,
+        left + control2.x, originY + control2.y, left + to.x, originY + to.y);
+      doc.stroke();
     }
     doc.setLineDashPattern([4, 3], 0);
     for (const { from, to } of [leading, extension].filter(Boolean)) {
@@ -489,8 +498,8 @@ function figureDescription(series, channel, deviceName) {
   return channel.role ? `${measurement} for the ${channel.role.toLowerCase()}` : measurement;
 }
 
-function channelChart(series, channel, run, deviceName) {
-  return { series, description: figureDescription(series, channel, deviceName),
+function channelChart(series, channel, run, deviceName, { name = series.name || "Recorded signal", style = "auto", measurements = [] } = {}) {
+  return { series, name, style, measurements, description: figureDescription(series, channel, deviceName),
     location: `${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}`,
     showInitialState: isDigitalOutputChannel(channel) };
 }
@@ -521,12 +530,14 @@ function channelDetails(writer, channel, run, { heading = true, deferCharts = fa
   }
 }
 
-function seriesAudit(writer, series, run) {
+function seriesAudit(writer, series, run, name = series.name || "Recorded values") {
   const invalid = series.points.filter((point) => point.excluded !== true && (point.valid === false || !Number.isFinite(point.value) || !Number.isFinite(point.timeMs)
     || (series.kind === "digital" && point.value !== 0 && point.value !== 1)
     || (point.previousRawValue !== undefined && point.previousRawValue !== "" && point.previousValue === null)));
   if (invalid.length) {
-    writer.heading(`Invalid or unplottable values - ${series.name || "Recorded values"}`, 10);
+    writer.heading(`Invalid or unplottable values - ${name}`, 10);
+    if (name !== (series.name || "Recorded values"))
+      writer.paragraph(`Source graph: ${series.name || "Recorded values"}`, { size: 8, color: COLOR.muted });
     writer.table([
       { label: "Source time", width: 142 },
       { label: "Before / after (original tokens)", width: 220 },
@@ -539,6 +550,35 @@ function seriesAudit(writer, series, run) {
   }
 }
 
+function graphMeasurements(writer, charts, run) {
+  const endpointText = (endpoint, definition) => {
+    if (!endpoint) return "Not resolved";
+    const details = [Number.isFinite(endpoint.timeMs) ? formatSourceTime(endpoint.timeMs, true, true) : "Not resolved",
+      endpoint.detail];
+    if (!Number.isFinite(endpoint.timeMs) && ["time", "point"].includes(definition.kind))
+      details.push(`Selected source time: ${formatSourceTime(definition.timeMs, true, true)}`);
+    if (endpoint.sourceGraphName && endpoint.graphName !== endpoint.sourceGraphName)
+      details.push(`Source graph: ${endpoint.sourceGraphName}`);
+    if (endpoint.sourceDeviceName && endpoint.deviceName !== endpoint.sourceDeviceName)
+      details.push(`Source device: ${endpoint.sourceDeviceName}`);
+    if (endpoint.sourceId) details.push(`Source: ${sourceLabel(run, endpoint)}`);
+    if (endpoint.status !== "resolved" && endpoint.reason) details.push(endpoint.reason);
+    return details.filter(Boolean).join("\n");
+  };
+  for (const { name, measurements, calculationNote } of charts) {
+    if (!measurements.length) continue;
+    writer.table([
+      { label: "Calculation", width: 150 }, { label: "Duration", width: 87 },
+      { label: "Start", width: 234 }, { label: "End", width: WIDTH - 471 },
+    ], measurements.map(({ measurement, result }) => [
+      measurement.name,
+      result.status === "resolved" ? `${formatTestValue(result.value)} ${result.unit}`
+        : `${result.unavailable ? "Unavailable" : result.status === "invalid" ? "Invalid" : "Not resolved"}\n${result.reason}`,
+      endpointText(result.start, measurement.start), endpointText(result.end, measurement.end),
+    ]), { caption: `Duration calculations - ${name} | ${clockLabel(run.clock)}${calculationNote ? `\n${calculationNote}` : ""}`, compact: true });
+  }
+}
+
 function runSummary(writer, run) {
   writer.page(run.name || "Test run");
   reportComment(writer, "Overall test run comment", run.comment);
@@ -548,7 +588,8 @@ function runSummary(writer, run) {
     { label: "Channels", width: 80 },
     { label: "Test Result", width: 180 },
   ], run.devices.map((device) => [
-    device.name,
+    getDeviceDisplayName(device, run.graphTools) === device.name ? device.name
+      : `${getDeviceDisplayName(device, run.graphTools)}\nSource device: ${device.name}`,
     [...new Set(device.channels.map((channel) => channel.slot).filter(Number.isInteger))]
       .sort((a, b) => a - b).join(", ") || "Unspecified",
     device.channels.length, resultLabel(device.status),
@@ -605,6 +646,7 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
   const deviceRanges = new Map();
   const sourceDevices = new Map();
   const deviceGraphs = new Map();
+  const preservedMeasurements = new Map();
   for (const run of runs) {
     if (run.walkdownId && run.walkdownId !== project.walkdownId)
       throw new Error("The test report contains data from another skid.");
@@ -613,6 +655,17 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       throw new Error("The saved test run is missing its software name or version.");
     if (!Array.isArray(run.devices) || run.devices.some((device) => !device.name || !Array.isArray(device.channels)))
       throw new Error("The saved test run has incomplete device data.");
+    if (run.graphTools !== undefined) assertGraphTools(run.graphTools);
+    // References and duration triggers use the complete approved run, regardless
+    // of display filtering, graph order, drawing style, or the visible X range.
+    const sourceRun = { ...run };
+    const sourceEntries = runGraphEntries(sourceRun);
+    const graphSettings = new Map();
+    for (const entry of sourceEntries) {
+      if (!graphSettings.has(entry.device)) graphSettings.set(entry.device, new Map());
+      graphSettings.get(entry.device).set(entry.graphKey, entry);
+    }
+    const renderedGraphs = new Set();
     run.devices = run.devices.flatMap(device => {
       if (isNotApplicable(device.name) || isNotApplicable(device.status)) return [];
       const channels = device.channels.filter(applicableChannel);
@@ -640,8 +693,20 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
         throw new Error(`The graph order for "${device.name}" is invalid. Choose a list of graph identifiers.`);
       // Resolve keys against the original snapshot before removing N/A channels.
       // Filtering cannot shift legacy or repeated graph identities.
-      deviceGraphs.set(device, orderDeviceGraphs(sourceDevices.get(device), graphOrder)
-        .filter(({ channel }) => applicableChannel(channel)));
+      const sourceDevice = sourceDevices.get(device);
+      const charts = orderDeviceGraphs(sourceDevice, graphOrder)
+        .filter(({ channel }) => applicableChannel(channel))
+        .map(({ key, series, channel }) => {
+          const entry = graphSettings.get(sourceDevice).get(key);
+          renderedGraphs.add(JSON.stringify([entry.deviceId, entry.graphKey]));
+          return channelChart(series, channel, run, sourceDevice.name, {
+            name: entry.name, style: entry.settings.style || "auto",
+            measurements: (entry.settings.measurements || []).map(measurement => ({
+              measurement, result: resolveGraphMeasurement(sourceRun, measurement),
+            })),
+          });
+        });
+      deviceGraphs.set(device, charts);
       for (const channel of device.channels)
         for (const series of channel.series || [])
           if (series.points?.length) buildTestChart(series, run.clock, { timeRange, deviceTimeRange });
@@ -649,6 +714,29 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
     for (const channel of run.unassignedChannels || [])
       for (const series of channel.series || [])
         if (series.points?.length) buildTestChart(series, run.clock);
+    // Authored calculations survive applicability filtering and later source
+    // replacement even when their owning graph no longer has a chart page.
+    preservedMeasurements.set(run, (run.graphTools?.graphs || [])
+      .filter(settings => settings.measurements?.length && !renderedGraphs.has(JSON.stringify([settings.deviceId, settings.graphKey])))
+      .map(settings => {
+        const matches = sourceEntries.filter(entry => entry.deviceId === settings.deviceId && entry.graphKey === settings.graphKey);
+        const entry = matches.length === 1 ? matches[0] : null;
+        const sourceDevice = sourceRun.devices.find(device => device.id === settings.deviceId);
+        const deviceName = getDeviceDisplayName(sourceDevice || { id: settings.deviceId, name: "Unavailable device" }, run.graphTools);
+        const name = settings.name || entry?.name || "Unavailable graph";
+        const sourceTags = entry ? [entry.name !== entry.series.name && entry.series.name ? `Source graph: ${entry.series.name}` : "",
+          entry.deviceName !== entry.device.name ? `Source device: ${entry.device.name}` : ""].filter(Boolean).join(" | ") : "";
+        return {
+          name: `${deviceName} / ${name}`,
+          calculationNote: entry ? `Source graph omitted by report applicability settings.${sourceTags ? ` ${sourceTags}` : ""}`
+            : "The original graph is unavailable. Saved calculation definitions are retained.",
+          measurements: settings.measurements.map(measurement => {
+            const result = resolveGraphMeasurement(sourceRun, measurement);
+            return { measurement, result: entry ? result : { ...result, status: "unresolved", unavailable: true,
+              durationMs: null, value: null, reason: "The graph this calculation belongs to is no longer available in this test run." } };
+          }),
+        };
+      }));
   }
   if (runs.some((run) => run.setupPhotos?.length)) {
     if (typeof backend?.getPhotoUrl !== "function")
@@ -711,7 +799,10 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
     runSummary(writer, run);
     await runSetup(writer, doc, run, backend, onProgress);
     for (const device of run.devices) {
-      writer.page(device.name);
+      const deviceName = getDeviceDisplayName(device, run.graphTools);
+      writer.page(deviceName);
+      if (deviceName !== device.name)
+        writer.paragraph(`Source device: ${device.name}`, { size: 9, color: COLOR.muted });
       if (device.channels.length > 1) {
         const result = resultLabel(device.status);
         writer.paragraph(`Device Test Result: ${result}`, { bold: true, color: resultColor(result) });
@@ -720,11 +811,16 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,
         deferCharts: true, deviceName: device.name,
       });
-      const charts = deviceGraphs.get(device).map(({ series, channel }) => channelChart(series, channel, run, device.name));
+      const charts = deviceGraphs.get(device);
       const { timeRange, deviceTimeRange } = deviceRanges.get(device);
       writer.chartGrid(charts, run.clock, timeRange, deviceTimeRange);
+      graphMeasurements(writer, charts, run);
       reportComment(writer, "Device comment", device.comment);
-      for (const { series } of charts) seriesAudit(writer, series, run);
+      for (const { series, name } of charts) seriesAudit(writer, series, run, name);
+    }
+    if (preservedMeasurements.get(run).length) {
+      writer.page(`${run.name || "Test run"} - Preserved duration calculations`);
+      graphMeasurements(writer, preservedMeasurements.get(run), run);
     }
     runAppendices(writer, run);
   }

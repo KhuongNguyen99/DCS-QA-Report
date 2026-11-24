@@ -1204,6 +1204,147 @@ returns jsonb language sql stable security definer set search_path = '' as $$
   from public.qa_test_runs where walkdown_id = p_walkdown_id and deleted_at is null;
 $$;
 
+-- Authored graph tools are separate from the imported device/signal evidence.
+-- References may become unavailable after replacing files; retain them so the
+-- app and PDF can explain the unresolved calculation instead of guessing.
+create or replace function qa_private.graph_tool_text(p_value jsonb)
+returns boolean language sql immutable set search_path = '' as $$
+  select jsonb_typeof(p_value) = 'string' and length(p_value #>> '{}') between 1 and 160
+    and (p_value #>> '{}') = btrim(p_value #>> '{}', ' ' || chr(160) || chr(5760)
+      || chr(8192) || chr(8193) || chr(8194) || chr(8195) || chr(8196) || chr(8197)
+      || chr(8198) || chr(8199) || chr(8200) || chr(8201) || chr(8202) || chr(8232)
+      || chr(8233) || chr(8239) || chr(8287) || chr(12288) || chr(65279))
+    and (p_value #>> '{}') !~ ('[[:cntrl:]' || chr(127) || '-' || chr(159) || ']');
+$$;
+
+create or replace function qa_private.validate_graph_endpoint(p_endpoint jsonb)
+returns void language plpgsql immutable set search_path = '' as $$
+declare kind text; number numeric;
+begin
+  if jsonb_typeof(p_endpoint) is distinct from 'object' then
+    raise exception 'A graph calculation endpoint must be a point, time, or trigger.';
+  end if;
+  kind := p_endpoint->>'kind';
+  if kind = 'time' then
+    if p_endpoint - array['kind','timeMs'] <> '{}'::jsonb then
+      raise exception 'A manual graph calculation endpoint has unsupported fields.';
+    end if;
+  elsif kind = 'point' then
+    if p_endpoint - array['kind','deviceId','graphKey','pointIndex','timeMs','value','sourceId','sourceRow'] <> '{}'::jsonb
+      or jsonb_typeof(p_endpoint->'pointIndex') is distinct from 'number'
+      or jsonb_typeof(p_endpoint->'value') is distinct from 'number' then
+      raise exception 'A picked graph calculation point is invalid.';
+    end if;
+    number := (p_endpoint->>'pointIndex')::numeric;
+    if number < 0 or number > 9999 or number <> trunc(number)
+      or abs((p_endpoint->>'value')::numeric) > 1.7976931348623157e308 then
+      raise exception 'A picked graph calculation point is outside the supported range.';
+    end if;
+    if p_endpoint ? 'sourceId' and qa_private.graph_tool_text(p_endpoint->'sourceId') is not true then
+      raise exception 'A graph calculation source identifier is invalid.';
+    end if;
+    if p_endpoint ? 'sourceRow' then
+      if jsonb_typeof(p_endpoint->'sourceRow') is distinct from 'number' then
+        raise exception 'A graph calculation source row is invalid.';
+      end if;
+      number := (p_endpoint->>'sourceRow')::numeric;
+      if number < 1 or number > 9007199254740991 or number <> trunc(number) then
+        raise exception 'A graph calculation source row is invalid.';
+      end if;
+    end if;
+  elsif kind = 'trigger' then
+    if p_endpoint - array['kind','deviceId','graphKey','operator','threshold'] <> '{}'::jsonb
+      or coalesce(p_endpoint->>'operator','') not in ('>','>=','<','<=')
+      or jsonb_typeof(p_endpoint->'threshold') is distinct from 'number' then
+      raise exception 'A graph calculation trigger needs a comparison and numeric threshold.';
+    end if;
+    if abs((p_endpoint->>'threshold')::numeric) > 1.7976931348623157e308 then
+      raise exception 'A graph calculation trigger exceeds the supported numeric range.';
+    end if;
+  else
+    raise exception 'A graph calculation endpoint must be a point, time, or trigger.';
+  end if;
+  if kind in ('point','trigger') and (qa_private.graph_tool_text(p_endpoint->'deviceId') is not true
+    or qa_private.graph_tool_text(p_endpoint->'graphKey') is not true) then
+    raise exception 'A graph calculation must identify its source device and graph.';
+  end if;
+  if kind in ('point','time') then
+    if jsonb_typeof(p_endpoint->'timeMs') is distinct from 'number' then
+      raise exception 'A graph calculation time must be recorded in milliseconds.';
+    end if;
+    number := (p_endpoint->>'timeMs')::numeric;
+    if abs(number) > 8640000000000000 or number <> trunc(number) then
+      raise exception 'A graph calculation time is outside the supported range.';
+    end if;
+  end if;
+end;
+$$;
+
+create or replace function qa_private.validate_graph_tools(p_tools jsonb)
+returns void language plpgsql immutable set search_path = '' as $$
+declare device_alias jsonb; graph jsonb; calculation jsonb; calculation_count integer := 0;
+begin
+  if jsonb_typeof(p_tools) is distinct from 'object' then
+    raise exception 'Graph tools must contain versioned display names and graph settings.';
+  end if;
+  if p_tools - array['version','deviceNames','graphs'] <> '{}'::jsonb
+    or p_tools->'version' is distinct from '1'::jsonb
+    or jsonb_typeof(p_tools->'deviceNames') is distinct from 'array'
+    or jsonb_typeof(p_tools->'graphs') is distinct from 'array' then
+    raise exception 'Graph tools must contain versioned display names and graph settings.';
+  end if;
+  if jsonb_array_length(p_tools->'deviceNames') > 250 or jsonb_array_length(p_tools->'graphs') > 1000 then
+    raise exception 'Graph tools support at most 250 device names and 1,000 graph settings.';
+  end if;
+  for device_alias in select value from jsonb_array_elements(p_tools->'deviceNames') loop
+    if jsonb_typeof(device_alias) is distinct from 'object' then raise exception 'A graph tools device name is invalid.'; end if;
+    if device_alias - array['deviceId','name'] <> '{}'::jsonb
+      or qa_private.graph_tool_text(device_alias->'deviceId') is not true
+      or qa_private.graph_tool_text(device_alias->'name') is not true then
+      raise exception 'Graph tools names must be 1 to 160 characters without control characters.';
+    end if;
+  end loop;
+  if (select count(*) <> count(distinct value->>'deviceId') from jsonb_array_elements(p_tools->'deviceNames')) then
+    raise exception 'Graph tools device names must identify each device once.';
+  end if;
+  for graph in select value from jsonb_array_elements(p_tools->'graphs') loop
+    if jsonb_typeof(graph) is distinct from 'object' then raise exception 'A graph tools setting is invalid.'; end if;
+    if graph - array['deviceId','graphKey','name','style','measurements'] <> '{}'::jsonb
+      or qa_private.graph_tool_text(graph->'deviceId') is not true
+      or qa_private.graph_tool_text(graph->'graphKey') is not true
+      or (graph ? 'name' and qa_private.graph_tool_text(graph->'name') is not true)
+      or (graph ? 'style' and coalesce(graph->>'style','') not in ('auto','line','step','smooth')) then
+      raise exception 'Graph tools require valid references, names, and line, step, or smooth styles.';
+    end if;
+    if graph ? 'measurements' then
+      if jsonb_typeof(graph->'measurements') is distinct from 'array' then
+        raise exception 'Graph calculations must be a list.';
+      end if;
+      if jsonb_array_length(graph->'measurements') > 20 then raise exception 'Each graph supports at most 20 calculations.'; end if;
+      calculation_count := calculation_count + jsonb_array_length(graph->'measurements');
+      for calculation in select value from jsonb_array_elements(graph->'measurements') loop
+        if jsonb_typeof(calculation) is distinct from 'object' then raise exception 'A graph calculation is invalid.'; end if;
+        if calculation - array['id','name','unit','start','end'] <> '{}'::jsonb
+          or qa_private.graph_tool_text(calculation->'id') is not true
+          or qa_private.graph_tool_text(calculation->'name') is not true
+          or coalesce(calculation->>'unit','') not in ('s','min','h') then
+          raise exception 'Graph calculations need a name and seconds, minutes, or hours as the unit.';
+        end if;
+        perform qa_private.validate_graph_endpoint(calculation->'start');
+        perform qa_private.validate_graph_endpoint(calculation->'end');
+      end loop;
+      if (select count(*) <> count(distinct value->>'id') from jsonb_array_elements(graph->'measurements')) then
+        raise exception 'Graph calculation identifiers must be unique within each graph.';
+      end if;
+    end if;
+  end loop;
+  if calculation_count > 500 then raise exception 'A test run supports at most 500 graph calculations.'; end if;
+  if (select count(*) <> count(distinct (value->>'deviceId',value->>'graphKey')) from jsonb_array_elements(p_tools->'graphs')) then
+    raise exception 'Graph tools settings must identify each graph once.';
+  end if;
+end;
+$$;
+
 create or replace function qa_private.validate_test_run(p_data jsonb)
 returns void language plpgsql security definer set search_path = '' as $$
 declare item jsonb; station jsonb; module jsonb; device jsonb; channel jsonb; series jsonb; point jsonb;
@@ -1217,6 +1358,7 @@ begin
     raise exception 'Test run identity and audit metadata are managed by the server.';
   end if;
   if p_data->'schemaVersion' is distinct from '1'::jsonb then raise exception 'Unsupported test run format. Import the files again.'; end if;
+  if p_data ? 'graphTools' then perform qa_private.validate_graph_tools(p_data->'graphTools'); end if;
   if jsonb_typeof(p_data->'name') is distinct from 'string' or length(trim(p_data->>'name')) not between 1 and 160
     or (p_data->>'name') ~ '[[:cntrl:]]' then raise exception 'Enter a test run name between 1 and 160 characters.'; end if;
   if p_data ? 'comment' and (jsonb_typeof(p_data->'comment') is distinct from 'string' or length(p_data->>'comment') > 4000) then
@@ -1422,7 +1564,8 @@ revoke all on function public.qa_save_test_run(uuid,uuid,jsonb,bigint,bigint),
 grant execute on function public.qa_save_test_run(uuid,uuid,jsonb,bigint,bigint),
   public.qa_delete_test_run(uuid,uuid,bigint,bigint) to authenticated;
 revoke all on function qa_private.test_run_info(uuid), qa_private.test_runs_state(uuid),
-  qa_private.validate_test_run(jsonb) from public, anon, authenticated;
+  qa_private.validate_test_run(jsonb), qa_private.graph_tool_text(jsonb),
+  qa_private.validate_graph_endpoint(jsonb), qa_private.validate_graph_tools(jsonb) from public, anon, authenticated;
 notify pgrst, 'reload schema';
 
 -- Test setup photo layer; keep synchronized with test-setup-photos.sql.

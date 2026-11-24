@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import { inflateSync } from "node:zlib";
 import { createTestReportPdf } from "../src/test-report.js";
 import { deviceGraphEntries } from "../src/test-graph-order.js";
+import { buildTestChart, deviceChartTimeRange, formatSourceTime } from "../src/test-chart.js";
+import { createPointEndpoint, emptyGraphTools } from "../src/test-graph-tools.js";
 
 const fonts = {
   "NotoSans-Regular.ttf": await readFile(new URL("../public/assets/NotoSans-Regular.ttf", import.meta.url)),
@@ -180,6 +182,28 @@ function pdfLines(stream) {
   return result;
 }
 
+function pdfCurves(stream) {
+  let color = [], dash = [], cursor = null, path = [];
+  const result = [];
+  for (const line of stream.split(/\r?\n/)) {
+    const tokens = line.trim().split(/\s+/), operator = tokens.at(-1);
+    if (operator === "RG" && tokens.length === 4) color = tokens.slice(0, 3).map(Number);
+    else if (operator === "d") {
+      const pattern = line.match(/\[([^\]]*)\]/)?.[1].trim();
+      dash = pattern ? pattern.split(/\s+/).map(Number) : [];
+    } else if (["m", "l"].includes(operator) && tokens.length === 3) cursor = { x: Number(tokens[0]), y: Number(tokens[1]) };
+    else if (operator === "c" && tokens.length === 7 && cursor) {
+      const [x1, y1, x2, y2, x, y] = tokens.slice(0, 6).map(Number);
+      path.push({ from: cursor, control1: { x: x1, y: y1 }, control2: { x: x2, y: y2 }, to: { x, y } });
+      cursor = { x, y };
+    } else if (operator === "S") {
+      result.push(...path.map(curve => ({ ...curve, color: [...color], dash: [...dash] })));
+      path = []; cursor = null;
+    } else if (["f", "F", "f*", "n"].includes(operator)) { path = []; cursor = null; }
+  }
+  return result;
+}
+
 function readPlot(result, title) {
   const page = result.blocks.findIndex(blocks => blocks.some(block => block.text === title));
   assert.ok(page >= 0, `Missing graph ${title}`);
@@ -200,8 +224,10 @@ function readPlot(result, title) {
   const timeTicks = result.blocks[page].filter(block => /^\d{2}:\d{2}:\d{2}(?:\.\d{3})?$/.test(block.text)
     && Math.abs(block.y - (612 - bottom + 15)) < 0.01
     && block.x >= left - 30 && block.x <= right + 0.01).sort((a, b) => a.x - b.x).map(block => block.text);
-  return { page, left, right, width: right - left, height: top - bottom, timeTicks,
-    traces: lines.filter(line => hasColor(line, [24, 108, 161]) && inside(line.from) && inside(line.to)) };
+  return { page, left, right, top, bottom, width: right - left, height: top - bottom, timeTicks,
+    traces: lines.filter(line => hasColor(line, [24, 108, 161]) && inside(line.from) && inside(line.to)),
+    curves: pdfCurves(result.streams[page]).filter(curve => hasColor(curve, [24, 108, 161])
+      && [curve.from, curve.control1, curve.control2, curve.to].every(inside)) };
 }
 
 async function withFonts(callback) {
@@ -1399,4 +1425,251 @@ test("malformed event removal flags are rejected before assets load", async () =
     assert.equal(fetched, false);
     assert.equal(accessed, false);
   } finally { globalThis.fetch = original; }
+});
+
+test("PDF aliases retain source tags and line, step, and smooth styles use the shared clipped geometry", async () => {
+  await withFonts(async () => {
+    const state = closedState(), run = state.testRuns[0];
+    const styles = ["line", "step", "smooth"], names = ["Line view", "Step view", "Smooth view"];
+    const device = { id: "style-device", name: "V-3501", status: "Passed", channels: styles.map((style, index) => ({
+      id: `style-channel-${index}`, stationId: "station-1", slot: index + 1, sourceChannel: "Channel 1",
+      symbolicName: "V-3501_FB", role: "Analog input", status: "Passed", parameters: [],
+      series: [{ id: `style-series-${index}`, name: "V-3501_FB", kind: "analog", unit: "V", points:
+        [[10_000, 0.2], [20_000, 0.8], [25_000, 0.1], [30_000, 0.4], [40_000, 0.6], [50_000, null], [60_000, 0.7], [70_000, 0.9]]
+          .map(([offset, value], pointIndex) => ({ timeMs: startMs + offset, time: `Original event ${pointIndex}`,
+            value, rawValue: value === null ? "INVALID-FEEDBACK" : String(value), valid: value !== null,
+            sourceId: "source-log", sourceRow: pointIndex + 2, ...(pointIndex === 2 ? { excluded: true } : {}) })) }],
+    })) };
+    run.devices = [device]; run.unassignedChannels = [];
+    const entries = deviceGraphEntries(device);
+    run.graphTools = { version: 1, deviceNames: [{ deviceId: device.id, name: "Feedback valve" }],
+      graphs: entries.map(({ key }, index) => ({ deviceId: device.id, graphKey: key, name: names[index], style: styles[index] })) };
+    const original = structuredClone(state);
+    const full = await pdfContent(await createTestReportPdf({ state }));
+    assert.match(full.text, /Feedback valve/);
+    assert.match(full.text, /Source device: V-3501/);
+    assert.match(full.text.replace(/\s+/g, " "), /Source graph: V-3501_FB/);
+    assert.equal(full.text.match(/Initial value 0\.0 V/g)?.length, 3, "renaming and changing the display style do not change source feedback classification");
+    const range = { startMs: startMs + 15_000, endMs: startMs + 65_000 };
+    const result = await pdfContent(await createTestReportPdf({ state, timeRanges: { [run.id]: { [device.id]: range } } }));
+    const plots = names.map(name => readPlot(result, name));
+    const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.001, `${actual} differs from ${expected}`);
+    for (const [index, plot] of plots.entries()) {
+      const geometry = buildTestChart(entries[index].series, run.clock, {
+        width: plot.width + 49 + 24, height: 91, padding: { left: 49, right: 24, top: 8, bottom: 31 },
+        tickCount: 3, timeRange: range, deviceTimeRange: deviceChartTimeRange(device, run.clock), style: styles[index],
+      });
+      const expectedPoint = point => ({ x: plot.left - geometry.plot.left + point.x, y: plot.top + geometry.plot.top - point.y });
+      const solid = plot.traces.filter(line => !line.dash.length);
+      assert.equal(solid.length, geometry.connections.length, `${styles[index]} line segments are exported exactly`);
+      solid.forEach((line, segmentIndex) => {
+        for (const side of ["from", "to"]) {
+          const expected = expectedPoint(geometry.connections[segmentIndex][side]);
+          near(line[side].x, expected.x); near(line[side].y, expected.y);
+        }
+      });
+      assert.equal(plot.curves.length, geometry.curves.length, `${styles[index]} cubic curves are exported exactly`);
+      plot.curves.forEach((curve, curveIndex) => {
+        for (const side of ["from", "control1", "control2", "to"]) {
+          const expected = expectedPoint(geometry.curves[curveIndex][side]);
+          near(curve[side].x, expected.x); near(curve[side].y, expected.y);
+        }
+      });
+      assert.deepEqual(plot.timeTicks, plots[0].timeTicks);
+    }
+    assert.equal(plots[0].traces.filter(line => !line.dash.length).length, 4);
+    assert.equal(plots[1].traces.filter(line => !line.dash.length).length, 7);
+    assert.equal(plots[2].curves.length, 4, "smooth remains vector curves and respects the invalid-reading gap");
+    assert.ok(plots[0].traces.some(line => line.from.x !== line.to.x && line.from.y !== line.to.y));
+    assert.ok(plots[1].traces.every(line => line.from.x === line.to.x || line.from.y === line.to.y));
+    assert.doesNotMatch(result.text, /Initial value 0\.0 V/, "a later view does not invent another feedback start");
+    for (const name of names) assert.match(result.text, new RegExp(`Invalid or unplottable values - ${name}`));
+    assert.deepEqual(state, original);
+  });
+});
+
+function measurementState() {
+  const state = closedState(), run = state.testRuns[0], device = run.devices[0], trigger = run.devices[1];
+  run.clock.endMs = startMs + 7_200_000;
+  run.unassignedChannels = [];
+  device.name = "ACT-01";
+  device.channels[0].symbolicName = "ACT-01_FB";
+  device.channels[0].parameters = [];
+  const point = (offset, value, index, extra = {}) => ({ timeMs: startMs + offset,
+    time: formatSourceTime(startMs + offset, true, true), value, valid: true, rawValue: String(value),
+    sourceId: "source-log", sourceRow: index + 10, ...extra });
+  device.channels[0].series = [{ id: "timing-source", name: "ACT-01_FB", kind: "analog", unit: "V",
+    points: [point(1000, 0.1, 0), point(121_000, 0.5, 1), point(3_601_000, 0.7, 2)] }];
+  trigger.name = "SENSOR-02";
+  trigger.status = "Not applicable";
+  trigger.channels[0].role = "Analog input";
+  trigger.channels[0].symbolicName = "SENSOR-02";
+  trigger.channels[0].series = [{ id: "threshold-source", name: "SENSOR-02", kind: "analog", unit: "V", points: [
+    point(2000, 0.2, 20), point(3000, 1.5, 21, { excluded: true }), point(3500, 2, 22, { valid: false }),
+    point(4000, 0.5, 23), point(6000, 0.8, 24), point(8000, 0.3, 25), point(10_000, 0.7, 26),
+  ] }];
+  const graphKey = deviceGraphEntries(device)[0].key, triggerKey = deviceGraphEntries(trigger)[0].key;
+  const time = offset => ({ kind: "time", timeMs: startMs + offset });
+  const condition = (operator, threshold) => ({ kind: "trigger", deviceId: trigger.id, graphKey: triggerKey, operator, threshold });
+  const selectedStart = createPointEndpoint(run, device.id, graphKey, 0);
+  const selectedEnd = createPointEndpoint(run, device.id, graphKey, 1);
+  run.graphTools = { version: 1,
+    deviceNames: [{ deviceId: device.id, name: "Timing valve" }, { deviceId: trigger.id, name: "Trigger station" }],
+    graphs: [{ deviceId: device.id, graphKey, name: "Valve timing", style: "smooth", measurements: [
+      { id: "seconds", name: "Pump delay", unit: "s", start: time(1500), end: time(31_500) },
+      { id: "minutes", name: "Selected settling", unit: "min", start: selectedStart, end: selectedEnd },
+      { id: "hours", name: "One hour hold", unit: "h", start: time(1000), end: time(3_601_000) },
+      { id: "threshold", name: "Feedback transition", unit: "s", start: condition(">=", 0.5), end: condition("<", 0.5) },
+      { id: "strict", name: "Strict transition", unit: "s", start: condition(">", 0.5), end: condition("<=", 0.3) },
+      { id: "unresolved", name: "Missing crossing", unit: "s", start: time(0), end: condition(">", 0.85) },
+      { id: "invalid", name: "Reversed endpoints", unit: "s", start: time(10_000), end: time(1000) },
+      { id: "stale", name: "Changed source point", unit: "s", start: { ...selectedStart, value: 123 }, end: time(10_000) },
+    ] }, { deviceId: trigger.id, graphKey: triggerKey, name: "Trigger voltage", style: "line" }],
+  };
+  return { state, run, device, trigger, graphKey, triggerKey };
+}
+
+test("PDF named durations retain endpoint definitions and units and resolve triggers from the original run independently of crop and style", async () => {
+  await withFonts(async () => {
+    const { state, run, device } = measurementState();
+    const saved = structuredClone(state);
+    const first = await pdfContent(await createTestReportPdf({ state }));
+    assert.deepEqual(state, saved);
+    const changed = structuredClone(state);
+    changed.testRuns[0].graphTools.graphs[0].style = "line";
+    const cropped = await pdfContent(await createTestReportPdf({ state: changed,
+      timeRanges: { [run.id]: { [device.id]: { startMs: startMs + 20_000, endMs: startMs + 40_000 } } },
+    }));
+    for (const result of [first, cropped]) {
+      const text = result.text.replace(/\s+/g, " ");
+      for (const value of ["Pump delay", "30 s", "Selected settling", "2 min", "One hour hold", "1 h",
+        "Feedback transition", "4 s", "Strict transition", "2 s", "Missing crossing", "Not resolved", "Reversed endpoints", "Invalid",
+        "Changed source point", "Manual source time", "Selected point on Timing valve / Valve timing",
+        "First recorded Trigger station / Trigger voltage value >= 0.5 V",
+        "First recorded Trigger station / Trigger voltage value < 0.5 V at or after the start",
+        "First recorded Trigger station / Trigger voltage value > 0.5 V",
+        "First recorded Trigger station / Trigger voltage value <= 0.3 V at or after the start",
+        "No retained valid observation matches the trigger at or after the start.",
+        "The end time must be at or after the start time.", "The selected point no longer matches its original source observation.",
+        "Selected source time: 2026-11-19 19:17:01.000", "Source: synthetic-log.csv, row 33"])
+        assert.ok(text.includes(value), `Missing calculation detail: ${value}`);
+      assert.ok(text.includes("Duration calculations - Valve timing"));
+      assert.ok(text.includes("2026-11-19 19:17:04.000"));
+      assert.ok(text.includes("2026-11-19 19:17:08.000"));
+      assert.ok(text.includes("2026-11-19 19:17:01.500"), "millisecond source times are preserved");
+      assert.ok(text.includes("Source graph: SENSOR-02"), "renamed cross-graph endpoints retain the source tag");
+      assert.equal(result.blocks.filter(page => page.some(block => block.text === "Trigger station")).length, 0,
+        "a filtered device does not acquire a page just because a calculation references its original data");
+      assert.equal(result.text.match(/Figure \d+\./g)?.length, 1);
+    }
+  });
+});
+
+test("PDF graph tool names, styles, and duration definitions are frozen before asynchronous asset loading", async () => {
+  const originalFetch = globalThis.fetch;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  globalThis.fetch = async url => { await gate; return assetResponse(String(url).split("/").pop()); };
+  try {
+    const { state, run, device } = measurementState();
+    const pending = createTestReportPdf({ state });
+    run.graphTools.deviceNames[0].name = "Mutated device alias";
+    Object.assign(run.graphTools.graphs[0], { name: "Mutated graph alias", style: "line" });
+    Object.assign(run.graphTools.graphs[0].measurements[0], { name: "Mutated calculation",
+      end: { kind: "time", timeMs: startMs + 61_500 } });
+    device.channels[0].series[0].name = "Mutated source tag";
+    device.channels[0].series[0].points[0].value = 99;
+    release();
+    const result = await pdfContent(await pending);
+    assert.match(result.text, /Timing valve/);
+    assert.match(result.text, /Valve timing/);
+    assert.match(result.text, /Pump delay\n30 s/);
+    assert.match(result.text, /Source graph: ACT-01_FB/);
+    assert.doesNotMatch(result.text, /Mutated/);
+    const blueCurves = result.streams.flatMap(pdfCurves).filter(curve => curve.color.length === 3
+      && Math.abs(curve.color[0] - 24 / 255) < 0.005 && Math.abs(curve.color[1] - 108 / 255) < 0.005);
+    assert.ok(blueCurves.length >= 2, "the captured smooth style is retained during export");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("PDF preserves named calculations for filtered and replaced owning graphs without adding chart pages or inventing results", async () => {
+  await withFonts(async () => {
+    const { state, run, device } = measurementState();
+    const savedTimer = { ...run.graphTools.graphs[0].measurements[0], name: "Old named timer" };
+    const filteredTimer = { ...run.graphTools.graphs[0].measurements[3], name: "Filtered trigger timer" };
+    run.graphTools.graphs[0].measurements = [savedTimer];
+    run.graphTools.graphs[1].measurements = [filteredTimer];
+    // A source replacement introduces a new graph identity; the saved timer
+    // continues to identify the earlier graph rather than silently moving.
+    device.channels[0].series[0].id = "replacement-source";
+    const original = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    const text = result.text.replace(/\s+/g, " ");
+    assert.match(text, /Preserved duration calculations/);
+    assert.match(text, /Duration calculations - Timing valve \/ Valve timing/);
+    assert.match(text, /Old named timer Unavailable/);
+    assert.match(text, /The graph this calculation belongs to is no longer available in this test run/);
+    assert.match(text, /The original graph is unavailable\. Saved calculation definitions are retained/);
+    assert.match(text, /2026-11-19 19:17:01\.500/);
+    assert.match(text, /2026-11-19 19:17:31\.500/);
+    assert.doesNotMatch(result.text, /\n30 s\n/, "missing owners do not acquire a duration from unrelated replacement evidence");
+    assert.match(text, /Duration calculations - Trigger station \/ Trigger voltage/);
+    assert.match(text, /Filtered trigger timer 4 s/);
+    assert.match(text, /Source graph omitted by report applicability settings/);
+    assert.match(text, /Source graph: SENSOR-02/);
+    assert.equal(result.text.match(/Figure \d+\./g)?.length, 1, "only the applicable replacement graph is plotted");
+    assert.deepEqual(state, original);
+  });
+});
+
+test("PDF duration tables preserve long calculation and graph names through clean repeated headers and pagination", async () => {
+  await withFonts(async () => {
+    const { state, run } = measurementState();
+    const long = label => `${label} ${"extended descriptive label ".repeat(12)}`.slice(0, 160).trim();
+    run.graphTools.deviceNames.forEach((entry, index) => { entry.name = long(`Device ${index + 1}`); });
+    run.graphTools.graphs.forEach((entry, index) => { entry.name = long(`Graph ${index + 1}`); });
+    const graph = run.graphTools.graphs[0], reference = graph.measurements[3];
+    graph.measurements = Array.from({ length: 20 }, (_, index) => ({ ...structuredClone(reference),
+      id: `long-${index}`, name: long(`Calculation ${String(index + 1).padStart(2, "0")}`) }));
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    const normalized = result.text.replace(/\s+/g, "");
+    for (const { name } of graph.measurements) assert.ok(normalized.includes(name.replace(/\s+/g, "")), name);
+    const calculationPages = result.pages.filter(page => page.includes("Duration calculations -"));
+    assert.ok(calculationPages.length >= 3, "long endpoint details continue onto additional device pages");
+    for (const page of calculationPages) assert.match(page, /Calculation\nDuration\nStart\nEnd/);
+    for (const page of result.blocks) for (const block of page) {
+      if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
+      assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps the footer: ${JSON.stringify(block)}`);
+    }
+  });
+});
+
+test("malformed saved graph tools are rejected before fonts or private setup photos load", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetched = false, accessed = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error("No assets expected"); };
+  const backend = { getPhotoUrl: async () => { accessed = true; return "/private/setup.png"; } };
+  try {
+    const corruptions = [
+      () => null, () => [], () => ({}), () => ({ ...emptyGraphTools(), version: 2 }),
+      tools => { tools.graphs[0].style = "bezier"; return tools; },
+      tools => { tools.graphs[0].name = " "; return tools; },
+      tools => { tools.deviceNames[0].name = "x".repeat(161); return tools; },
+      tools => { tools.deviceNames.push({ ...tools.deviceNames[0] }); return tools; },
+      tools => { tools.graphs[0].measurements[0].unit = "seconds"; return tools; },
+      tools => { tools.graphs[0].measurements[0].start = { kind: "time", timeMs: startMs + 0.5 }; return tools; },
+      tools => { tools.graphs[0].measurements[3].start.operator = "="; return tools; },
+      tools => { tools.graphs[0].measurements[3].start.threshold = "0.5"; return tools; },
+      tools => { tools.graphs[0].measurements.push({ ...tools.graphs[0].measurements[0] }); return tools; },
+      tools => { tools.graphs[0].measurements = Array.from({ length: 21 }, (_, index) => ({ ...tools.graphs[0].measurements[0], id: `too-many-${index}` })); return tools; },
+    ];
+    for (const corrupt of corruptions) {
+      const { state, run } = measurementState();
+      run.graphTools = corrupt(run.graphTools);
+      run.setupPhotos = [setupPhoto("graph-tools")];
+      await assert.rejects(createTestReportPdf({ state, backend }), /graph names, styles, or duration calculations are invalid/);
+    }
+    assert.equal(fetched, false);
+    assert.equal(accessed, false);
+  } finally { globalThis.fetch = originalFetch; }
 });

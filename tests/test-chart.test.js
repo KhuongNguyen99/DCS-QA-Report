@@ -12,12 +12,20 @@ const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-8
 function assertBounded(chart) {
   const coordinates = [...chart.points, ...chart.invalidPoints.filter(point => point.x !== null),
     ...chart.connections.flatMap(line => [line.from, line.to]), ...(chart.extension ? [chart.extension.from, chart.extension.to] : []),
+    ...chart.curves.flatMap(curve => Object.values(curve)),
     ...(chart.leading ? [chart.leading.from, chart.leading.to] : [])];
   for (const point of coordinates) {
     assert.ok(point.x >= chart.plot.left, `${point.x} is inside the left edge`);
     assert.ok(point.x <= chart.plot.left + chart.plot.width, `${point.x} is inside the right edge`);
   }
 }
+
+const curveAt = (curve, t) => {
+  const weights = [(1 - t) ** 3, 3 * (1 - t) ** 2 * t, 3 * (1 - t) * t ** 2, t ** 3];
+  const points = [curve.from, curve.control1, curve.control2, curve.to];
+  return { x: points.reduce((sum, point, index) => sum + point.x * weights[index], 0),
+    y: points.reduce((sum, point, index) => sum + point.y * weights[index], 0) };
+};
 
 test("positioner and pressure current graphs default to 0–25 mA and Celsius to 20–30", () => {
   for (const name of ["V-3511-POS", "V-3511_POS", "PD-3511", "DP-3511", " pd-3511 "]) {
@@ -456,6 +464,103 @@ test("analog tags that do not end in _FB keep linear connections", () => {
   assert.equal(buildTestChart({ name: "Output", kind: "digital", points: [point(1000, 0), point(2000, 1)] }, clock).interpolation, "step");
 });
 
+test("explicit line, step and smooth styles change only connections while automatic feedback and digital rules remain", () => {
+  const feedback = { name: "V-3501_FB", kind: "analog", unit: "V", points: [point(1000, 0.1), point(2000, 0.3), point(4000, 0.2)] };
+  const original = structuredClone(feedback);
+  const automatic = buildTestChart(feedback, clock);
+  assert.deepEqual(buildTestChart(feedback, clock, { style: "auto" }), automatic);
+  for (const [style, interpolation] of [["line", "linear"], ["step", "step"], ["smooth", "smooth"]]) {
+    const chart = buildTestChart(feedback, clock, { style });
+    assert.equal(chart.interpolation, interpolation);
+    assert.deepEqual(chart.points, automatic.points);
+    assert.deepEqual(chart.domain, automatic.domain);
+    assert.deepEqual(chart.leading, automatic.leading);
+    assert.deepEqual(chart.extension, automatic.extension);
+    assert.equal(chart.initialLabel, "Initial value 0.0 V");
+    assert.equal(chart.observedCount, 3);
+    assertBounded(chart);
+  }
+  const analogStep = buildTestChart({ ...feedback, name: "Position" }, clock, { style: "step" });
+  assert.equal(analogStep.connections.length, 4);
+  assert.equal(analogStep.leading, null);
+  const digital = buildTestChart({ kind: "digital", points: [point(1000, 1, { previousValue: 0 }), point(2000, 0), point(3000, 0.5)] }, clock,
+    { style: "smooth", showInitialState: true });
+  assert.deepEqual(digital.yTicks.map(tick => tick.value), [0, 1]);
+  assert.equal(digital.initialLabel, "Initial state 0");
+  assert.equal(digital.invalidCount, 1);
+  assert.equal(digital.curves.length, 1);
+  assert.equal(digital.extension, null);
+  for (const style of [null, "linear", "spline", {}, 1]) assert.throws(() => buildTestChart(feedback, clock, { style }), /graph style/);
+  assert.deepEqual(feedback, original);
+});
+
+test("smooth curves interpolate irregularly spaced observations without overshooting or changing original indices", () => {
+  const series = { kind: "analog", points: [point(0, 0), point(10_000, 3), point(40_000, 4), point(50_000, 1), point(60_000, 1)] };
+  const original = structuredClone(series);
+  const chart = buildTestChart(series, clock, { style: "smooth" });
+  assert.equal(chart.curves.length, 4);
+  assert.deepEqual(chart.connections, []);
+  assert.deepEqual(chart.points.map(point => point.pointIndex), [0, 1, 2, 3, 4]);
+  chart.curves.forEach((curve, index) => {
+    assert.deepEqual(curve.from, { x: chart.points[index].x, y: chart.points[index].y });
+    assert.deepEqual(curve.to, { x: chart.points[index + 1].x, y: chart.points[index + 1].y });
+    for (let step = 0; step <= 20; step++) {
+      const sample = curveAt(curve, step / 20);
+      assert.ok(sample.y >= Math.min(curve.from.y, curve.to.y) - 1e-8);
+      assert.ok(sample.y <= Math.max(curve.from.y, curve.to.y) + 1e-8);
+    }
+  });
+  const curve = chart.curves[1];
+  assert.notEqual(curveAt(curve, 0.5).y, (curve.from.y + curve.to.y) / 2, "nonlinear slopes produce an actual smooth curve");
+  assert.equal(chart.curves[3].control1.y, chart.curves[3].from.y, "constant readings stay flat");
+  assertBounded(chart);
+  assert.deepEqual(series, original);
+});
+
+test("smooth manual and shared device windows retain the exact curve at both clipped boundaries", () => {
+  const series = { kind: "analog", points: [point(0, 0), point(10_000, 4), point(20_000, 4), point(30_000, 8)] };
+  const automatic = buildTestChart(series, clock, { style: "smooth" });
+  const range = timeRange(5000, 25_000);
+  const chart = buildTestChart(series, clock, { style: "smooth", timeRange: range });
+  assert.equal(chart.curves.length, 3);
+  assert.deepEqual(chart.points.map(point => point.pointIndex), [1, 2]);
+  assert.equal(chart.observedCount, 4);
+  assert.equal(chart.curves[0].from.x, chart.plot.left);
+  assert.equal(chart.curves.at(-1).to.x, chart.plot.left + chart.plot.width);
+  close(chart.curves[0].from.y, curveAt(automatic.curves[0], 0.5).y);
+  close(chart.curves.at(-1).to.y, curveAt(automatic.curves.at(-1), 0.5).y);
+  assert.equal(chart.extension, null);
+  assertBounded(chart);
+  assert.deepEqual(buildTestChart(series, clock, { style: "smooth", deviceTimeRange: range }), { ...chart, manualTimeRange: false });
+  const between = buildTestChart(series, clock, { style: "smooth", timeRange: timeRange(1000, 3000) });
+  assert.equal(between.curves.length, 1);
+  assert.deepEqual(between.points, []);
+  close(between.curves[0].from.y, curveAt(automatic.curves[0], 0.1).y);
+  close(between.curves[0].to.y, curveAt(automatic.curves[0], 0.3).y);
+  assertBounded(between);
+});
+
+test("smooth interpolation preserves invalid gaps, same-time vertical changes and original point indices after exclusions", () => {
+  const series = { kind: "analog", points: [point(1000, 0.1), point(2000, null, { valid: false }),
+    point(3000, 0.2), point(4000, 0.3), point(4000, 0.1), point(5000, 0.8, { excluded: true }),
+    point(6000, 0.4), point(7000, null, { valid: false })] };
+  const chart = buildTestChart(series, clock, { style: "smooth" });
+  assert.deepEqual(chart.points.map(point => point.pointIndex), [0, 2, 3, 4, 6]);
+  assert.equal(chart.curves.length, 2);
+  assert.equal(chart.curves[0].from.x, chart.points[1].x, "invalid evidence breaks the earlier trace");
+  assert.deepEqual(chart.connections, [{ from: { x: chart.points[2].x, y: chart.points[2].y }, to: { x: chart.points[3].x, y: chart.points[3].y } }]);
+  assert.equal(chart.extension, null);
+  const cropped = buildTestChart(series, clock, { style: "smooth", timeRange: timeRange(4000, 5000) });
+  assert.deepEqual(cropped.points.map(point => point.pointIndex), [3, 4], "click targets retain source indices instead of visible circle positions");
+  assert.equal(cropped.connections.length, 1);
+  assert.equal(cropped.connections[0].from.x, cropped.plot.left);
+  assert.equal(cropped.curves.length, 1);
+  assertBounded(cropped);
+  const single = buildTestChart({ name: "V_FB", kind: "analog", unit: "V", points: [point(20_000, 0.3)] }, clock, { style: "smooth" });
+  assert.deepEqual(single.curves, []);
+  assert.ok(single.leading && single.extension);
+});
+
 test("manual feedback windows carry measured values across their edges and preserve equal-time transitions", () => {
   const series = { name: "V-3501_FB", kind: "analog", unit: "V", points: [
     point(0, 0.1), point(10000, 0.3), point(10000, 0.2), point(20000, 0.4),
@@ -817,8 +922,10 @@ test("excluded rows leave active chart ranges and geometry equivalent to their a
   const original = structuredClone(series);
   for (const options of [{}, { timeRange: timeRange(12000, 25000) }]) {
     const chart = buildTestChart(series, clock, options);
-    const active = buildTestChart({ ...series, points: series.points.filter(point => point.excluded !== true) }, clock, options);
-    assert.deepEqual(chart, { ...active, excludedCount: 2 });
+    const retained = series.points.filter(point => point.excluded !== true);
+    const active = buildTestChart({ ...series, points: retained }, clock, options);
+    assert.deepEqual(chart, { ...active, excludedCount: 2,
+      points: active.points.map(point => ({ ...point, pointIndex: series.points.indexOf(retained[point.pointIndex]) })) });
     assert.equal(chart.observedCount, 2);
     assert.equal(chart.domain.min, 20);
     assert.equal(chart.domain.max, 30);
@@ -841,7 +948,8 @@ test("excluding invalid gaps reconnects active neighbors and excluding the final
     for (const options of [{}, { timeRange: timeRange(2000, 15000) }]) {
       const chart = buildTestChart(series, clock, options);
       const active = buildTestChart({ kind, points: [series.points[0], series.points[3]] }, clock, options);
-      assert.deepEqual(chart, { ...active, excludedCount: 3 });
+      assert.deepEqual(chart, { ...active, excludedCount: 3,
+        points: active.points.map(point => ({ ...point, pointIndex: point.pointIndex === 0 ? 0 : 3 })) });
       assert.equal(chart.invalidCount, 0);
       assert.equal(chart.extension.from.y, yFor(chart, 1));
       assertBounded(chart);
