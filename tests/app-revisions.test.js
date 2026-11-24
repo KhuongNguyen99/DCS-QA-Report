@@ -82,12 +82,13 @@ before(async () => {
 });
 after(async () => { if (directory) await rm(directory, { recursive: true, force: true }); });
 
-function createServer(initiallyClosed = false) {
+function createServer({ initiallyClosed = false, checkedByName = "Original checker", emptyWorkspace = false } = {}) {
   const inspector = { id: INSPECTOR, name: "Kong", email: "inspector@example.com", isAdmin: true };
   const initial = {
     inspector,
     project: { walkdownId: SKID, skidName: "Current skid", nameRequired: false,
-      revision: 7, status: "draft", contentVersion: 12, updatedAt: "2026-11-19T18:00:00Z" },
+      revision: 7, status: "draft", contentVersion: 12, checkedByName,
+      updatedAt: "2026-11-19T18:00:00Z" },
     records: inspectionTargets(schedule).map(target => ({ key: target.key, complete: false, quality: null })),
     photos: [{ id: "photo-1", walkdownId: SKID, recordKey: DEVICE, path: "private/photo-1.jpg",
       name: "Evidence", width: 800, height: 600, createdBy: INSPECTOR, createdAt: "2026-11-18T14:00:00Z" }],
@@ -95,7 +96,7 @@ function createServer(initiallyClosed = false) {
       createdBy: INSPECTOR, authorName: "Kong", createdAt: "2026-11-18T14:00:00Z" }],
     testRuns: [], revisions: [],
   };
-  const server = { state: copy(initial), calls: [], archives: new Map(), listeners: new Set() };
+  const server = { state: copy(initial), calls: [], archives: new Map(), listeners: new Set(), hasReport: !emptyWorkspace };
   server.archives.set(6, { ...copy(initial), comments: [],
     project: { ...copy(initial.project), revision: 6, status: "closed", skidName: "Historical skid name",
       closedAt: "2026-11-18T23:30:00-06:00", closedByName: "Earlier inspector" } });
@@ -114,14 +115,16 @@ function createServer(initiallyClosed = false) {
   };
   server.next = () => {
     server.state.project = { ...server.state.project, revision: server.state.project.revision + 1,
-      status: "draft", contentVersion: 1, closedAt: null, closedBy: null, closedByName: null };
+      status: "draft", contentVersion: 1, closedAt: null, closedBy: null, closedByName: null,
+      checkedByName: null, checkedByRecordedAt: null, checkedByRecordedBy: null };
   };
   if (initiallyClosed) server.close(); else history();
   const getSession = async () => ({ user: { id: INSPECTOR } });
   const read = () => Promise.resolve(copy(server.state));
-  const writable = revision => {
+  const writable = (revision, metadata = false) => {
     assert.equal(revision, server.state.project.revision, "writes must target the viewed revision");
     assert.equal(server.state.project.status, "draft", "closed reports reject writes");
+    if (!metadata) assert.ok(server.state.project.checkedByName?.trim(), "Checked by is required before evidence writes");
   };
   const backend = {
     walkdownId: SKID, getSession, loadState: read,
@@ -136,6 +139,18 @@ function createServer(initiallyClosed = false) {
       return {
         walkdownId: SKID, revision, getSession, loadState: read,
         getPhotoUrl: backend.getPhotoUrl,
+        async setCheckedBy(name, expectedName) {
+          server.calls.push({ kind: "setCheckedBy", revision, name, expectedName });
+          if (server.beforeSetCheckedBy) await server.beforeSetCheckedBy();
+          writable(revision, true);
+          if ((server.state.project.checkedByName ?? null) !== expectedName)
+            throw new Error("Checked by changed. Refresh before saving.");
+          server.state.project.checkedByName = name.trim();
+          server.state.project.checkedByRecordedAt = "2026-11-24T18:00:00Z";
+          server.state.project.checkedByRecordedBy = INSPECTOR;
+          server.state.project.contentVersion += 1;
+          return copy(server.state);
+        },
         async approveRevision(contentVersion) {
           writable(revision);
           assert.equal(contentVersion, server.state.project.contentVersion, "approval must use reviewed content");
@@ -234,17 +249,27 @@ function createServer(initiallyClosed = false) {
   };
   server.workspace = {
     getSession,
+    async createWalkdown(name) {
+      assert.equal(server.hasReport, false, "this fixture creates its first report");
+      server.calls.push({ kind: "create", name });
+      server.hasReport = true;
+      server.state = { ...copy(initial), photos: [], comments: [], testRuns: [], revisions: [],
+        project: { ...copy(initial.project), skidName: name, revision: 1, contentVersion: 1,
+          checkedByName: null, checkedByRecordedAt: null, checkedByRecordedBy: null } };
+      server.archives.clear();
+      return { id: SKID, ...copy(server.state.project) };
+    },
     async renameWalkdown(id, name, revision) {
       server.calls.push({ kind: "rename", id, name, revision });
       assert.equal(id, SKID);
-      writable(revision);
+      writable(revision, true);
       server.state.project.skidName = name;
       server.state.project.contentVersion += 1;
       return { id, ...copy(server.state.project) };
     },
     async listWalkdowns() {
       const { project } = server.state;
-      return { inspector, walkdowns: [{ id: SKID, ...copy(project) }] };
+      return { inspector, walkdowns: server.hasReport ? [{ id: SKID, ...copy(project) }] : [] };
     },
     forWalkdown(id) { assert.equal(id, SKID); return backend; },
     subscribeWalkdowns: () => () => {},
@@ -252,7 +277,7 @@ function createServer(initiallyClosed = false) {
   return server;
 }
 
-async function setup(t, { closed = false, photos } = {}) {
+async function setup(t, { closed = false, photos, checkedByName = "Original checker", emptyWorkspace = false } = {}) {
   const errors = [];
   const console = new VirtualConsole();
   console.on("jsdomError", error => errors.push(error.message));
@@ -261,7 +286,7 @@ async function setup(t, { closed = false, photos } = {}) {
     url: "http://localhost/", runScripts: "outside-only", pretendToBeVisual: true, virtualConsole: console,
   });
   const { window } = dom;
-  const server = createServer(closed);
+  const server = createServer({ initiallyClosed: closed, checkedByName, emptyWorkspace });
   if (photos) server.state.photos = copy(photos);
   Object.assign(window, { IS_REACT_ACT_ENVIRONMENT: true, backendMock: server.workspace,
     pdfExports: [], testPdfExports: [], downloads: [], scrollTo() {}, structuredClone: copy });
@@ -314,6 +339,106 @@ async function setup(t, { closed = false, photos } = {}) {
   };
 }
 
+async function checkReport(h, name = "Current revision checker") {
+  await h.fill(h.document.querySelector("#checked-by-name"), name);
+  await h.click(h.button("Save checked by"));
+  assert.equal(h.server.state.project.checkedByName, name.trim());
+}
+
+test("App creates a report with only its skid name, then requires Checked by before any data entry", async t => {
+  const h = await setup(t, { emptyWorkspace: true });
+  await h.click(h.button("New skid report"));
+  const creation = h.document.querySelector("dialog");
+  assert.equal(creation.querySelectorAll("input").length, 1, "creation asks only for the skid name");
+  assert.doesNotMatch(creation.textContent, /Checked by|Signed off by/);
+  await h.fill(creation.querySelector("input"), "New inspection");
+  await h.click(h.button("Create skid report", creation));
+  assert.equal(h.document.querySelector("dialog"), null);
+  assert.deepEqual(h.server.calls, [{ kind: "create", name: "New inspection" }]);
+  const checker = h.document.querySelector("#checked-by-name");
+  assert.ok(checker, "required checker form appears after the report is created");
+  assert.equal(checker.value, "", "the app does not assume the current user performed the check");
+  assert.equal(checker.required, true);
+  assert.equal(h.button("Save checked by").disabled, true);
+  assert.equal(h.button("Bulk upload photos"), undefined);
+  assert.equal(h.button("Rename skid").disabled, false, "metadata naming remains available before checking");
+  await h.nav("QC overview");
+  assert.ok([...h.document.querySelectorAll('input[type="checkbox"]')].every(input => input.disabled));
+  await h.openDevice();
+  const record = h.document.querySelector("dialog.record-dialog");
+  assert.equal(h.button("Upload photos", record).disabled, true);
+  assert.equal(h.button("Take photos", record).disabled, true);
+  assert.equal(record.querySelector("textarea"), null);
+  await h.click(h.button("Close dialog", record));
+  await h.nav("Test reports");
+  assert.equal(h.button("Import test run"), undefined);
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, true);
+  assert.equal(h.document.querySelector("textarea"), null);
+  await h.fill(h.document.querySelector("#checked-by-name"), "   ");
+  assert.equal(h.button("Save checked by").disabled, true);
+  assert.equal(h.server.calls.length, 1, "blocked evidence controls send no writes");
+  await checkReport(h, "  Miro Gohacki  ");
+  assert.deepEqual(h.server.calls.at(-1), {
+    kind: "setCheckedBy", revision: 1, name: "Miro Gohacki", expectedName: null,
+  });
+  assert.ok(h.document.querySelector('textarea[id="comment-walkdown:general"]'));
+  assert.equal(h.button("Approve & close").disabled, false);
+  assert.equal(h.button("Bulk upload photos").disabled, false);
+  await h.nav("Test reports");
+  assert.equal(h.button("Import test run").disabled, false);
+});
+
+test("App retains existing evidence and historical exports while Checked by is required", async t => {
+  const h = await setup(t, { checkedByName: null });
+  const evidence = copy({ photos: h.server.state.photos, comments: h.server.state.comments });
+  await h.nav("Report");
+  await h.click(h.button("Export revision 6"));
+  assert.equal(h.window.pdfExports.at(-1).project.revision, 6, "legacy approved reports remain exportable");
+  assert.deepEqual(copy({ photos: h.server.state.photos, comments: h.server.state.comments }), evidence);
+  await checkReport(h, "Manual checker");
+  assert.deepEqual(copy({ photos: h.server.state.photos, comments: h.server.state.comments }), evidence);
+  await h.click(h.button("Approve & close"));
+  await h.click(h.button("Confirm approval & close"));
+  const approved = h.server.archives.get(7);
+  assert.equal(approved.project.checkedByName, "Manual checker");
+  assert.equal(approved.project.closedByName, "Kong", "sign-off comes from the authenticated approver");
+  assert.match(h.document.querySelector(".revision-panel").textContent, /Checked by.*Manual checker/);
+  assert.match(h.document.querySelector(".revision-panel").textContent, /Signed off by.*Kong/);
+  assert.equal(h.document.querySelector("#checked-by-name"), null, "approved checker cannot be edited");
+  await h.click(h.currentExport());
+  assert.equal(h.window.pdfExports.at(-1).project.checkedByName, "Manual checker");
+  await h.click(h.button("New revision"));
+  assert.equal(h.server.state.project.checkedByName, null);
+  await checkReport(h, "Next checker");
+  await h.click(h.button("Export revision 7"));
+  assert.equal(h.window.pdfExports.at(-1).project.checkedByName, "Manual checker", "later checker changes do not rewrite history");
+});
+
+test("App keeps a failed checker entry for retry and refuses to overwrite a concurrent name change", async t => {
+  const h = await setup(t, { checkedByName: null });
+  await h.nav("Report");
+  await h.fill(h.document.querySelector("#checked-by-name"), "First checker");
+  h.server.beforeSetCheckedBy = () => { throw new Error("Connection interrupted"); };
+  await h.click(h.button("Save checked by"));
+  assert.equal(h.document.querySelector("#checked-by-name").value, "First checker");
+  assert.equal(h.server.state.project.checkedByName, null);
+  assert.match(h.document.body.textContent, /Connection interrupted/);
+  assert.equal(h.button("Approve & close").disabled, true);
+  h.server.beforeSetCheckedBy = null;
+  await h.click(h.button("Save checked by"));
+  assert.equal(h.server.state.project.checkedByName, "First checker");
+  await h.fill(h.document.querySelector("#checked-by-name"), "My correction");
+  h.server.beforeSetCheckedBy = () => {
+    h.server.state.project.checkedByName = "Teammate correction";
+    h.server.state.project.contentVersion += 1;
+  };
+  await h.click(h.button("Save checked by"));
+  assert.equal(h.server.state.project.checkedByName, "Teammate correction");
+  assert.equal(h.server.calls.at(-1).expectedName, "First checker");
+  assert.match(h.document.body.textContent, /Checked by changed.*Refresh/);
+});
+
 test("App requires approval before exporting and creates an editable next revision while retaining historical exports", async t => {
   const h = await setup(t);
   await h.nav("Report");
@@ -339,6 +464,9 @@ test("App requires approval before exporting and creates an editable next revisi
   assert.equal(h.server.state.project.revision, 8);
   assert.equal(h.server.state.project.status, "draft");
   assert.equal(h.currentExport().disabled, true);
+  assert.equal(h.server.state.project.checkedByName, null);
+  assert.equal(h.document.querySelector("textarea"), null, "new revision requires a checker before comment entry");
+  await checkReport(h);
   assert.equal(h.document.querySelector("textarea").value, "");
   await h.fill(h.document.querySelector("textarea"), "Only in revision eight");
   await h.click(h.button("Add walkdown comment"));
@@ -374,6 +502,7 @@ test("App makes closed records and overview read-only, then routes deletion and 
   await h.click(h.button("Close dialog", dialog));
   await h.nav("Report");
   await h.click(h.button("New revision"));
+  await checkReport(h);
   await h.nav("QC overview");
   await h.openDevice();
   const editing = h.document.querySelector("dialog.record-dialog");
@@ -421,6 +550,7 @@ test("App keeps a bulk queue pinned to its opening revision across remote closeo
   await assert.rejects(oldSave(DEVICE, {}), /closed or no longer active/);
   assert.equal(h.server.calls.filter(call => call.kind === "addPhoto").length, 0);
   await h.click(h.button("Close test bulk queue"));
+  await checkReport(h);
   await h.click(h.button("Bulk upload photos"));
   assert.equal(h.window.currentBulk.readOnly, false);
   await h.click(h.button("Save test bulk photo"));
@@ -450,6 +580,7 @@ test("App pins an open camera's photo and quality writes to its original revisio
   assert.throws(() => h.window.currentCamera.onQuality("good"), /camera belongs to a closed or earlier revision/);
   assert.equal(h.server.calls.filter(call => ["addPhoto", "setQuality"].includes(call.kind)).length, 0);
   await h.click(h.button("Close camera"));
+  await checkReport(h);
   await h.click(h.button("Take photos", h.document.querySelector("dialog.record-dialog")));
   assert.equal(h.window.currentCamera.readOnly, false);
   await h.window.act(async () => h.window.currentCamera.onQuality("good"));
@@ -486,7 +617,7 @@ test("App selects a newly created skid after saving its name", async t => {
   const h = await setup(t);
   const nextId = "33333333-3333-4333-8333-333333333333";
   const created = copy(h.server.state);
-  created.project = { ...created.project, walkdownId: nextId, revision: 1, contentVersion: 1, skidName: "New skid" };
+  created.project = { ...created.project, walkdownId: nextId, revision: 1, contentVersion: 1, skidName: "New skid", checkedByName: null };
   created.photos = [];
   created.comments = [];
   created.revisions = [];
@@ -517,7 +648,8 @@ test("App selects a newly created skid after saving its name", async t => {
   assert.equal(h.document.querySelector("dialog"), null);
   assert.equal(h.document.querySelector("#skid-report").value, nextId);
   assert.match(h.document.querySelector(".project-tag").textContent, /New skid.*QC Revision 1/);
-  assert.equal(h.document.querySelector('textarea[id="comment-walkdown:general"]').disabled, false);
+  assert.equal(h.document.querySelector('textarea[id="comment-walkdown:general"]'), null);
+  assert.equal(h.document.querySelector("#checked-by-name").value, "");
 });
 
 const testRun = () => ({
@@ -673,6 +805,7 @@ test("App blocks approval for unsaved setup captions and preserves approved phot
   assert.equal(h.button("Remove photo"), undefined);
   await h.nav("Report");
   await h.click(h.button("New revision"));
+  await checkReport(h);
   await h.nav("Test reports");
   await h.click(h.button("Remove photo"));
   await h.click(h.button("Confirm removal"));
@@ -713,7 +846,7 @@ test('App saves setup photo order before approval and exports the original order
   await h.nav('Test reports'); await h.click(h.button('Export test PDF'));
   assert.deepEqual(copy(h.window.testPdfExports.at(-1).state.testRuns[0].setupPhotos.map(photo => photo.id)), ['setup-b', 'setup-a', 'setup-c']);
   assert.equal(h.document.querySelector('.test-setup-thumbnail').draggable, false);
-  await h.nav('Report'); await h.click(h.button('New revision')); await h.nav('Test reports');
+  await h.nav('Report'); await h.click(h.button('New revision')); await checkReport(h); await h.nav('Test reports');
   await movePhotoLater(h, 'a.jpg');
   assert.deepEqual(copy(h.server.state.testRuns[0].setupPhotos.map(photo => photo.id)), ['setup-b', 'setup-c', 'setup-a']);
   await h.nav('Report'); await h.click(h.button('Export test reports revision 7'));
@@ -722,6 +855,31 @@ test('App saves setup photo order before approval and exports the original order
 
 const inspectionOrderPhotos = () => ['a', 'b', 'c'].map(id => ({ id: `inspection-${id}`, walkdownId: SKID, recordKey: DEVICE,
   path: `private/${id}.jpg`, name: `${id}.jpg`, width: 800, height: 600, createdBy: INSPECTOR, createdAt: '2026-11-20T12:00:00Z' }));
+
+test("App retains pending test edits while Checked by is missing and resumes them after the name is saved", async t => {
+  const h = await setup(t);
+  h.server.state.testRuns = [testRun()];
+  await h.notify();
+  await h.nav("Test reports");
+  await h.fill(h.document.querySelector('[aria-label="Overall test run comment"] textarea'), "Keep this pending observation");
+  const cachedBefore = Array.from({ length: h.window.localStorage.length }, (_, i) => h.window.localStorage.key(i))
+    .map(key => h.window.localStorage.getItem(key)).find(value => value.includes("Keep this pending observation"));
+  assert.ok(cachedBefore, "pending authored text was cached before the gate changed");
+  h.server.state.project.checkedByName = null;
+  await h.notify();
+  assert.equal(h.button("Save test run").disabled, true);
+  assert.match(h.document.querySelector('[aria-label="Overall test run comment"]').textContent, /Keep this pending observation/);
+  assert.equal(h.document.querySelector('[aria-label="Overall test run comment"] textarea'), null, "pending comments are visible but not editable before checking");
+  const formText = h.document.querySelector(".test-import-form").textContent;
+  assert.match(formText, /Checked by/);
+  assert.doesNotMatch(formText, /Discard this draft/);
+  await checkReport(h, "Confirmed checker");
+  assert.equal(h.button("Save test run").disabled, false);
+  assert.equal(h.document.querySelector('[aria-label="Overall test run comment"] textarea').value, "Keep this pending observation");
+  await h.click(h.button("Save test run"));
+  assert.equal(h.server.state.testRuns[0].comment, "Keep this pending observation");
+  assert.deepEqual(h.server.calls.map(call => call.kind), ["setCheckedBy", "saveTestRun"]);
+});
 
 test('inspection image moves save immediately and remain frozen in archived PDF exports', async t => {
   const h = await setup(t, { photos: inspectionOrderPhotos() });
@@ -734,7 +892,7 @@ test('inspection image moves save immediately and remain frozen in archived PDF 
   await h.click(h.button('Approve & close')); await h.click(h.button('Confirm approval & close'));
   await h.click(h.currentExport());
   assert.deepEqual(copy(h.window.pdfExports.at(-1).photos.map(photo => photo.id)), ['inspection-b', 'inspection-a', 'inspection-c']);
-  await h.click(h.button('New revision')); await h.nav('QC overview'); await h.openDevice();
+  await h.click(h.button('New revision')); await checkReport(h); await h.nav('QC overview'); await h.openDevice();
   await movePhotoLater(h, 'a.jpg'); await h.click(h.button('Close dialog'));
   assert.deepEqual(copy(h.server.state.photos.map(photo => photo.id)), ['inspection-b', 'inspection-c', 'inspection-a']);
   await h.nav('Report'); await h.click(h.button('Export revision 7'));
@@ -789,6 +947,7 @@ test("App keeps unsaved test edits across navigation, locks approval, and export
   assert.match(h.window.downloads.at(-1).name, /DCS-IO-Test-Report-Rev7-2026-11-19\.pdf$/);
   await h.nav("Report");
   await h.click(h.button("New revision"));
+  await checkReport(h);
   await h.nav("Test reports");
   await h.click(h.button("Remove run"));
   await h.click(h.button("Confirm removal"));
@@ -821,6 +980,7 @@ test("App preserves a test draft but blocks saving it after another inspector cl
   await h.click(h.button("Save test run"));
   assert.equal(h.server.calls.filter(call => call.kind === "saveTestRun").length, 0);
   await h.click(h.button("Discard changes"));
+  await checkReport(h);
   await h.click(h.button("Edit run"));
   await h.click(h.button("Save test run"));
   assert.equal(h.server.calls.at(-1).kind, "saveTestRun");

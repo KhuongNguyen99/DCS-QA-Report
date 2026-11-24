@@ -44,11 +44,24 @@ const result = await query(`
       'public.qa_approve_revision(uuid,bigint,bigint)', 'public.qa_new_revision(uuid,bigint)',
       'public.qa_delete_comment(uuid,uuid,bigint)', 'public.qa_load_revision(uuid,bigint)',
       'public.qa_reorder_photos(uuid,text,uuid[],uuid[],bigint)',
+      'public.qa_set_checked_by(uuid,text,bigint,text)',
       'public.qa_list_revisions(uuid)']) signature) as revision_access_verified,
+    not exists (select 1 from public.qa_walkdowns where
+      (checked_by_name is null and (checked_by_recorded_at is not null or checked_by_recorded_by is not null))
+      or (checked_by_name is not null and (length(trim(checked_by_name)) not between 1 and 120
+        or checked_by_name ~ '[[:cntrl:]]' or checked_by_recorded_at is null or checked_by_recorded_by is null))) as checker_audit_valid,
+    (select bool_and(position('checked_by_name' in pg_get_functiondef(to_regprocedure(signature))) > 0)
+      from unnest(array['qa_private.require_walkdown(uuid,boolean)',
+        'qa_private.require_draft_revision(uuid,bigint,boolean)', 'qa_private.guard_report_row()',
+        'qa_private.can_upload_photo(text)', 'public.qa_approve_revision(uuid,bigint,bigint)',
+        'public.qa_new_revision(uuid,bigint)']) signature) as checker_gates_installed,
     not exists (select 1 from public.qa_walkdowns w left join public.qa_report_revisions r
       on r.walkdown_id = w.id and r.revision = w.revision
       where w.status = 'closed' and (r.walkdown_id is null or r.closed_at is distinct from w.closed_at
-        or r.closed_by is distinct from w.closed_by or r.skid_name is distinct from w.skid_name)) as closed_reports_preserved,
+        or r.closed_by is distinct from w.closed_by or r.skid_name is distinct from w.skid_name
+        or (r.snapshot->'project'->>'checkedByName') is distinct from w.checked_by_name
+        or (r.snapshot->'project'->>'checkedByRecordedAt')::timestamptz is distinct from w.checked_by_recorded_at
+        or (r.snapshot->'project'->>'checkedByRecordedBy')::uuid is distinct from w.checked_by_recorded_by)) as closed_reports_preserved,
     not exists (select 1 from public.qa_revision_photos p where not exists
       (select 1 from storage.objects o where o.bucket_id = 'qa-evidence' and o.name = p.path)) as archived_photos_preserved,
     not exists (select 1 from public.qa_walkdowns w join public.qa_report_revisions r
@@ -98,11 +111,11 @@ const result = await query(`
 `, true);
 const row = Array.isArray(result) ? result[0] : result.data?.[0] ?? result.result?.[0] ?? result;
 const checks = ["catalog_preserved", "revisions_valid", "archives_protected", "locks_installed",
-  "old_writes_blocked", "revision_access_verified", "closed_reports_preserved", "archived_photos_preserved", "closed_inspection_photos_preserved",
+  "old_writes_blocked", "revision_access_verified", "checker_audit_valid", "checker_gates_installed", "closed_reports_preserved", "archived_photos_preserved", "closed_inspection_photos_preserved",
   "test_runs_protected", "test_run_access_verified", "closed_test_runs_preserved"];
 const failed = checks.filter((key) => row?.[key] !== true);
 if (failed.length) throw new Error(`QC revision verification failed: ${failed.join(", ")}`);
-console.log("QC revision and test-run migrations verified: existing reports preserved, closed revisions protected, and versioned write access enabled.");
+console.log("QC revision and test-run migrations verified: existing reports preserved, closed revisions protected, and checker-gated versioned writes enabled.");
 
 // Start Skid 1's new report numbering at the approved reset point.
 // The revision ID is still the key for archived reports, photos, and edits.

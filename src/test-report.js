@@ -1,7 +1,7 @@
 import { jsPDF } from "jspdf";
 import { revisionNumber } from "./domain.js";
 import { normalizePronetaStatus } from "./proneta-parser.js";
-import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
+import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText, reportSignatories } from "./report.js";
 import { buildTestChart, deviceChartTimeRange, formatSourceTime, isTestTimeRange, isDigitalOutputChannel } from "./test-chart.js";
 import { isGraphOrder, orderDeviceGraphs } from "./test-graph-order.js";
 import { testCommentBlocks } from "./test-comment-format.js";
@@ -683,17 +683,14 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       { text: `Clock: ${clockLabel(run.clock)}` },
     );
   }
-  if (project.closedByName) {
-    const approver = [project.closedByName, project.closedByTitle].filter(Boolean).join(", ");
-    coverDetails.push({ text: `Approved by: ${approver}` });
-  }
+  coverDetails.push(...reportSignatories(project).map((text) => ({ text })));
   const detailsHeight = coverDetails.reduce((height, { text, bold }) => {
     textStyle(doc, coverStyle.size, bold);
     return height + paragraphLines(doc, text).length * coverStyle.lineHeight + coverStyle.gap;
   }, 0);
   const revisionBottom = 425;
   const detailGap = 20;
-  const titleOffset = Math.max(-58, Math.min(0, PAGE.bottom - revisionBottom - detailGap - detailsHeight));
+  const titleOffset = Math.max(-100, Math.min(0, PAGE.bottom - revisionBottom - detailGap - detailsHeight));
   const revisionY = drawCover(doc, cover, closedAt, logo, "Test Result",
     { revisionBottom: revisionBottom + titleOffset, titleOffset });
   const writer = reportWriter(doc, revisionY + detailGap);

@@ -471,6 +471,7 @@ test("write scopes stay pinned to their revision while unbound scopes can only r
     () => reader.setComplete("terminal:A", false),
     () => reader.addPhoto("terminal:A", sample),
     () => reader.deletePhoto(photoId),
+    () => reader.setCheckedBy("Miro Gohacki"),
     () => reader.approveRevision(9),
     () => reader.newRevision(),
     () => workspace.renameWalkdown(walkdownId, "Renamed skid"),
@@ -488,6 +489,29 @@ test("write scopes stay pinned to their revision while unbound scopes can only r
   assert.equal(backend.expectedRevision, 17, "refresh must not rebind an outstanding editor");
   assert.equal(calls.at(-2)[1].p_expected_revision, 17);
   assert.equal(calls.at(-1)[1].p_expected_revision, 18);
+});
+
+test("Checked by saves a validated manual name against the viewed revision and previous name", async () => {
+  const saved = { project: { walkdownId, revision: 17, status: "draft", checkedByName: "Miro Gohacki" }, revisions: [] };
+  const h = fixture({ rpcResults: { qa_set_checked_by: saved } });
+  assert.equal(await h.backend.setCheckedBy("  Miro Gohacki  "), saved);
+  assert.deepEqual(h.calls.at(-1), ["qa_set_checked_by", {
+    p_walkdown_id: walkdownId, p_expected_revision: 17,
+    p_name: "Miro Gohacki", p_expected_name: null,
+  }]);
+  await h.backend.setCheckedBy("Nguyễn Khuong", "Miro Gohacki");
+  assert.deepEqual(h.calls.at(-1), ["qa_set_checked_by", {
+    p_walkdown_id: walkdownId, p_expected_revision: 17,
+    p_name: "Nguyễn Khuong", p_expected_name: "Miro Gohacki",
+  }]);
+  h.calls.length = 0;
+  for (const name of [undefined, null, 17, {}, [], "", " \t\n ", "x".repeat(121), "First\nLast", "First\tLast", "A\u0000B", "A\u007fB"])
+    await assert.rejects(h.backend.setCheckedBy(name), /name for Checked by/);
+  for (const previous of [17, {}, [], "", " ", "x".repeat(121), "First\nLast"])
+    await assert.rejects(h.backend.setCheckedBy("Miro Gohacki", previous), /Refresh the report/);
+  assert.deepEqual(h.calls, [], "invalid names cannot reach the server");
+  const conflict = fixture({ rpcErrors: { qa_set_checked_by: { message: "Checked by changed. Refresh before saving." } } });
+  await assert.rejects(conflict.backend.setCheckedBy("Kong", null), /Checked by changed.*Refresh/);
 });
 
 test("closing, reopening, and loading revisions use authoritative versioned RPCs", async () => {

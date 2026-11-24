@@ -77,11 +77,50 @@ async function setupPhoto(h, walkdownId, runId, revision, userId = admin) {
   return { id, path, photo };
 }
 
+test("functional test data, comments and setup photos all require the current draft's manual checker", async t => {
+  const h = await database(t), report = await h.rpc("qa_create_walkdown", "Unchecked functional test");
+  const runId = crypto.randomUUID(), data = runData();
+  data.comment = "Manually entered run comment";
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, runId, data, 1, null), /Enter Checked by/);
+  assert.deepEqual((await h.state(report.id)).testRuns, []);
+  await h.rpc("qa_set_checked_by", report.id, "Functional checker", 1, null);
+  const saved = await h.rpc("qa_save_test_run", report.id, runId, data, 1, null);
+  const photo = await setupPhoto(h, report.id, runId, 1);
+  const before = await h.state(report.id);
+  const closed = await h.rpc("qa_approve_revision", report.id, 1, before.project.contentVersion);
+  const next = await h.rpc("qa_new_revision", report.id, 1);
+  assert.equal(next.project.checkedByName, null);
+  assert.deepEqual(next.testRuns, closed.testRuns);
+  const newId = crypto.randomUUID(), path = `${admin}/${newId}.jpg`;
+  for (const [name, args] of [
+    ["qa_save_test_run", [report.id, runId, { ...data, comment: "Unchecked edit" }, 2, saved.runVersion]],
+    ["qa_delete_test_run", [report.id, runId, 2, saved.runVersion]],
+    ["qa_prepare_test_setup_photo", [report.id, runId, newId, path, "Unchecked setup", 100, 100, 2]],
+    ["qa_prepare_test_setup_photo", [report.id, runId, newId, path, "Unchecked setup", 100, 100, 2, "Caption"]],
+    ["qa_add_test_setup_photo", [report.id, runId, photo.id, 2]],
+    ["qa_update_test_setup_photo", [report.id, runId, photo.id, "Unchecked caption", 2]],
+    ["qa_reorder_test_setup_photos", [report.id, runId, [photo.id], [photo.id], 2]],
+    ["qa_delete_test_setup_photo", [report.id, runId, photo.id, 2]],
+  ]) await assert.rejects(h.rpc(name, ...args), /Enter Checked by/, name);
+  await h.db.exec("reset role");
+  await assert.rejects(h.db.query("update public.qa_test_runs set data=$2 where id=$1", [runId, { ...data, comment: "Direct edit" }]), /Enter Checked by/);
+  await assert.rejects(h.db.query("update public.qa_photos set caption='Direct edit' where id=$1", [photo.id]), /Enter Checked by/);
+  await h.user();
+  assert.deepEqual((await h.state(report.id)).testRuns, closed.testRuns);
+  await h.rpc("qa_set_checked_by", report.id, "Next revision checker", 2, null);
+  await h.rpc("qa_update_test_setup_photo", report.id, runId, photo.id, "Reviewed setup", 2);
+  assert.equal((await h.state(report.id)).testRuns[0].setupPhotos[0].caption, "Reviewed setup");
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns);
+  assert.deepEqual((await h.db.query("select data from public.qa_test_runs where id=$1", [runId])).rows[0].data, data,
+    "checker setup and photo edits never rewrite imported source JSON");
+});
+
 test("functional test imports preserve old snapshots and share explicit approval/revision locks", async (t) => {
   const beforeImports = schema.split("-- PRONETA test report layer;")[0]
     .replace(/    'testRuns', qa_private\.test_runs_state\(p_walkdown_id\),\r?\n/, "") + "commit;";
   const h = await database(t, beforeImports);
   const report = await h.rpc("qa_create_walkdown", "Functional test skid");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const original = await h.state(report.id);
   await h.rpc("qa_approve_revision", report.id, 1, original.project.contentVersion);
   const oldSnapshot = (await h.db.query("select snapshot from public.qa_report_revisions where walkdown_id=$1", [report.id])).rows[0].snapshot;
@@ -95,6 +134,7 @@ test("functional test imports preserve old snapshots and share explicit approval
   assert.deepEqual((await h.db.query("select snapshot from public.qa_report_revisions where walkdown_id=$1", [report.id])).rows[0].snapshot, oldSnapshot);
   assert.equal((await h.state(report.id)).testRuns, undefined, "legacy closed JSON remains byte-for-byte compatible");
   await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 2, null);
   const draft = await h.state(report.id);
   const id = crypto.randomUUID(), data = runData();
   const saved = await h.rpc("qa_save_test_run", report.id, id, data, 2, null);
@@ -128,6 +168,7 @@ test("functional test imports preserve old snapshots and share explicit approval
   await h.user();
   assert.deepEqual(await h.state(report.id), closed, "schema and individual migrations preserve the closed report");
   await h.rpc("qa_new_revision", report.id, 2);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 3, null);
   assert.deepEqual((await h.state(report.id)).testRuns, [saved], "the next draft starts with the current run");
   await assert.rejects(h.rpc("qa_save_test_run", report.id, id, { ...data, name: "Late overwrite" }, 2, 1), /different revision/);
   const editedData = { ...data, name: "Reviewed imported run", software: { name: "PRONETA Basic", version: "3.9.1" } };
@@ -147,7 +188,9 @@ test("functional test imports preserve old snapshots and share explicit approval
 test("functional test writes require source/software validity, ordered shared timing, and inspector ownership", async (t) => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Validation skid");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const other = await h.rpc("qa_create_walkdown", "Other skid");
+  await h.rpc("qa_set_checked_by", other.id, "Fixture checker", other.revision, null);
   const valid = runData();
   const checkInvalid = async (edit, pattern) => {
     const data = structuredClone(valid); edit(data);
@@ -223,6 +266,7 @@ test("functional test writes require source/software validity, ordered shared ti
 test("authored comments belong to one test run and remain frozen after approval and later clearing", async (t) => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Authored test comments skid");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const id = crypto.randomUUID(), otherId = crypto.randomUUID(), data = runData();
   await h.user(second);
   const legacy = await h.rpc("qa_save_test_run", report.id, id, data, 1, null);
@@ -264,6 +308,7 @@ test("authored comments belong to one test run and remain frozen after approval 
   assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns,
     "upgrading validation preserves approved comments and legacy runs");
   await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 2, null);
   await assert.rejects(h.rpc("qa_save_test_run", report.id, id, { ...adminData, comment: null }, 2, 3), /comments.*4,000/);
   const clearedData = { ...adminData, comment: "", devices: [{ ...adminData.devices[0], comment: "" }] };
   const cleared = await h.rpc("qa_save_test_run", report.id, id, clearedData, 2, 3);
@@ -279,6 +324,7 @@ test("authored comments belong to one test run and remain frozen after approval 
 test("event exclusions retain original source JSON, require normal save locks, and stay frozen after later restoration", async t => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Reviewed event rows skid");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const id = crypto.randomUUID(), data = runData();
   const saved = await h.rpc("qa_save_test_run", report.id, id, data, 1, null);
   assert.equal(Object.hasOwn(saved.devices[0].channels[0].series[0].points[0], "excluded"), false);
@@ -306,6 +352,7 @@ test("event exclusions retain original source JSON, require normal save locks, a
   await h.user(admin);
   assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns);
   await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 2, null);
   await assert.rejects(h.rpc("qa_save_test_run", report.id, id, restored, 1, 2), /different revision/);
   const invalid = structuredClone(restored);
   invalid.devices[0].channels[0].series[0].points[0].excluded = "false";
@@ -320,6 +367,7 @@ test("event exclusions retain original source JSON, require normal save locks, a
 test("deployment verification works for a table-read role without private helper execution", async (t) => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Read-only deployment verification");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const data = runData();
   await h.rpc("qa_save_test_run", report.id, crypto.randomUUID(), data, 1, null);
   const removedId = crypto.randomUUID();
@@ -340,7 +388,7 @@ test("deployment verification works for a table-read role without private helper
   await h.db.exec("begin read only");
   try {
     const checks = (await h.db.query(deploymentChecks)).rows[0];
-    assert.equal(Object.keys(checks).length, 12);
+    assert.equal(Object.keys(checks).length, 14);
     assert.equal(Object.values(checks).every(value => value === true), true);
     const manualCheck = verification.match(/select w\.id as closed_report_with_changed_test_runs[\s\S]*?;/)[0];
     assert.deepEqual((await h.db.query(manualCheck)).rows, []);
@@ -355,6 +403,7 @@ test("deployment verification works for a table-read role without private helper
 test("setup photos share closeout locks and frozen revisions without entering inspection evidence or source JSON", async (t) => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Setup photo revision skid");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const runId = crypto.randomUUID(), data = runData();
   const saved = await h.rpc("qa_save_test_run", report.id, runId, data, 1, null);
   const before = await h.state(report.id);
@@ -402,6 +451,7 @@ test("setup photos share closeout locks and frozen revisions without entering in
   await h.user();
   assert.deepEqual((await h.db.query("select snapshot from public.qa_report_revisions where walkdown_id=$1 and revision=1", [report.id])).rows[0].snapshot, frozen);
   await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 2, null);
   assert.deepEqual((await h.state(report.id)).testRuns[0].setupPhotos, closed.testRuns[0].setupPhotos);
   await assert.rejects(h.rpc("qa_add_test_setup_photo", report.id, runId, pendingId, 1), /different revision/);
   await assert.rejects(h.rpc("qa_add_test_setup_photo", report.id, runId, pendingId, 2), /reservation was not found/);
@@ -419,6 +469,7 @@ test("setup photos share closeout locks and frozen revisions without entering in
 test("setup upload captions become visible with the photo, survive retries, and retain legacy upload compatibility", async t => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Captioned setup upload skid"), runId = crypto.randomUUID();
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   await h.rpc("qa_save_test_run", report.id, runId, runData(), 1, null);
   const id = crypto.randomUUID(), path = `${admin}/${id}.jpg`;
   const caption = "Air supply at 6 bar\nFeedback connected to CH0";
@@ -455,6 +506,7 @@ test("setup upload captions become visible with the photo, survive retries, and 
 test("captioned setup reservations keep both RPC signatures restricted to verified run owners and administrators", async t => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Captioned setup access skid"), runId = crypto.randomUUID();
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   await h.rpc("qa_save_test_run", report.id, runId, runData(), 1, null);
   for (const signature of [
     "public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint)",
@@ -482,7 +534,9 @@ test("captioned setup reservations keep both RPC signatures restricted to verifi
 test("setup photo writes require the owning saved run, validated scope, bounded captions, and bounded reservations", async (t) => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Setup permissions skid");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const other = await h.rpc("qa_create_walkdown", "Another setup skid");
+  await h.rpc("qa_set_checked_by", other.id, "Fixture checker", other.revision, null);
   await h.user(second);
   const runId = crypto.randomUUID(), otherRunId = crypto.randomUUID();
   await h.rpc("qa_save_test_run", report.id, runId, runData(), 1, null);
@@ -527,6 +581,7 @@ test("setup photo writes require the owning saved run, validated scope, bounded 
 test("setup photo order persists atomically, appends uploads, detects competing changes, and freezes at approval", async t => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Ordered setup skid"), runId = crypto.randomUUID(), data = runData();
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   await h.rpc("qa_save_test_run", report.id, runId, data, 1, null);
   const a = await setupPhoto(h, report.id, runId, 1), b = await setupPhoto(h, report.id, runId, 1), c = await setupPhoto(h, report.id, runId, 1);
   await h.rpc("qa_update_test_setup_photo", report.id, runId, b.id, "Middle connection", 1);
@@ -565,6 +620,7 @@ test("setup photo order persists atomically, appends uploads, detects competing 
   assert.deepEqual((await h.db.query(manualCheck)).rows, []);
   await h.user();
   await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 2, null);
   await assert.rejects(h.rpc("qa_reorder_test_setup_photos", report.id, runId, oldIds, winningIds, 1), /different revision/);
   await h.rpc("qa_reorder_test_setup_photos", report.id, runId, [...winningIds].reverse(), winningIds, 2);
   assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).testRuns, closed.testRuns,
@@ -577,6 +633,7 @@ test("setup photo order persists atomically, appends uploads, detects competing 
 test("setup photo order requires owner or admin access and an exact validated current photo list", async t => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Order permissions skid"), runId = crypto.randomUUID(), otherId = crypto.randomUUID();
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   await h.rpc("qa_save_test_run", report.id, runId, runData(), 1, null);
   await h.rpc("qa_save_test_run", report.id, otherId, runData(), 1, null);
   const a = await setupPhoto(h, report.id, runId, 1), b = await setupPhoto(h, report.id, runId, 1);
@@ -612,6 +669,7 @@ test("setup photo order requires owner or admin access and an exact validated cu
 test("setup photo order migration backfills legacy timestamp and ID order without changing closed reports", async t => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Legacy photo order skid"), runId = crypto.randomUUID();
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   await h.rpc("qa_save_test_run", report.id, runId, runData(), 1, null);
   const a = await setupPhoto(h, report.id, runId, 1), b = await setupPhoto(h, report.id, runId, 1), c = await setupPhoto(h, report.id, runId, 1);
   await h.db.exec("reset role");
@@ -631,6 +689,7 @@ test("setup photo order migration backfills legacy timestamp and ID order withou
   await h.user();
   assert.deepEqual(await h.state(report.id), closed, "metadata backfill leaves frozen JSON and review tokens unchanged");
   await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 2, null);
   const reversedIds = [...legacyIds].reverse();
   await h.rpc("qa_reorder_test_setup_photos", report.id, runId, reversedIds, legacyIds, 2);
   await h.db.exec("reset role");

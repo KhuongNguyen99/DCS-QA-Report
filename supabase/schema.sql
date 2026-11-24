@@ -618,6 +618,21 @@ alter table public.qa_walkdowns add column if not exists content_version bigint 
 alter table public.qa_walkdowns add column if not exists closed_at timestamptz;
 alter table public.qa_walkdowns add column if not exists closed_by uuid references auth.users(id);
 alter table public.qa_walkdowns add column if not exists closed_by_name text;
+-- Manual checker attribution belongs to this draft, not the account that
+-- creates it. Existing reports and approved snapshots are never backfilled.
+alter table public.qa_walkdowns add column if not exists checked_by_name text
+  check (checked_by_name = trim(checked_by_name) and length(checked_by_name) between 1 and 120
+    and checked_by_name ~ '[^[:space:]]' and checked_by_name !~ '[[:cntrl:]]');
+alter table public.qa_walkdowns add column if not exists checked_by_recorded_at timestamptz;
+alter table public.qa_walkdowns add column if not exists checked_by_recorded_by uuid references auth.users(id);
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'qa_walkdowns_checked_by_audit'
+    and conrelid = 'public.qa_walkdowns'::regclass) then
+    alter table public.qa_walkdowns add constraint qa_walkdowns_checked_by_audit check (
+      (checked_by_name is null and checked_by_recorded_at is null and checked_by_recorded_by is null)
+      or (checked_by_name is not null and checked_by_recorded_at is not null and checked_by_recorded_by is not null));
+  end if;
+end; $$;
 alter table public.qa_comments add column if not exists deleted_at timestamptz;
 alter table public.qa_comments add column if not exists deleted_by uuid references auth.users(id);
 alter table public.qa_photos add column if not exists reserved_revision bigint;
@@ -667,6 +682,7 @@ begin
   if not found then raise exception 'Choose an existing skid walkdown.'; end if;
   if p_write and report.name_required then raise exception 'Name this skid before saving inspection changes.'; end if;
   if p_write and report.status <> 'draft' then raise exception 'This revision is approved and closed. Start a new revision to make changes.'; end if;
+  if p_write and report.checked_by_name is null then raise exception 'Enter Checked by before saving inspection data, photos, or comments.'; end if;
 end;
 $$;
 
@@ -682,6 +698,11 @@ begin
   end if;
   if report.status <> 'draft' then raise exception 'This revision is approved and closed. Start a new revision to make changes.'; end if;
   if report.name_required and not p_allow_unnamed then raise exception 'Name this skid before saving inspection changes.'; end if;
+  -- Only the naming and checker-setup RPCs pass this private metadata exemption.
+  -- They still require the selected draft revision and an approved inspector.
+  if not p_allow_unnamed and report.checked_by_name is null then
+    raise exception 'Enter Checked by before saving inspection data, photos, or comments.';
+  end if;
 end;
 $$;
 
@@ -702,17 +723,26 @@ when (old.* is distinct from new.*) execute function qa_private.bump_report_revi
 -- report. Pending upload cancellation is cleanup, never part of its snapshot.
 create or replace function qa_private.guard_report_row()
 returns trigger language plpgsql security definer set search_path = '' as $$
-declare report_id uuid; report_status text;
+declare report_id uuid; report public.qa_walkdowns%rowtype;
 begin
   if tg_op = 'DELETE' then report_id := old.walkdown_id; else report_id := new.walkdown_id; end if;
   perform pg_catalog.pg_advisory_xact_lock(450007, pg_catalog.hashtext(report_id::text));
-  select status into report_status from public.qa_walkdowns where id = report_id;
-  if report_status <> 'draft' then
-    if tg_table_name = 'qa_photos' and tg_op = 'UPDATE' then
-      if old.upload_state = 'pending' and new.deleted_at is not null
-        and (to_jsonb(old) - 'deleted_at' - 'deleted_by') = (to_jsonb(new) - 'deleted_at' - 'deleted_by') then return new; end if;
-    end if;
+  select * into report from public.qa_walkdowns where id = report_id;
+  -- Abandoning an unfinished reservation remains safe before checker setup or
+  -- after closeout; it cannot add or alter approved evidence.
+  if tg_table_name = 'qa_photos' and tg_op = 'UPDATE' then
+    if old.upload_state = 'pending' and new.deleted_at is not null
+      and (to_jsonb(old) - 'deleted_at' - 'deleted_by') = (to_jsonb(new) - 'deleted_at' - 'deleted_by') then return new; end if;
+  end if;
+  if report.status <> 'draft' then
     raise exception 'This revision is approved and closed. Start a new revision to make changes.';
+  end if;
+  if report.checked_by_name is null then
+    if tg_table_name = 'qa_records' and tg_op = 'INSERT' then
+      if not new.complete and new.completed_at is null and new.completed_by is null
+        and new.quality is null and new.quality_at is null and new.quality_by is null then return new; end if;
+    end if;
+    raise exception 'Enter Checked by before saving inspection data, photos, or comments.';
   end if;
   if tg_op = 'DELETE' then return old; else return new; end if;
 end;
@@ -753,7 +783,8 @@ returns jsonb language sql stable security definer set search_path = '' as $$
   select jsonb_build_object('id', id, 'skidName', skid_name, 'nameRequired', name_required,
     'revision', revision, 'revisionNumberBase', revision_number_base, 'updatedAt', updated_at, 'createdAt', created_at,
     'status', status, 'contentVersion', content_version, 'closedAt', closed_at,
-    'closedBy', closed_by, 'closedByName', closed_by_name)
+    'closedBy', closed_by, 'closedByName', closed_by_name,
+    'checkedByName', checked_by_name, 'checkedByRecordedAt', checked_by_recorded_at, 'checkedByRecordedBy', checked_by_recorded_by)
   from public.qa_walkdowns where id = p_walkdown_id;
 $$;
 
@@ -781,7 +812,8 @@ returns jsonb language sql stable security definer set search_path = '' as $$
     'project', jsonb_build_object('title', '450k Skid x7 - DCS', 'revision', w.revision, 'revisionNumberBase', w.revision_number_base, 'scheduleRevision', 3,
       'updatedAt', w.updated_at, 'walkdownId', w.id, 'skidName', w.skid_name, 'nameRequired', w.name_required,
       'status', w.status, 'contentVersion', w.content_version, 'closedAt', w.closed_at,
-      'closedBy', w.closed_by, 'closedByName', w.closed_by_name),
+      'closedBy', w.closed_by, 'closedByName', w.closed_by_name,
+      'checkedByName', w.checked_by_name, 'checkedByRecordedAt', w.checked_by_recorded_at, 'checkedByRecordedBy', w.checked_by_recorded_by),
     'inspector', qa_private.current_inspector(),
     'testRuns', qa_private.test_runs_state(p_walkdown_id),
     'catalog', coalesce((select jsonb_agg(jsonb_build_object('key', t.key, 'kind', t.kind, 'terminal', t.terminal, 'label', case when t.kind = 'terminal' then 'Terminal ' || t.label else t.label end)
@@ -824,6 +856,10 @@ begin
   perform qa_private.require_walkdown(p_walkdown_id, false);
   return coalesce((select jsonb_agg(jsonb_build_object('revision', revision, 'skidName', skid_name,
     'closedAt', closed_at, 'closedBy', closed_by, 'closedByName', closed_by_name,
+    'closedByTitle', snapshot->'project'->'closedByTitle',
+    'checkedByName', snapshot->'project'->'checkedByName',
+    'checkedByRecordedAt', snapshot->'project'->'checkedByRecordedAt',
+    'checkedByRecordedBy', snapshot->'project'->'checkedByRecordedBy',
     'testRunCount', case when jsonb_typeof(snapshot->'testRuns') = 'array' then jsonb_array_length(snapshot->'testRuns') else 0 end) order by revision desc)
     from public.qa_report_revisions where walkdown_id = p_walkdown_id), '[]'::jsonb);
 end;
@@ -860,6 +896,7 @@ begin
   end if;
   if report.status = 'closed' then return public.qa_load_state(p_walkdown_id); end if;
   if report.name_required then raise exception 'Name this skid before approving its QC report.'; end if;
+  if report.checked_by_name is null then raise exception 'Enter Checked by before approving this report.'; end if;
   if exists (select 1 from public.qa_photos p where p.walkdown_id = p_walkdown_id and p.deleted_at is null and p.upload_state = 'ready'
     and not exists (select 1 from storage.objects o where o.bucket_id = 'qa-evidence' and o.name = p.path)) then
     raise exception 'An evidence image is missing from storage. Restore or remove it before approving.';
@@ -900,6 +937,7 @@ begin
   end if;
   update public.qa_walkdowns set revision = revision + 1, status = 'draft', content_version = content_version + 1,
     closed_at = null, closed_by = null, closed_by_name = null, updated_at = clock_timestamp(),
+    checked_by_name = null, checked_by_recorded_at = null, checked_by_recorded_by = null,
     last_change_txid = pg_catalog.txid_current() where id = p_walkdown_id;
   return qa_private.live_report_state(p_walkdown_id) || jsonb_build_object('revisions', public.qa_list_revisions(p_walkdown_id));
 end;
@@ -907,6 +945,31 @@ $$;
 
 -- Original mutation signatures remain private implementation details. New
 -- browser overloads pin every save to the draft the inspector actually opened.
+create or replace function public.qa_set_checked_by(p_walkdown_id uuid, p_name text,
+  p_expected_revision bigint, p_expected_name text)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare name text := regexp_replace(p_name, '^[[:space:]]+|[[:space:]]+$', '', 'g'); current_name text;
+begin
+  perform qa_private.require_draft_revision(p_walkdown_id, p_expected_revision, true);
+  if name is null or length(name) not between 1 and 120 or name !~ '[^[:space:]]' or name ~ '[[:cntrl:]]' then
+    raise exception 'Enter a Checked by name between 1 and 120 characters, without control characters.';
+  end if;
+  select checked_by_name into current_name from public.qa_walkdowns where id = p_walkdown_id;
+  -- A lost successful response can retry without replacing audit attribution or
+  -- invalidating another inspector's review token when the name already agrees.
+  if current_name is distinct from name then
+    if current_name is distinct from p_expected_name then
+      raise exception 'Checked by changed since you opened this report. Refresh before changing the name.' using errcode = '40001';
+    end if;
+    update public.qa_walkdowns set checked_by_name = name,
+      checked_by_recorded_at = clock_timestamp(), checked_by_recorded_by = auth.uid()
+      where id = p_walkdown_id;
+    perform qa_private.mark_walkdown_changed(p_walkdown_id);
+  end if;
+  return qa_private.live_report_state(p_walkdown_id) || jsonb_build_object('revisions', public.qa_list_revisions(p_walkdown_id));
+end;
+$$;
+
 create or replace function public.qa_rename_walkdown(p_walkdown_id uuid, p_skid_name text, p_expected_revision bigint)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 begin
@@ -1068,7 +1131,7 @@ create or replace function qa_private.can_upload_photo(p_path text)
 returns boolean language sql stable security definer set search_path = '' as $$
   select qa_private.is_inspector() and exists (select 1 from public.qa_photos p join public.qa_walkdowns w on w.id = p.walkdown_id
     where p.path = p_path and p.created_by = auth.uid() and p.upload_state = 'pending' and p.deleted_at is null
-      and w.status = 'draft' and w.revision = p.reserved_revision);
+      and w.status = 'draft' and w.checked_by_name is not null and w.revision = p.reserved_revision);
 $$;
 create or replace function qa_private.can_read_photo(p_path text)
 returns boolean language sql stable security definer set search_path = '' as $$
@@ -1090,12 +1153,14 @@ revoke all on function public.qa_rename_walkdown(uuid,text,bigint), public.qa_pr
   public.qa_add_photo(uuid,uuid,bigint), public.qa_add_comment(uuid,text,text,bigint), public.qa_delete_comment(uuid,uuid,bigint),
   public.qa_set_complete(uuid,text,boolean,bigint), public.qa_set_quality(uuid,text,text,bigint), public.qa_delete_photo(uuid,uuid,bigint),
   public.qa_list_revisions(uuid), public.qa_load_revision(uuid,bigint), public.qa_approve_revision(uuid,bigint,bigint),
-  public.qa_new_revision(uuid,bigint), public.qa_reorder_photos(uuid,text,uuid[],uuid[],bigint) from public, anon, authenticated;
+  public.qa_new_revision(uuid,bigint), public.qa_reorder_photos(uuid,text,uuid[],uuid[],bigint),
+  public.qa_set_checked_by(uuid,text,bigint,text) from public, anon, authenticated;
 grant execute on function public.qa_rename_walkdown(uuid,text,bigint), public.qa_prepare_photo(uuid,uuid,text,text,text,integer,integer,bigint),
   public.qa_add_photo(uuid,uuid,bigint), public.qa_add_comment(uuid,text,text,bigint), public.qa_delete_comment(uuid,uuid,bigint),
   public.qa_set_complete(uuid,text,boolean,bigint), public.qa_set_quality(uuid,text,text,bigint), public.qa_delete_photo(uuid,uuid,bigint),
   public.qa_list_revisions(uuid), public.qa_load_revision(uuid,bigint), public.qa_approve_revision(uuid,bigint,bigint),
-  public.qa_new_revision(uuid,bigint), public.qa_reorder_photos(uuid,text,uuid[],uuid[],bigint) to authenticated;
+  public.qa_new_revision(uuid,bigint), public.qa_reorder_photos(uuid,text,uuid[],uuid[],bigint),
+  public.qa_set_checked_by(uuid,text,bigint,text) to authenticated;
 revoke all on all functions in schema qa_private from public, anon, authenticated;
 grant execute on function qa_private.is_inspector(), qa_private.is_admin(), qa_private.can_upload_photo(text),
   qa_private.can_read_photo(text), qa_private.can_delete_photo(text) to authenticated;
@@ -1428,7 +1493,8 @@ returns jsonb language sql stable security definer set search_path = '' as $$
     'project', jsonb_build_object('title', '450k Skid x7 - DCS', 'revision', w.revision, 'revisionNumberBase', w.revision_number_base, 'scheduleRevision', 3,
       'updatedAt', w.updated_at, 'walkdownId', w.id, 'skidName', w.skid_name, 'nameRequired', w.name_required,
       'status', w.status, 'contentVersion', w.content_version, 'closedAt', w.closed_at,
-      'closedBy', w.closed_by, 'closedByName', w.closed_by_name),
+      'closedBy', w.closed_by, 'closedByName', w.closed_by_name,
+      'checkedByName', w.checked_by_name, 'checkedByRecordedAt', w.checked_by_recorded_at, 'checkedByRecordedBy', w.checked_by_recorded_by),
     'inspector', qa_private.current_inspector(),
     'testRuns', qa_private.test_runs_state(p_walkdown_id),
     'catalog', coalesce((select jsonb_agg(jsonb_build_object('key', t.key, 'kind', t.kind, 'terminal', t.terminal, 'label', case when t.kind = 'terminal' then 'Terminal ' || t.label else t.label end)
@@ -1654,4 +1720,5 @@ revoke all on function qa_private.test_setup_photo_info(uuid), qa_private.guard_
   qa_private.require_test_setup_run(uuid,uuid,bigint), qa_private.retire_test_setup_photos() from public, anon, authenticated;
 
 notify pgrst, 'reload schema';
+
 commit;

@@ -242,6 +242,7 @@ test("test PDF rejects drafts, incomplete approval data, wrong skid, and missing
 test("approved test PDF preserves evidence and run context while fitting each device's time axis", async () => {
   await withFonts(async (requested) => {
     const state = closedState();
+    state.project.checkedByName = "Nguyễn Văn An";
     state.project.closedByTitle = "Project Manager";
     const run = state.testRuns[0];
     const channel = run.devices[0].channels[0];
@@ -261,8 +262,9 @@ test("approved test PDF preserves evidence and run context while fitting each de
     assert.match(result.pages[0], /Software: Siemens PRONETA Basic \| Version: Version entered by tester/);
     assert.match(result.pages[0], /Run time span: 2026-11-19 19:17:00 to 2026-11-19 19:23:32/);
     assert.match(result.pages[0], /Clock: Source clock \(unspecified\)/);
-    assert.match(result.pages[0], /Approved by: Inspector Example, Project Manager/);
-    assert.doesNotMatch(result.pages.slice(1).join("\n"), /Software:|Run time span:|Clock:|Approved by:/);
+    assert.match(result.pages[0], /Checked by: Nguyễn Văn An\nSigned off by: Inspector Example, Project Manager/);
+    assert.doesNotMatch(result.text, /Approved by:/);
+    assert.doesNotMatch(result.pages.slice(1).join("\n"), /Software:|Run time span:|Clock:|Checked by:|Signed off by:/);
     assert.doesNotMatch(result.text, /Stations and module parameters|Set parameters/);
     assert.equal(photoPlacements(result.streams[0]).length, 1, "the QC cover logo is on the first page");
     for (const text of ["I/O test report", "Skid Example", "Revision 2", "Inspector Example", "2026-11-20 11:30:00 UTC",
@@ -330,7 +332,9 @@ test("long cover details fit on the first page above the footer", async () => {
   await withFonts(async () => {
     const state = closedState();
     state.project.skidName = "W".repeat(120);
+    state.project.checkedByName = "W".repeat(120);
     state.project.closedByName = "W".repeat(120);
+    state.project.closedByTitle = "W".repeat(120);
     const run = state.testRuns[0];
     run.software.name = "W".repeat(120);
     run.software.version = "W".repeat(80);
@@ -340,7 +344,12 @@ test("long cover details fit on the first page above the footer", async () => {
     assert.match(result.pages[0], /Version:/);
     assert.match(result.pages[0], /Run time span:/);
     assert.match(result.pages[0], /Clock:/);
-    assert.match(result.pages[0], /Approved by:/);
+    const cover = result.pages[0].replace(/\s+/g, "");
+    assert.ok(cover.includes(`Checkedby:${"W".repeat(120)}`));
+    assert.ok(cover.includes(`Signedoffby:${"W".repeat(120)},${"W".repeat(120)}`));
+    const footerStart = result.blocks[0].findIndex(({ text }) => text.startsWith("Approved date:"));
+    assert.ok(result.blocks[0].slice(0, footerStart).every(({ y }) => y <= 548));
+    assert.doesNotMatch(result.pages.slice(1).join("\n"), /Checked by:|Signed off by:/);
     assert.doesNotMatch(result.pages.slice(1).join("\n"), /Test run details \(continued\)/);
   });
 });
@@ -365,13 +374,15 @@ test("selected run exports the loaded archived revision and excludes other runs"
     assert.match(result.text, /Saved version 1/);
     assert.match(result.text, /Archived overall review comment/);
     assert.match(result.text, /Archived device review comment/);
+    assert.match(result.pages[0], /Checked by: Not recorded\nSigned off by: Inspector Example/);
+    assert.equal(Object.hasOwn(state.project, "checkedByName"), false);
     assert.doesNotMatch(result.text, /Unselected new run|Version that must not appear|Unselected overall review comment|Unselected device review comment/);
     const all = await pdfContent(await createTestReportPdf({ state }));
     assert.match(all.pages[0], /Archived run/);
     assert.match(all.pages[0], /Unselected new run/);
     assert.match(all.pages[0], /Version that must not appear/);
     assert.match(all.pages[0], /Run time span/);
-    assert.match(all.pages[0], /Approved by: Inspector Example/);
+    assert.match(all.pages[0], /Checked by: Not recorded\nSigned off by: Inspector Example/);
     assert.match(all.text, /Archived overall review comment/);
     assert.match(all.text, /Archived device review comment/);
     assert.match(all.text, /Unselected overall review comment/);
@@ -390,6 +401,9 @@ test("export captures the approved payload before asynchronous font loading", as
   };
   try {
     const state = closedState();
+    state.project.checkedByName = "Saved Checker";
+    state.project.closedByName = "Saved Signatory";
+    state.project.closedByTitle = "Saved Title";
     state.testRuns[0].comment = "Approved overall review comment";
     state.testRuns[0].devices[0].comment = "Approved device review comment";
     const excluded = state.testRuns[0].devices[0].channels[0].series[0].points[1];
@@ -398,6 +412,9 @@ test("export captures the approved payload before asynchronous font loading", as
     const pending = createTestReportPdf({ state });
     state.project.revision = 99;
     state.project.skidName = "Mutated skid";
+    state.project.checkedByName = "Mutated Checker";
+    state.project.closedByName = "Mutated Signatory";
+    state.project.closedByTitle = "Mutated Title";
     state.testRuns[0].devices[0].name = "Mutated device";
     state.testRuns[0].software.version = "Mutated software";
     state.testRuns[0].comment = "Mutated overall comment";
@@ -409,6 +426,7 @@ test("export captures the approved payload before asynchronous font loading", as
     assert.match(result.text, /RTD-EXAMPLE/);
     assert.match(result.text, /Approved overall review comment/);
     assert.match(result.text, /Approved device review comment/);
+    assert.match(result.pages[0], /Checked by: Saved Checker\nSigned off by: Saved Signatory, Saved Title/);
     assert.doesNotMatch(result.text, /Removed events|EXCLUDED-AT-EXPORT|Mutated|Revision 99/);
   } finally { globalThis.fetch = original; }
 });

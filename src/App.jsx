@@ -24,7 +24,7 @@ import Icon from "./Icons.jsx";
 import OverviewTable from "./OverviewTable.jsx";
 import CommentPanel from "./CommentPanel.jsx";
 import QualityControl from "./QualityControl.jsx";
-import RevisionPanel from "./RevisionPanel.jsx";
+import RevisionPanel, { CheckedByForm } from "./RevisionPanel.jsx";
 import TestReportsPanel from "./TestReportsPanel.jsx";
 import PhotoGallery from "./PhotoGallery.jsx";
 import { testTimeRangeScope, readTestTimeRanges, inheritTestTimeRanges } from "./test-time-ranges.js";
@@ -209,7 +209,9 @@ function App() {
   const reportRevision = state.project?.revision ?? selectedSkid?.revision ?? 1;
   const displayedRevision = revisionNumber(state.project ?? selectedSkid, reportRevision);
   const revisionStatus = state.project?.status;
-  const editable = connected && revisionStatus === "draft";
+  const draftOpen = connected && revisionStatus === "draft";
+  const checkerRequired = draftOpen && !state.project.checkedByName?.trim();
+  const editable = draftOpen && !checkerRequired;
   const writeBackend = useMemo(
     () => backend && Number.isSafeInteger(reportRevision) && reportRevision > 0
       ? backend.forRevision(reportRevision) : null,
@@ -217,6 +219,9 @@ function App() {
   );
   const activeEditor = useRef(null);
   activeEditor.current = editable ? writeBackend : null;
+  const activeDraft = useRef(null);
+  activeDraft.current = draftOpen ? writeBackend : null;
+  const checkerSaving = useRef(false);
   const transitionRef = useRef(false);
   const exportingRef = useRef(false);
   const draftPrefix = `${selectedId}:${reportRevision}:`;
@@ -419,6 +424,7 @@ function App() {
     return drafts[`${draftPrefix}${key}`] || "";
   }
   function updateDraft(key, value) {
+    if (!editable || activeEditor.current !== writeBackend) return;
     const scopedKey = `${draftPrefix}${key}`;
     setDrafts((previous) => ({
       ...previous,
@@ -472,6 +478,8 @@ function App() {
       throw new Error(
         "Choose a named skid report before adding inspection evidence.",
       );
+    if (checkerRequired)
+      throw new Error("Save Checked by before adding or changing inspection evidence. Your pending work is retained.");
     if (!editable || activeEditor.current !== writeBackend)
       throw new Error("This revision is closed or has changed. Open Report and start a new revision to continue editing.");
     setPending((count) => count + 1);
@@ -501,11 +509,16 @@ function App() {
     openCamera(null, terminal);
   }
   function openCamera(target, terminal) {
+    if (!readyToDocument()) return;
     setCamera({ target, terminal, backend: writeBackend, revision: reportRevision });
   }
   function readyToDocument() {
     if (editable) return true;
     if (!signedIn) setAuthOpen(true);
+    else if (checkerRequired) {
+      setError("Save Checked by before entering inspection or test data.");
+      document.getElementById("checked-by-name")?.focus();
+    }
     else if (connected) {
       setError("This revision is locked. Open Report and choose New revision to continue editing.");
       navigate("report");
@@ -528,6 +541,7 @@ function App() {
   }
   async function saveBulkPhoto(key, photo) {
     const scope = bulkUpload;
+    if (checkerRequired) throw new Error("Save Checked by before uploading evidence. Your selected photos are retained.");
     if (!scope || activeEditor.current !== scope.backend || selectedIdRef.current !== scope.walkdownId)
       throw new Error("This report revision is closed or no longer active. Start a new revision before uploading more evidence.");
     setPending((count) => count + 1);
@@ -556,6 +570,8 @@ function App() {
     if (!connected || transitionRef.current || pending || reporting) return;
     if (review.walkdownId && review.walkdownId !== selectedId)
       throw new Error("Select the report you reviewed before approving.");
+    if (action === "approve" && !state.project.checkedByName?.trim())
+      throw new Error("Save Checked by before approving this revision.");
     if (action === "approve" && hasDraftComments)
       throw new Error("Post or clear your draft comments before approving this revision.");
     if (action === "approve" && testDraftDirty)
@@ -577,7 +593,7 @@ function App() {
         setLastSync(new Date());
         setNotice(action === "approve"
           ? `Revision ${revisionNumber(saved.project)} approved and closed`
-          : `Revision ${revisionNumber(saved.project)} is ready for editing`);
+          : `Revision ${revisionNumber(saved.project)} created. Save Checked by before entering data.`);
         loadWorkspace().catch(() => {});
       }
     } catch (e) {
@@ -587,6 +603,38 @@ function App() {
     } finally {
       transitionRef.current = false;
       setPending((count) => count - 1);
+    }
+  }
+
+  async function saveCheckedBy(name, expectedName, expectedRevision, walkdownId) {
+    const scope = writeBackend;
+    if (!draftOpen || !scope || activeBackend.current !== backend || activeDraft.current !== scope || expectedRevision !== reportRevision
+      || walkdownId !== selectedIdRef.current || walkdownId !== scope.walkdownId)
+      throw new Error("This draft changed. Reopen the current report before saving Checked by.");
+    if (checkerSaving.current || transitionRef.current || pending || reporting)
+      throw new Error("Wait for the current save to finish, then save Checked by.");
+    const trimmed = name.trim();
+    if (!trimmed || Array.from(trimmed).length > 120 || /[\u0000-\u001f\u007f-\u009f]/u.test(trimmed))
+      throw new Error("Enter a name of 1–120 characters without control characters.");
+    checkerSaving.current = true;
+    setPending(count => count + 1); setError("");
+    try {
+      const saved = await scope.setCheckedBy(trimmed, expectedName);
+      if (activeDraft.current === scope && activeBackend.current === backend && selectedIdRef.current === walkdownId) {
+        ++request.current;
+        setState(saved); setLoading(false); setLastSync(new Date());
+        setNotice("Checked by saved.");
+      }
+      return saved;
+    } catch (failure) {
+      if (activeBackend.current === backend && selectedIdRef.current === walkdownId) {
+        setError(failure.message);
+        await refresh().catch(() => {});
+      }
+      throw failure;
+    } finally {
+      checkerSaving.current = false;
+      setPending(count => count - 1);
     }
   }
   async function exportReport(revision = reportRevision, kind = "qc", runId = null) {
@@ -630,18 +678,21 @@ function App() {
   const exportTestReport = (revision = reportRevision, runId = null) => exportReport(revision, "tests", runId);
 
   async function saveTestRun(run, expectedRevision) {
+    if (checkerRequired) throw new Error("Save Checked by to resume this test run. Your pending changes are retained.");
     if (expectedRevision !== reportRevision || activeEditor.current !== writeBackend)
       throw new Error("This test import belongs to an earlier revision. Reopen it in the current draft.");
     return mutate(() => writeBackend.saveTestRun(run), "Test run saved to this revision");
   }
 
   async function deleteTestRun(run, expectedRevision) {
+    if (checkerRequired) throw new Error("Save Checked by before changing test reports.");
     if (expectedRevision !== reportRevision || activeEditor.current !== writeBackend)
       throw new Error("This report revision changed. Refresh before removing a test run.");
     return mutate(() => writeBackend.deleteTestRun(run.id, run.runVersion), "Test run removed from this draft");
   }
 
   function setupPhotoScope(run, expectedRevision) {
+    if (checkerRequired) throw new Error("Save Checked by before changing test setup photos.");
     if (!writeBackend || expectedRevision !== reportRevision || activeEditor.current !== writeBackend
       || (run.walkdownId && run.walkdownId !== selectedId))
       throw new Error("This setup belongs to an earlier report revision. Reopen the current draft before editing photos.");
@@ -950,7 +1001,7 @@ function App() {
               <div className="skid-picker-actions">
                 <button
                   className="small-button"
-                  disabled={!selectedSkid || switchBlocked || loading || (!selectedSkid.nameRequired && !editable)}
+                  disabled={!selectedSkid || switchBlocked || loading || (!selectedSkid.nameRequired && !draftOpen)}
                   onClick={() => openSkidDialog("rename")}
                 >
                   Rename skid
@@ -965,6 +1016,14 @@ function App() {
               </div>
             </section>
           )}
+
+          {checkerRequired && <section className="card checked-by-required" aria-label="Checked by required">
+            <span className="eyebrow">BEFORE DATA ENTRY</span>
+            <h2>Add the checker’s name</h2>
+            <p>Save Checked by to add or change inspection and test evidence in this revision. You can keep viewing the report and its history.</p>
+            <CheckedByForm key={`${selectedId}:${reportRevision}`} project={state.project}
+              pending={pending > 0 || Boolean(reporting)} onSave={saveCheckedBy} />
+          </section>}
 
           {connected && revisionStatus === "closed" && view !== "report" && view !== "workspace" && (
             <div className="message revision-locked-notice">
@@ -1309,6 +1368,7 @@ function App() {
               graphOrderChanges={graphOrderChanges}
               onGraphOrderChange={changeGraphOrder}
               readOnly={!editable}
+              checkerRequired={checkerRequired}
               pending={pending > 0 || Boolean(reporting)}
               exportProgress={reporting}
               onSave={saveTestRun}
@@ -1366,6 +1426,7 @@ function App() {
                   targetCount={TARGETS.length}
                   pending={pending > 0 || Boolean(reporting)}
                   hasDraftComments={hasDraftComments}
+                  onSaveCheckedBy={saveCheckedBy}
                   onApprove={(review) => changeRevision("approve", review)}
                   onNewRevision={(revision) => changeRevision("new", { revision })}
                   onExport={exportReport}
@@ -1374,7 +1435,7 @@ function App() {
               )}
               {connected && ((state.testRuns?.length || 0) > 0 || testDraftDirty) && <div className="card test-report-link">
                 <div><strong>{state.testRuns?.length || 0} saved test runs in revision {displayedRevision}</strong>
-                  <p>{testDraftDirty ? "You have unsaved test run changes. Save or discard them before approval." : "Setup photos, software details, recorded results, parameters, and graphs share this report’s revision lock."}</p></div>
+                  <p>{testDraftDirty ? checkerRequired ? "Save Checked by to resume your retained test run changes." : "You have unsaved test run changes. Save or discard them before approval." : "Setup photos, software details, recorded results, parameters, and graphs share this report’s revision lock."}</p></div>
                 <button type="button" className="button secondary" onClick={() => navigate("tests")}>Review test reports</button>
               </div>}
               <section className="stats-strip report-stats">
@@ -1578,6 +1639,7 @@ function App() {
             state={state}
             connected={connected}
             readOnly={!editable}
+            checkerRequired={checkerRequired}
             qualityDisabled={pending > 0}
             onQuality={(value) =>
               mutate(
@@ -1955,6 +2017,7 @@ function RecordPanel({
   state,
   connected,
   readOnly = false,
+  checkerRequired = false,
   qualityDisabled,
   onQuality,
   backend,
@@ -2031,7 +2094,9 @@ function RecordPanel({
         </div>
       )}
       {connected && readOnly && (
-        <div className="inline-notice">This revision is locked. Start a new revision from Report to change evidence or results.</div>
+        <div className="inline-notice">{checkerRequired
+          ? "Save Checked by in the report workspace before changing evidence or results. Your pending work is retained."
+          : "This revision is locked. Start a new revision from Report to change evidence or results."}</div>
       )}
       <section className="record-quality">
         <h3>Quality</h3>
@@ -2077,6 +2142,7 @@ function RecordPanel({
         accept="image/*"
         multiple
         hidden
+        disabled={!connected || readOnly || qualityDisabled || Boolean(busy)}
         onChange={upload}
       />
       {busy === "photos" && (

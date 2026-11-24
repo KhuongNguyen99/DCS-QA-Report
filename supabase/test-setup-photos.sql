@@ -66,7 +66,8 @@ returns jsonb language sql stable security definer set search_path = '' as $$
     'project', jsonb_build_object('title', '450k Skid x7 - DCS', 'revision', w.revision, 'revisionNumberBase', w.revision_number_base, 'scheduleRevision', 3,
       'updatedAt', w.updated_at, 'walkdownId', w.id, 'skidName', w.skid_name, 'nameRequired', w.name_required,
       'status', w.status, 'contentVersion', w.content_version, 'closedAt', w.closed_at,
-      'closedBy', w.closed_by, 'closedByName', w.closed_by_name),
+      'closedBy', w.closed_by, 'closedByName', w.closed_by_name,
+      'checkedByName', w.checked_by_name, 'checkedByRecordedAt', w.checked_by_recorded_at, 'checkedByRecordedBy', w.checked_by_recorded_by),
     'inspector', qa_private.current_inspector(),
     'testRuns', qa_private.test_runs_state(p_walkdown_id),
     'catalog', coalesce((select jsonb_agg(jsonb_build_object('key', t.key, 'kind', t.kind, 'terminal', t.terminal, 'label', case when t.kind = 'terminal' then 'Terminal ' || t.label else t.label end)

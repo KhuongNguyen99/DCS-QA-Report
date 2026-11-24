@@ -75,22 +75,16 @@ async function pdfContent(blob) {
       const contentId = body.match(/\/Contents\s+(\d+) 0 R/)?.[1];
       return streamFor(objects.get(contentId));
     });
-  const pages = streams.map((stream) => {
-      return [...stream.matchAll(/BT\r?\n([\s\S]*?)\r?\nET/g)]
-        .map(([, block]) => {
-          const hex = block.match(/<([0-9a-fA-F]+)>\s*Tj/)?.[1];
-          if (hex) {
-            const font = block.match(/\/F(\d+)\s+[\d.]+\s+Tf/)?.[1];
-            const glyphs = fonts.get(font);
-            return [...hex.matchAll(/.{4}/g)]
-              .map(([glyph]) => glyphs?.get(glyph.toUpperCase()) || "")
-              .join("");
-          }
-          return block.match(/\((.*?)\)\s*Tj/)?.[1] || "";
-        })
-        .join("\n");
-    });
-  return { raw, text: pages.join("\n"), pages, streams };
+  const blocks = streams.map((stream) => [...stream.matchAll(/BT\r?\n([\s\S]*?)\r?\nET/g)].map(([, block]) => {
+    const hex = block.match(/<([0-9a-fA-F]+)>\s*Tj/)?.[1];
+    const font = block.match(/\/F(\d+)\s+[\d.]+\s+Tf/)?.[1];
+    const text = hex ? [...hex.matchAll(/.{4}/g)].map(([glyph]) => fonts.get(font)?.get(glyph.toUpperCase()) || "").join("")
+      : block.match(/\((.*?)\)\s*Tj/)?.[1] || "";
+    const xy = block.match(/([\d.+-]+) ([\d.+-]+) Td/);
+    return { text, x: xy ? Number(xy[1]) : null, y: xy ? 612 - Number(xy[2]) : null };
+  }));
+  const pages = blocks.map((page) => page.map((block) => block.text).join("\n"));
+  return { raw, text: pages.join("\n"), pages, streams, blocks };
 }
 
 async function compactReport(state, reportSchedule = schedule) {
@@ -133,6 +127,78 @@ test('inspection PDF preserves the saved photo order for each target', async () 
   const photos = evidencePhotos(key, 3).reverse();
   const { fetched } = await compactReport({ photos });
   assert.deepEqual(fetched.filter(path => path.startsWith('/private/')), photos.map(photo => `/private/${photo.id}`));
+});
+
+test("QC cover distinguishes the saved manual checker from the revision signatory", async () => {
+  const state = { project: closedProject({
+    skidName: "Skid Names", checkedByName: "  Nguyễn Văn An  ",
+    closedByName: "Jane Reviewer", closedByTitle: "Project Manager",
+  }), inspector: { name: "Current exporter" } };
+  const saved = structuredClone(state);
+  const { pages, text } = await compactReport(state);
+  assert.match(pages[0], /Checked by: Nguyễn Văn An\nSigned off by: Jane Reviewer, Project Manager/);
+  assert.equal(text.match(/Checked by:/g)?.length, 1);
+  assert.equal(text.match(/Signed off by:/g)?.length, 1);
+  assert.doesNotMatch(text, /Approved by:|Current exporter/);
+  assert.deepEqual(state, saved);
+});
+
+test("archived QC covers report missing signatories without borrowing the exporter identity", async () => {
+  const state = { project: closedProject({ skidName: "Archived Skid" }),
+    inspector: { name: "Current exporter" } };
+  const { pages } = await compactReport(state);
+  assert.match(pages[0], /Checked by: Not recorded\nSigned off by: QC Inspector/);
+  assert.equal(Object.hasOwn(state.project, "checkedByName"), false);
+  state.project.checkedByName = "  ";
+  state.project.closedByName = "";
+  state.project.closedByTitle = "Current role without a saved name";
+  const missing = await compactReport(state);
+  assert.match(missing.pages[0], /Checked by: Not recorded\nSigned off by: Not recorded/);
+  assert.doesNotMatch(missing.text, /Current exporter|Current role/);
+});
+
+test("QC export snapshots signatories and nested evidence before asynchronous asset loading", async () => {
+  const originalFetch = globalThis.fetch;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const requestedPhotos = [];
+  globalThis.fetch = async (url) => {
+    await gate;
+    const path = String(url);
+    const payload = path.includes("conduit-layout") ? layout
+      : path.includes("jeevy-logo-black") ? logo
+        : path.includes("NotoSans-Regular") ? regularFont
+          : path.includes("NotoSans-Bold") ? boldFont : tinyPng;
+    return new Response(new Blob([payload], { type: path.includes(".ttf") ? "font/ttf" : "image/png" }));
+  };
+  try {
+    const key = "device:saved";
+    const state = {
+      project: closedProject({ skidName: "Saved Skid", checkedByName: "Saved Checker",
+        closedByName: "Saved Signatory", closedByTitle: "Saved Title" }),
+      catalog: [{ key, label: "Saved Device" }],
+      records: [{ key, quality: "good" }],
+      photos: evidencePhotos(key, 1),
+      comments: [{ recordKey: key, text: "Saved inspection evidence" }],
+    };
+    const pending = createInspectionPdf({ state, backend: { getPhotoUrl: async (photo) => {
+      requestedPhotos.push(photo.id);
+      return `/private/${photo.id}`;
+    } } });
+    Object.assign(state.project, { revision: 99, skidName: "Mutated Skid", checkedByName: "Mutated Checker",
+      closedByName: "Mutated Signatory", closedByTitle: "Mutated Title" });
+    state.catalog[0].label = "Mutated Device";
+    state.records[0].quality = "bad";
+    state.photos[0].id = "mutated-photo";
+    state.comments[0].text = "Mutated evidence";
+    release();
+    const { pages, text } = await pdfContent(await pending);
+    assert.match(pages[0], /Checked by: Saved Checker\nSigned off by: Saved Signatory, Saved Title/);
+    assert.match(text, /Saved Device\nPassed/);
+    assert.match(text, /Saved inspection evidence/);
+    assert.doesNotMatch(text, /Mutated|Revision 99/);
+    assert.deepEqual(requestedPhotos, ["device:saved-1"]);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 function photoPlacements(stream) {
@@ -444,7 +510,9 @@ test("full report paginates plain comments, includes private photos, and dates e
       assert.match(pageText, /Approved date: Nov 16, 2026/);
       assert.match(pageText, new RegExp(`Page ${index + 1} of ${pages}`));
     });
-    assert.doesNotMatch(text, /QC Inspector|qa@example\.com|inspector-1|evidence-[123]\.png|Captured |Nov 15, 2026/);
+    assert.match(pageTexts[0], /Checked by: Not recorded\nSigned off by: QC Inspector/);
+    assert.doesNotMatch(pageTexts.slice(1).join("\n"), /QC Inspector/);
+    assert.doesNotMatch(text, /qa@example\.com|inspector-1|evidence-[123]\.png|Captured |Nov 15, 2026/);
     assert.equal(streams.reduce((sum, stream) => sum + photoPlacements(stream).length, 0), 5);
     for (let page = 1; page <= pages; page += 1) {
       assert.match(text, new RegExp(`Page ${page} of ${pages}`));
@@ -769,7 +837,7 @@ test("invalid frozen catalogs and evidence outside the closed catalog fail befor
   }
 });
 
-test("a 120-character skid name stays complete in a wrapped footer on every page", async () => {
+test("120-character skid and signatory names fit the QC cover and preserve the wrapped footer", async () => {
   const originalFetch = globalThis.fetch;
   const skidName = "W".repeat(120);
   globalThis.fetch = async (url) => {
@@ -791,15 +859,25 @@ test("a 120-character skid name stays complete in a wrapped footer on every page
     const blob = await createInspectionPdf({
       schedule,
       state: {
-        project: { ...closedProject(), skidName },
+        project: { ...closedProject(), skidName, checkedByName: "W".repeat(120),
+          closedByName: "W".repeat(120), closedByTitle: "W".repeat(120) },
         records: [],
         photos: [],
         comments: [],
       },
     });
-    const { pages } = await pdfContent(blob);
+    const { pages, blocks } = await pdfContent(blob);
     assert.ok(pages.length > 1);
     assert.match(pages[0].replace(/\n/g, ""), new RegExp(`QC Report - ${skidName}`));
+    const cover = pages[0].replace(/\s+/g, "");
+    assert.ok(cover.includes(`Checkedby:${"W".repeat(120)}`));
+    assert.ok(cover.includes(`Signedoffby:${"W".repeat(120)},${"W".repeat(120)}`));
+    assert.doesNotMatch(pages.slice(1).join("\n"), /Checked by:|Signed off by:/);
+    const coverBody = blocks[0].filter(({ text }) => !/^(?:Approved date:|Revision 3 \| Skid:|Page )/.test(text));
+    // The last wrapped footer line may contain only the remaining skid name.
+    const footerStart = blocks[0].findIndex(({ text }) => text.startsWith("Approved date:"));
+    assert.ok(blocks[0].slice(0, footerStart).every(({ y }) => y < 558));
+    assert.ok(coverBody.some(({ text }) => text.startsWith("Signed off by:")));
     pages.forEach((pageText, index) => {
       const footer = pageText
         .split("Revision 3 | Skid: ")[1]

@@ -52,6 +52,163 @@ async function inspectionPhoto(h, walkdownId, recordKey, revision = 1, userId = 
   return { id, path };
 }
 
+test("manual Checked by gates inspection writes while creation, naming and viewing stay available", async t => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Unchecked report");
+  const first = await h.state(report.id);
+  assert.equal(first.project.checkedByName, null);
+  assert.equal(first.project.checkedByRecordedAt, null);
+  assert.equal(first.project.checkedByRecordedBy, null);
+  assert.equal(first.records.length, 39, "report creation still seeds empty inspection targets");
+  assert.ok(first.records.every(record => !record.complete && record.quality === null));
+  assert.equal((await h.rpc("qa_rename_walkdown", report.id, "Named before inspection", 1)).skidName, "Named before inspection");
+  const renamed = await h.state(report.id);
+  const id = crypto.randomUUID(), path = `${admin}/${id}.jpg`;
+  for (const [name, args] of [
+    ["qa_add_comment", [report.id, "walkdown:general", "Unchecked comment", 1]],
+    ["qa_delete_comment", [report.id, id, 1]],
+    ["qa_set_quality", [report.id, "device:V-3541", "good", 1]],
+    ["qa_set_complete", [report.id, "device:V-3541", true, 1]],
+    ["qa_prepare_photo", [report.id, id, "device:V-3541", path, "Unchecked photo", 100, 100, 1]],
+    ["qa_add_photo", [report.id, id, 1]], ["qa_delete_photo", [report.id, id, 1]],
+    ["qa_reorder_photos", [report.id, "device:V-3541", [], [], 1]],
+    ["qa_authorize_voice", [report.id, "walkdown:general"]],
+    ["qa_approve_revision", [report.id, 1, renamed.project.contentVersion]],
+  ]) await assert.rejects(h.rpc(name, ...args), /Enter Checked by/, name);
+  for (const name of [null, "", "  ", "\t\n ", "x".repeat(121), "Amy\nNg", "Amy\tNg", "Amy\u007fNg"])
+    await assert.rejects(h.rpc("qa_set_checked_by", report.id, name, 1, null), /Checked by name/);
+  await assert.rejects(h.rpc("qa_set_checked_by", report.id, "Manual checker", null, null), /different revision/);
+  await assert.rejects(h.rpc("qa_set_checked_by", report.id, "Manual checker", 2, null), /different revision/);
+  assert.deepEqual(await h.state(report.id), renamed, "blocked writes and invalid names do not change evidence or review tokens");
+  await assert.rejects(h.db.query("update public.qa_walkdowns set checked_by_name='Bypass' where id=$1", [report.id]), /permission denied/);
+  await h.db.exec("reset role");
+  await assert.rejects(h.db.query("update public.qa_records set quality='good' where walkdown_id=$1", [report.id]), /Enter Checked by/);
+  await assert.rejects(h.db.query("insert into public.qa_comments(walkdown_id,text,created_by,author_name) values($1,'Bypass',$2,'Bypass')", [report.id, admin]), /Enter Checked by/);
+  await h.user(outsider);
+  await assert.rejects(h.rpc("qa_set_checked_by", report.id, "Manual checker", 1, null), /approved project inspector/);
+  await h.db.exec("reset role; set role anon");
+  await assert.rejects(h.rpc("qa_set_checked_by", report.id, "Manual checker", 1, null), /permission denied/);
+  await h.user();
+  const checked = await h.rpc("qa_set_checked_by", report.id, "  José Nguyen  ", 1, null);
+  assert.equal(checked.project.checkedByName, "José Nguyen", "the manually supplied name is trimmed, not inferred from the account");
+  assert.equal(checked.project.checkedByRecordedBy, admin);
+  assert.ok(checked.project.checkedByRecordedAt);
+  assert.equal(checked.project.contentVersion, renamed.project.contentVersion + 1);
+  assert.deepEqual(checked.records, first.records);
+  assert.deepEqual(checked.revisions, []);
+  assert.deepEqual(await h.rpc("qa_set_checked_by", report.id, "José Nguyen", 1, null), checked, "retry is a no-op even with the original expected value");
+  await h.user(second);
+  const retry = await h.rpc("qa_set_checked_by", report.id, "José Nguyen", 1, "old cached value");
+  assert.deepEqual(retry.project, checked.project, "same-name retries cannot reattribute the manual checker to another account");
+  const attempts = await Promise.allSettled([
+    h.rpc("qa_set_checked_by", report.id, "Checker A", 1, "José Nguyen"),
+    h.rpc("qa_set_checked_by", report.id, "Checker B", 1, "José Nguyen"),
+  ]);
+  assert.equal(attempts.filter(result => result.status === "fulfilled").length, 1);
+  assert.match(attempts.find(result => result.status === "rejected").reason.message, /Checked by changed/);
+  const current = await h.state(report.id);
+  assert.equal(current.project.checkedByRecordedBy, second);
+  assert.equal(current.project.contentVersion, checked.project.contentVersion + 1);
+  await assert.rejects(h.rpc("qa_approve_revision", report.id, 1, checked.project.contentVersion), /changed since you reviewed/);
+  await h.rpc("qa_add_comment", report.id, "walkdown:general", "Recorded after checker setup", 1);
+  await h.rpc("qa_set_quality", report.id, "device:V-3541", "good", 1);
+  assert.equal((await h.state(report.id)).comments.length, 1);
+});
+
+test("checker attribution freezes with the authenticated sign-off and resets for each new draft", async t => {
+  const h = await database(t), report = await h.rpc("qa_create_walkdown", "Checker closeout");
+  const checked = await h.rpc("qa_set_checked_by", report.id, "Manual technician", 1, null);
+  const closed = await h.rpc("qa_approve_revision", report.id, 1, checked.project.contentVersion);
+  assert.equal(closed.project.checkedByName, "Manual technician");
+  assert.equal(closed.project.closedBy, admin);
+  assert.equal(closed.project.closedByName, "Khuong");
+  assert.equal(closed.project.closedByTitle, "Project Manager");
+  assert.equal(closed.revisions[0].checkedByName, "Manual technician");
+  assert.equal(closed.revisions[0].checkedByRecordedBy, admin);
+  assert.equal(closed.revisions[0].checkedByRecordedAt, checked.project.checkedByRecordedAt);
+  assert.equal(closed.revisions[0].closedByTitle, "Project Manager");
+  await assert.rejects(h.rpc("qa_set_checked_by", report.id, "Changed after sign-off", 1, "Manual technician"), /approved and closed/);
+  const snapshot = (await h.db.query("select snapshot::text as value from public.qa_report_revisions where walkdown_id=$1", [report.id])).rows[0].value;
+  const next = await h.rpc("qa_new_revision", report.id, 1);
+  for (const field of ["checkedByName", "checkedByRecordedAt", "checkedByRecordedBy", "closedBy", "closedByName", "closedAt"])
+    assert.equal(next.project[field], null, `${field} starts empty in the next revision`);
+  await assert.rejects(h.rpc("qa_add_comment", report.id, "walkdown:general", "Unchecked revision", 2), /Enter Checked by/);
+  await assert.rejects(h.rpc("qa_approve_revision", report.id, 2, next.project.contentVersion), /Enter Checked by/);
+  await h.user(second);
+  const secondChecked = await h.rpc("qa_set_checked_by", report.id, "Different technician", 2, null);
+  assert.equal(secondChecked.project.checkedByRecordedBy, second);
+  assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).project, closed.project);
+  await h.db.exec("reset role");
+  await h.db.exec(migration);
+  await h.db.exec(schema);
+  await h.db.exec(migration);
+  assert.equal((await h.db.query("select snapshot::text as value from public.qa_report_revisions where walkdown_id=$1", [report.id])).rows[0].value, snapshot);
+  await h.user(second);
+  assert.deepEqual((await h.state(report.id)).project, secondChecked.project, "repeatable migrations do not rewrite checker attribution or review tokens");
+});
+
+test("upgrades preserve legacy approved snapshots without inventing a checker or changing their evidence", async t => {
+  const beforeCloseout = schema.split("-- QC revision closeout layer;")[0] + "commit;";
+  const h = await database(t, beforeCloseout), report = await h.rpc("qa_create_walkdown", "Legacy signed report");
+  await h.rpc("qa_add_comment", report.id, "walkdown:general", "Original recorded note");
+  await h.db.exec("reset role");
+  await h.db.exec(migration);
+  await h.user();
+  const loaded = await h.state(report.id);
+  const closedAt = "2026-11-20T10:00:00.000Z";
+  const legacy = { ...loaded, project: { ...loaded.project, status: "closed", closedAt,
+    closedBy: admin, closedByName: "Khuong", closedByTitle: "Project Manager" } };
+  delete legacy.inspector; delete legacy.revisions;
+  for (const field of ["checkedByName", "checkedByRecordedAt", "checkedByRecordedBy"]) delete legacy.project[field];
+  // Seed a pre-feature archive exactly as the old closeout function stored it.
+  await h.db.exec("reset role");
+  await h.db.query("update public.qa_walkdowns set status='closed',closed_at=$2,closed_by=$3,closed_by_name='Khuong' where id=$1", [report.id, closedAt, admin]);
+  await h.db.query("insert into public.qa_report_revisions(walkdown_id,revision,skid_name,closed_at,closed_by,closed_by_name,snapshot) values($1,$2,$3,$4,$5,'Khuong',$6)",
+    [report.id, loaded.project.revision, loaded.project.skidName, closedAt, admin, legacy]);
+  const frozen = (await h.db.query("select snapshot::text as value from public.qa_report_revisions where walkdown_id=$1", [report.id])).rows[0].value;
+  await h.db.exec(migration);
+  await h.db.exec(schema);
+  await h.db.exec(migration);
+  assert.equal((await h.db.query("select snapshot::text as value from public.qa_report_revisions where walkdown_id=$1", [report.id])).rows[0].value, frozen);
+  assert.equal(Object.values((await h.db.query(deploymentChecks)).rows[0]).every(value => value === true), true);
+  await h.user();
+  const closed = await h.state(report.id);
+  assert.equal(Object.hasOwn(closed.project, "checkedByName"), false);
+  assert.deepEqual(closed.comments, loaded.comments);
+  assert.equal(closed.revisions[0].checkedByName, null);
+  assert.equal(closed.revisions[0].closedByTitle, "Project Manager");
+  assert.deepEqual(await h.rpc("qa_approve_revision", report.id, closed.project.revision, closed.project.contentVersion), closed,
+    "retrying an already approved legacy report does not retroactively require a checker");
+  const next = await h.rpc("qa_new_revision", report.id, closed.project.revision);
+  assert.equal(next.project.checkedByName, null);
+  await h.rpc("qa_set_checked_by", report.id, "New revision checker", next.project.revision, null);
+  const archived = await h.rpc("qa_load_revision", report.id, closed.project.revision);
+  assert.equal(Object.hasOwn(archived.project, "checkedByName"), false);
+  assert.deepEqual(archived.comments, legacy.comments);
+});
+
+test("pending uploads from before checker enforcement can be cancelled or resumed after manual setup", async t => {
+  const beforeCloseout = schema.split("-- QC revision closeout layer;")[0] + "commit;";
+  const h = await database(t, beforeCloseout), report = await h.rpc("qa_create_walkdown", "Legacy pending uploads");
+  const cancelId = crypto.randomUUID(), resumeId = crypto.randomUUID();
+  const cancelPath = `${admin}/${cancelId}.jpg`, resumePath = `${admin}/${resumeId}.jpg`;
+  for (const [id, path] of [[cancelId, cancelPath], [resumeId, resumePath]])
+    await h.rpc("qa_prepare_photo", report.id, id, "device:V-3541", path, "Original pending upload", 100, 100);
+  await h.db.exec("reset role");
+  await h.db.exec(migration);
+  await h.user();
+  const draft = await h.state(report.id);
+  await assert.rejects(h.db.query("insert into storage.objects(bucket_id,name) values('qa-evidence',$1)", [resumePath]), /row-level security/);
+  await assert.rejects(h.rpc("qa_add_photo", report.id, resumeId, draft.project.revision), /Enter Checked by/);
+  await h.rpc("qa_cancel_photo", report.id, cancelId);
+  assert.equal((await h.state(report.id)).project.contentVersion, draft.project.contentVersion, "abandoned reservations are cleanup, not inspection data");
+  await h.rpc("qa_set_checked_by", report.id, "Resuming checker", draft.project.revision, null);
+  await h.db.query("insert into storage.objects(bucket_id,name) values('qa-evidence',$1)", [resumePath]);
+  await h.rpc("qa_add_photo", report.id, resumeId, draft.project.revision);
+  assert.deepEqual((await h.state(report.id)).photos.map(photo => photo.id), [resumeId]);
+  await assert.rejects(h.db.query("insert into storage.objects(bucket_id,name) values('qa-evidence',$1)", [cancelPath]), /row-level security/);
+});
+
 test("QC migration preserves existing revisions and evidence; draft edits no longer change revision", async (t) => {
   const beforeCloseout = schema.split("-- QC revision closeout layer;")[0] + "commit;";
   const h = await database(t, beforeCloseout);
@@ -74,10 +231,13 @@ test("QC migration preserves existing revisions and evidence; draft edits no lon
   assert.deepEqual(after.records, before.records);
   assert.deepEqual(after.photos, before.photos);
   assert.deepEqual(after.comments, before.comments);
+  assert.equal(after.project.checkedByName, null, "upgrades do not infer a checker for existing evidence");
+  await assert.rejects(h.rpc("qa_add_comment", report.id, "walkdown:general", "Unchecked draft edit", after.project.revision), /Enter Checked by/);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", after.project.revision, null);
   await h.rpc("qa_add_comment", report.id, "walkdown:general", "First draft edit", after.project.revision);
   const changed = await h.state(report.id);
   assert.equal(changed.project.revision, before.project.revision);
-  assert.equal(changed.project.contentVersion, 2);
+  assert.equal(changed.project.contentVersion, 3);
   await h.db.exec("reset role");
   await h.db.exec(migration);
   await h.db.exec(schema);
@@ -88,7 +248,9 @@ test("QC migration preserves existing revisions and evidence; draft edits no lon
 test("approval locks immutable revisions and archived evidence; new revision pins all later edits", async (t) => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Skid A");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const other = await h.rpc("qa_create_walkdown", "Skid B");
+  await h.rpc("qa_set_checked_by", other.id, "Fixture checker", other.revision, null);
   assert.equal(report.revision, 1);
   const version = async () => (await h.state(report.id)).project.contentVersion;
   const photo = async (label, who = admin, revision = 1) => {
@@ -163,6 +325,7 @@ test("approval locks immutable revisions and archived evidence; new revision pin
   ]) await assert.rejects(h.rpc(name, ...args), /permission denied/, name);
 
   const next = await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 2, null);
   assert.equal(next.project.revision, 2);
   assert.equal(next.project.status, "draft");
   assert.equal(next.project.closedAt, null);
@@ -225,6 +388,7 @@ test("approval locks immutable revisions and archived evidence; new revision pin
 test("comment authors can remove their own notes and missing evidence cannot be approved", async (t) => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Comment review");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   await h.user(second);
   const note = await h.rpc("qa_add_comment", report.id, "device:V-3541", "My note", 1);
   await h.rpc("qa_delete_comment", report.id, note.id, 1);
@@ -247,6 +411,7 @@ test("comment authors can remove their own notes and missing evidence cannot be 
 
 test("inspection photo order saves atomically for every target kind, appends uploads, and rejects competing changes", async t => {
   const h = await database(t), report = await h.rpc("qa_create_walkdown", "Ordered inspection skid");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const key = "device:V-3541", otherKey = "equipment:control-box";
   const a = await inspectionPhoto(h, report.id, key), other = await inspectionPhoto(h, report.id, otherKey);
   const b = await inspectionPhoto(h, report.id, key), c = await inspectionPhoto(h, report.id, key);
@@ -292,6 +457,7 @@ test("inspection photo order saves atomically for every target kind, appends upl
   await h.user(second);
   assert.deepEqual((await h.state(report.id)).photos, closed.photos);
   await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 2, null);
   await assert.rejects(h.rpc("qa_reorder_photos", report.id, key, oldIds, winner, 1), /different revision/);
   await h.rpc("qa_reorder_photos", report.id, key, [...winner].reverse(), winner, 2);
   assert.deepEqual((await h.rpc("qa_load_revision", report.id, 1)).photos, closed.photos);
@@ -303,7 +469,9 @@ test("inspection photo order saves atomically for every target kind, appends upl
 
 test("inspection photo order validates exact scope and permutation and denies anonymous or unapproved users", async t => {
   const h = await database(t), report = await h.rpc("qa_create_walkdown", "Inspection order validation skid");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const another = await h.rpc("qa_create_walkdown", "Foreign inspection order skid"), key = "device:V-3541";
+  await h.rpc("qa_set_checked_by", another.id, "Fixture checker", another.revision, null);
   const a = await inspectionPhoto(h, report.id, key), b = await inspectionPhoto(h, report.id, key), expected = [a.id, b.id];
   const foreign = await inspectionPhoto(h, another.id, key), otherTarget = await inspectionPhoto(h, report.id, "terminal:A");
   const pending = crypto.randomUUID();
@@ -327,6 +495,7 @@ test("inspection photo order validates exact scope and permutation and denies an
 
 test("inspection ordering backfills each legacy target and preserves approved arrays and review tokens on upgrades", async t => {
   const h = await database(t), report = await h.rpc("qa_create_walkdown", "Legacy inspection ordering skid");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const key = "device:V-3541", otherKey = "terminal:A";
   const a = await inspectionPhoto(h, report.id, key), b = await inspectionPhoto(h, report.id, otherKey);
   const c = await inspectionPhoto(h, report.id, key), d = await inspectionPhoto(h, report.id, otherKey);
@@ -351,6 +520,7 @@ test("inspection ordering backfills each legacy target and preserves approved ar
   await h.user();
   assert.deepEqual(await h.state(report.id), closed, "backfill leaves the entire approved array and report metadata unchanged");
   await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 2, null);
   await h.rpc("qa_reorder_photos", report.id, key, [c.id, a.id], [a.id, c.id], 2);
   await h.db.exec("reset role");
   await h.db.exec(schema);
@@ -362,11 +532,14 @@ test("inspection ordering backfills each legacy target and preserves approved ar
 test("Skid 1 resets its report numbering while retaining approved revisions and evidence", async t => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Skid 1");
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", report.revision, null);
   const other = await h.rpc("qa_create_walkdown", "Skid 2");
+  await h.rpc("qa_set_checked_by", other.id, "Fixture checker", other.revision, null);
   await inspectionPhoto(h, report.id, "terminal:A");
   const firstDraft = await h.state(report.id);
   const first = await h.rpc("qa_approve_revision", report.id, 1, firstDraft.project.contentVersion);
   await h.rpc("qa_new_revision", report.id, 1);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 2, null);
   await h.db.exec("reset role");
   await h.db.query("update public.qa_walkdowns set revision=243 where id=$1", [report.id]);
   await h.user();
@@ -387,6 +560,7 @@ test("Skid 1 resets its report numbering while retaining approved revisions and 
   assert.equal(revisionNumber(earlier.project), 1);
   assert.deepEqual(earlier.photos, first.photos);
   const next = await h.rpc("qa_new_revision", report.id, 243);
+  await h.rpc("qa_set_checked_by", report.id, "Fixture checker", 244, null);
   assert.equal(next.project.revision, 244);
   assert.equal(revisionNumber(next.project), 2);
   assert.deepEqual(next.photos, closed.photos);

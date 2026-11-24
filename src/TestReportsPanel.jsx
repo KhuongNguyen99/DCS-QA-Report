@@ -412,7 +412,7 @@ export default function TestReportsPanel(props) {
 }
 
 function ScopedTestReportsPanel({
-  project, runs = [], inspector, readOnly = false, pending = false, exportProgress = "",
+  project, runs = [], inspector, readOnly = false, checkerRequired = false, pending = false, exportProgress = "",
   onSave, onDelete, onExport, onReview, onDirtyChange,
   getPhotoUrl, onAddSetupPhoto, onUpdateSetupPhoto, onRemoveSetupPhoto, onReorderSetupPhotos, cacheScope, storageScope,
   timeRangeChanges = {}, onTimeRangeChange, graphOrderChanges = {}, onGraphOrderChange,
@@ -574,7 +574,7 @@ function ScopedTestReportsPanel({
     }
     const payload = { ...preview, id: draft.id, runVersion: draft.runVersion,
       name: draft.name.trim(), software: { name: draft.software.name.trim(), version: draft.software.version.trim() },
-      clock: { ...draft.data.clock, timeZone: draft.timeZone.trim() || UNKNOWN_TIME_ZONE },
+      clock: { ...draft.data.clock, timeZone: draft.timeZone?.trim() ? draft.timeZone : UNKNOWN_TIME_ZONE },
     };
     busyRef.current = true; setBusy("save"); setError("");
     try {
@@ -618,7 +618,9 @@ function ScopedTestReportsPanel({
       <h3>{draft.runVersion ? "Edit test run" : "Import a test run"}</h3>
       {draft.recovered && <p role="status">Recovered pending {draft.eventEdits?.length ? "comments and event edits" : "comments"} for {draft.name || "this test run"}, revision {revisionNumber(project, draft.revision)}. They remain unsaved until Save test run.</p>}
       {draft.eventReplayError && <p className="field-error" role="alert">{draft.eventReplayError}</p>}
-      {(readOnly || stale) && <p className="field-error" role="alert">This revision or test run was closed or changed. Your local preview is retained for review and copying. Discard this draft and reopen the current run before saving.</p>}
+      {(readOnly || stale) && <p className="field-error" role="alert">{checkerRequired && !stale
+        ? "Save Checked by to resume this test run. Your pending changes are retained and will be available after the name is saved."
+        : "This revision or test run was closed or changed. Your local preview is retained for review and copying. Discard this draft and reopen the current run before saving."}</p>}
       {draft.recovered && draft.requiresFiles && !draft.data && <p role="status">Reselect the original source files to restore this import before saving: {draft.sources.map(source => source.name).join(", ") || "the files for this test run"}.</p>}
       <fieldset disabled={blocked || readOnly || stale}>
         <div className="test-metadata-grid">
@@ -634,8 +636,8 @@ function ScopedTestReportsPanel({
               </option>)}
             </select>
             <p id={`${timeZoneId}-help`} className="test-timezone-help">{computerTimeZone
-              ? "New imports use this computer’s timezone. Choose a different timezone if the test was recorded elsewhere."
-              : "The local timezone could not be detected. Choose the timezone used to record this test."}</p>
+              ? "New imports use this computer’s current UTC offset. Choose the offset used when the test was recorded."
+              : "The local UTC offset could not be detected. Choose the offset used to record this test."}</p>
           </div>
         </div>
         <p className="test-muted">Use the software version you ran. Module firmware versions in the files are recorded separately. Times stay as recorded by the source computer.</p>
@@ -688,6 +690,6 @@ function ScopedTestReportsPanel({
         commentsDisabled={blocked || setupDirty} editingComments={Boolean(draft)} runId={previewRunId} timeRangeScope={rangeScope} selectionScope={cacheScope}
         rangeOverrides={timeRangeChanges[rangeScope]?.[previewRunId]} onTimeRangeChange={onTimeRangeChange}
         graphOrderScope={orderScope} orderOverrides={graphOrderChanges[orderScope]?.[previewRunId]} onGraphOrderChange={onGraphOrderChange} /></section>}
-    {!preview && !draft && <div className="card test-empty"><Icon name="report" size={36} /><h3>No test runs in this revision</h3><p>{readOnly ? "Start a new revision to import a test run." : "Import the files for your test, review the devices and parameters, then save the run."}</p></div>}
+    {!preview && !draft && <div className="card test-empty"><Icon name="report" size={36} /><h3>No test runs in this revision</h3><p>{checkerRequired ? "Save Checked by to import a test run in this revision." : readOnly ? "Start a new revision to import a test run." : "Import the files for your test, review the devices and parameters, then save the run."}</p></div>}
   </section>;
 }

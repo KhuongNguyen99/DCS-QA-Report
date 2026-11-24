@@ -12,6 +12,7 @@ select
 -- no walkdowns until an inspector manually creates one. Legacy data is retained
 -- in Unassigned skid until renamed; existing report numbers are preserved.
 select w.id, w.skid_name, w.name_required, w.revision, w.status, w.content_version,
+  w.checked_by_name, w.checked_by_recorded_at, w.checked_by_recorded_by,
   w.closed_at, w.closed_by_name, w.updated_at,
   count(r.key) as records_expected_39
 from public.qa_walkdowns w left join public.qa_records r on r.walkdown_id = w.id
@@ -78,7 +79,14 @@ where t.kind = 'terminal' and terminal.complete and exists (
 select w.id as closed_report_without_matching_snapshot
 from public.qa_walkdowns w left join public.qa_report_revisions r on r.walkdown_id = w.id and r.revision = w.revision
 where w.status = 'closed' and (r.walkdown_id is null or r.closed_at is distinct from w.closed_at
-  or r.closed_by is distinct from w.closed_by or r.skid_name is distinct from w.skid_name);
+  or r.closed_by is distinct from w.closed_by or r.skid_name is distinct from w.skid_name
+  or (r.snapshot->'project'->>'checkedByName') is distinct from w.checked_by_name
+  or (r.snapshot->'project'->>'checkedByRecordedAt')::timestamptz is distinct from w.checked_by_recorded_at
+  or (r.snapshot->'project'->>'checkedByRecordedBy')::uuid is distinct from w.checked_by_recorded_by);
+select id as invalid_checker_attribution from public.qa_walkdowns
+where (checked_by_name is null and (checked_by_recorded_at is not null or checked_by_recorded_by is not null))
+  or (checked_by_name is not null and (length(trim(checked_by_name)) not between 1 and 120
+    or checked_by_name ~ '[[:cntrl:]]' or checked_by_recorded_at is null or checked_by_recorded_by is null));
 select w.id as invalid_closeout_metadata from public.qa_walkdowns w
 where (w.status = 'draft' and (w.closed_at is not null or w.closed_by is not null or w.closed_by_name is not null))
   or (w.status = 'closed' and (w.closed_at is null or w.closed_by is null or w.closed_by_name is null));

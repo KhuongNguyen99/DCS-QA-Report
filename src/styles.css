@@ -2633,6 +2633,27 @@ h3 > span {
   margin-bottom: 24px;
   padding: 24px;
 }
+.checked-by-required {
+  margin-bottom: 24px;
+  padding: 22px 24px;
+  border: 2px solid #c5a454;
+  background: #fffaf0;
+}
+.checked-by-required h2 { margin: 6px 0 9px; font-size: 20px; }
+.checked-by-required > p { max-width: 760px; color: #665c42; font-size: 13px; line-height: 1.6; }
+.checked-by-form { margin: 16px 0 20px; width: 100%; }
+.checked-by-form > label { display: block; margin-bottom: 7px; color: var(--ink); font-weight: 600; font-size: 13px; }
+.checked-by-fields { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.checked-by-fields input { flex: 1 1 250px; min-width: 0; max-width: 440px; padding: 11px 13px; border: 1px solid #cbd5c5; border-radius: 7px; color: var(--ink); background: #fff; font: inherit; font-size: 14px; }
+.checked-by-fields input:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.checked-by-fields input:disabled { background: #f1f3ee; }
+.checked-by-form > p { margin: 8px 0 0; color: #637166; font-size: 12px; line-height: 1.5; }
+.checked-by-form > .field-error { color: #a53b32; }
+.checked-by-conflict { margin-top: 12px; color: #835b1a; font-size: 12px; line-height: 1.6; }
+.checked-by-conflict p { margin-bottom: 8px; }
+.revision-signatures { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0 0 18px; padding: 14px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.revision-signatures dt { color: #637166; font-size: 12px; margin-bottom: 5px; }
+.revision-signatures dd { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .revision-heading {
   display: flex;
   align-items: center;
@@ -2750,6 +2771,9 @@ h3 > span {
   .revision-panel {
     padding: 18px;
   }
+  .checked-by-required { padding: 18px; }
+  .checked-by-fields input { max-width: none; }
+  .revision-signatures { grid-template-columns: 1fr; gap: 12px; }
   .revision-confirmation {
     padding: 15px;
   }

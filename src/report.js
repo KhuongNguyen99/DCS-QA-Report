@@ -191,6 +191,16 @@ export function loadReportLogo() {
   return fetchImage(`${import.meta.env?.BASE_URL || "/"}assets/jeevy-logo-black.png`, "the Jeevy logo");
 }
 
+/** Signatories come only from this revision; older snapshots may lack a checker. */
+export function reportSignatories(project) {
+  const name = (value) => typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+  const signedOffBy = name(project?.closedByName);
+  return [
+    `Checked by: ${name(project?.checkedByName) || "Not recorded"}`,
+    `Signed off by: ${signedOffBy ? [signedOffBy, name(project?.closedByTitle)].filter(Boolean).join(", ") : "Not recorded"}`,
+  ];
+}
+
 export function drawCover(doc, project, closedAt, logoImage, label = "QC Report", { revisionBottom = 550, titleOffset = 0 } = {}) {
   drawPageHeader(doc, project, "Cover");
   doc.addImage(logoImage, "PNG", PAGE.margin, 39.6, 223.2, 74.88);
@@ -489,6 +499,8 @@ export async function createInspectionPdf({
   ) {
     throw new Error("Shared inspection data is incomplete.");
   }
+  // Freeze approval metadata and evidence before asset requests or callbacks can yield.
+  state = structuredClone(state);
   const walkdownId = state.project?.walkdownId;
   if (walkdownId && backend?.walkdownId && backend.walkdownId !== walkdownId)
     throw new Error("The selected skid does not match the loaded report data.");
@@ -526,6 +538,9 @@ export async function createInspectionPdf({
     title: REPORT_TITLE,
     revision: revisionNumber(state.project),
     skidName: state.project.skidName.trim().replace(/\s+/g, " "),
+    checkedByName: state.project.checkedByName,
+    closedByName: state.project.closedByName,
+    closedByTitle: state.project.closedByTitle,
   };
   const totalPhotos = state.photos.length;
   onProgress("Loading report assets…");
@@ -556,7 +571,24 @@ export async function createInspectionPdf({
     author: "Jeevy Fabrication",
     creator: "Jeevy DCS QC Report",
   });
-  drawCover(doc, project, closedAt, logo);
+  const signatoryStyle = { size: 11, lineHeight: 16, gap: 4, topGap: 24 };
+  setText(doc, COLOR.ink, signatoryStyle.size);
+  const signatories = reportSignatories(project).map((text) =>
+    doc.splitTextToSize(printableText(text), PAGE.width - PAGE.margin * 2));
+  const signatoryHeight = signatories.reduce((height, lines) =>
+    height + lines.length * signatoryStyle.lineHeight + signatoryStyle.gap, 0);
+  const revisionY = drawCover(doc, project, closedAt, logo, "QC Report", {
+    revisionBottom: PAGE.bottom - signatoryStyle.topGap - signatoryHeight,
+  });
+  let signatoryY = revisionY + signatoryStyle.topGap;
+  setText(doc, COLOR.ink, signatoryStyle.size);
+  for (const lines of signatories) {
+    for (const line of lines) {
+      doc.text(line, PAGE.margin, signatoryY);
+      signatoryY += signatoryStyle.lineHeight;
+    }
+    signatoryY += signatoryStyle.gap;
+  }
   drawOverview(doc, project, layout);
   drawGeneralComments(doc, state, project);
   drawSummary(doc, entries, state, project);

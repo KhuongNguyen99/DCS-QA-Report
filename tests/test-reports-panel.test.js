@@ -83,8 +83,7 @@ function savedRun(overrides = {}) {
     software: { name: "Siemens PRONETA Basic", version: "Entered 1.0" }, ...overrides };
 }
 
-async function setup(t, props = {}, { stored = {}, storageBlocked = false,
-  localTimeZone = "America/Chicago", supportedTimeZones = ["America/Chicago", "Asia/Tokyo", "Europe/London"] } = {}) {
+async function setup(t, props = {}, { stored = {}, storageBlocked = false, localOffset = 360 } = {}) {
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", error => errors.push(error.message));
@@ -94,22 +93,10 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false,
   });
   const { window } = dom;
   Object.assign(window, {
-    IS_REACT_ACT_ENVIRONMENT: true, structuredClone, calls: [], parses: [], dirty: [], exports: [], reviews: [], graphOrders: [], localTimeZone,
+    IS_REACT_ACT_ENVIRONMENT: true, structuredClone, calls: [], parses: [], dirty: [], exports: [], reviews: [], graphOrders: [], localOffset,
     initialProps: { project, runs: [], inspector: { id: "inspector-1", isAdmin: false }, storageScope: "https://example.supabase.co", ...props },
   });
-  const DateTimeFormat = window.Intl.DateTimeFormat;
-  const localFormatter = (formatter, args) => {
-    if (!args[1]?.timeZone) {
-      const resolved = formatter.resolvedOptions.bind(formatter);
-      formatter.resolvedOptions = () => ({ ...resolved(), timeZone: window.localTimeZone });
-    }
-    return formatter;
-  };
-  window.Intl.DateTimeFormat = new Proxy(DateTimeFormat, {
-    apply: (target, receiver, args) => localFormatter(Reflect.apply(target, receiver, args), args),
-    construct: (target, args) => localFormatter(Reflect.construct(target, args), args),
-  });
-  window.Intl.supportedValuesOf = () => [...supportedTimeZones];
+  window.Date.prototype.getTimezoneOffset = () => window.localOffset;
   for (const [key, value] of Object.entries(stored)) window.localStorage.setItem(key, value);
   if (storageBlocked) Object.defineProperty(window, "localStorage", { get() { throw new Error("Blocked"); } });
   window.MessageChannel = class {
@@ -225,7 +212,7 @@ test("multi-file preview leaves the software version blank and shows separate si
   await h.fill(h.field("Test run name"), "  Reviewed run  ");
   await h.fill(h.field("Software name"), "  Siemens PRONETA Basic  ");
   await h.fill(h.field("Software version"), "  Tester-entered 8.4  ");
-  await h.select(h.field("Source clock / timezone"), "Europe/London");
+  await h.select(h.field("Source clock / timezone"), "UTC+01:00");
   const save = h.button("Save test run");
   await h.window.act(async () => { save.click(); save.click(); });
   assert.equal(h.window.calls.length, 1, "rapid duplicate clicks cannot submit twice");
@@ -234,7 +221,7 @@ test("multi-file preview leaves the software version blank and shows separate si
   assert.equal(call.payload.runVersion, null);
   assert.equal(call.payload.name, "Reviewed run");
   assert.equal(call.payload.software.version, "Tester-entered 8.4");
-  assert.equal(call.payload.clock.timeZone, "Europe/London");
+  assert.equal(call.payload.clock.timeZone, "UTC+01:00");
   assert.equal(call.payload.devices[0].channels.length, 2);
   await h.settle();
   assert.equal(h.query('[aria-label="Import test run"]'), null);
@@ -247,7 +234,7 @@ test("failed save retains the exact local preview and metadata for retry", async
   await h.importPreview();
   await h.fill(h.field("Software version"), "Retained version");
   await h.fill(h.field("Test run name"), "Retained run");
-  await h.select(h.field("Source clock / timezone"), "Asia/Tokyo");
+  await h.select(h.field("Source clock / timezone"), "UTC+09:00");
   await h.click(h.button("Save test run"));
   const initialPayload = structuredClone(h.window.calls[0].payload);
   await h.settle("Network interrupted; retry the save.");
@@ -255,7 +242,7 @@ test("failed save retains the exact local preview and metadata for retry", async
   assert.match(h.text(), /Unsaved preview/);
   assert.equal(h.field("Software version").value, "Retained version");
   assert.equal(h.field("Test run name").value, "Retained run");
-  assert.equal(h.field("Source clock / timezone").value, "Asia/Tokyo");
+  assert.equal(h.field("Source clock / timezone").value, "UTC+09:00");
   assert.equal(h.window.dirty.at(-1), true);
   const retry = h.button("Save test run");
   assert.equal(retry.disabled, false);
@@ -267,42 +254,48 @@ test("failed save retains the exact local preview and metadata for retry", async
 });
 
 test("editing metadata preserves the saved run ID and optimistic run version", async t => {
-  const run = savedRun();
-  run.clock.timeZone = "America/Chicago (Central Time)";
-  const h = await setup(t, { runs: [run] }, { localTimeZone: "Asia/Tokyo" });
-  await h.click(h.button("Edit run"));
-  assert.equal(h.field("Software version").value, "Entered 1.0");
-  assert.equal(h.field("Source clock / timezone").value, "America/Chicago (Central Time)", "saved legacy labels remain selected");
-  await h.fill(h.field("Software version"), "Corrected 1.1");
-  await h.click(h.button("Save test run"));
-  assert.equal(h.window.parses.length, 0, "metadata edits reuse the normalized saved evidence");
-  assert.equal(h.window.calls[0].payload.id, "run-1");
-  assert.equal(h.window.calls[0].payload.runVersion, 7);
-  assert.equal(h.window.calls[0].payload.software.version, "Corrected 1.1");
-  assert.equal(h.window.calls[0].payload.clock.timeZone, "America/Chicago (Central Time)");
-  assert.equal(h.window.calls[0].revision, 4);
-  await h.settle();
+  for (const legacy of ["America/Chicago", "  Plant source clock (timezone not recorded)  "]) {
+    const run = savedRun(); run.clock.timeZone = legacy;
+    const h = await setup(t, { runs: [run] }, { localOffset: -540 });
+    await h.click(h.button("Edit run"));
+    assert.equal(h.field("Software version").value, "Entered 1.0");
+    const picker = h.field("Source clock / timezone");
+    assert.equal(picker.value, legacy, "saved legacy labels remain selected");
+    assert.equal(picker.options.length, 41, "only the current legacy value joins the 40 offset choices");
+    assert.equal(picker.selectedOptions[0].textContent.trim(), legacy.trim(), "saved IANA zones are not relabeled using today's offset");
+    await h.fill(h.field("Software version"), "Corrected 1.1");
+    await h.click(h.button("Save test run"));
+    assert.equal(h.window.parses.length, 0, "metadata edits reuse the normalized saved evidence");
+    assert.equal(h.window.calls[0].payload.id, "run-1");
+    assert.equal(h.window.calls[0].payload.runVersion, 7);
+    assert.equal(h.window.calls[0].payload.software.version, "Corrected 1.1");
+    assert.equal(h.window.calls[0].payload.clock.timeZone, legacy, "legacy metadata is preserved exactly, including surrounding spaces");
+    assert.equal(h.window.calls[0].revision, 4);
+    await h.settle();
+  }
 });
 
-test("new imports select the local computer timezone without replacing a draft's selection on rerender", async t => {
-  const h = await setup(t, {}, { localTimeZone: "America/Chicago", supportedTimeZones: ["Asia/Tokyo", "Europe/London"] });
+test("new imports select the current local UTC offset without replacing an existing draft after a clock setting change", async t => {
+  const h = await setup(t, {}, { localOffset: 570 });
   await h.click(h.button("Import test run"));
   const picker = h.field("Source clock / timezone");
   assert.equal(picker.tagName, "SELECT");
-  assert.equal(picker.value, "America/Chicago", "the local identifier is retained even when enumeration omits it");
-  assert.ok(Array.from(picker.options, option => option.value).includes("UTC"));
+  assert.equal(picker.value, "UTC-09:30", "a positive JavaScript offset selects the negative UTC offset");
+  assert.equal(picker.options.length, 40);
+  assert.ok(Array.from(picker.options, option => option.value).includes("UTC+00:00"));
+  assert.match(picker.selectedOptions[0].textContent, /UTC-09:30 \(this computer\)/);
   assert.ok(h.document.getElementById(picker.getAttribute("aria-describedby")), "the select has associated guidance");
-  h.window.localTimeZone = "Asia/Tokyo";
-  await h.fill(h.field("Test run name"), "Draft started in Chicago");
-  assert.equal(picker.value, "America/Chicago", "an existing draft is not silently changed with the computer setting");
+  h.window.localOffset = -345;
+  await h.fill(h.field("Test run name"), "Draft started before the clock setting changed");
+  assert.equal(picker.value, "UTC-09:30", "an existing draft is not silently changed when the location or DST offset changes");
   await h.click(h.button("Discard changes"));
   await h.click(h.button("Import test run"));
-  assert.equal(h.field("Source clock / timezone").value, "Asia/Tokyo", "a newly started import uses the current computer setting");
+  assert.equal(h.field("Source clock / timezone").value, "UTC+05:45", "a new import uses the current quarter-hour computer offset");
 
-  const unavailable = await setup(t, {}, { localTimeZone: null });
+  const unavailable = await setup(t, {}, { localOffset: NaN });
   await unavailable.click(unavailable.button("Import test run"));
   assert.equal(unavailable.field("Source clock / timezone").value, "Source clock (timezone not recorded)");
-  assert.match(unavailable.text(), /local timezone could not be detected/i);
+  assert.match(unavailable.text(), /local UTC offset could not be detected/i);
   assert.equal(unavailable.window.calls.length, 0);
 });
 
@@ -315,27 +308,27 @@ for (const basis of ["source-local", "absolute"]) {
       channel.series.flatMap(series => series.points.map(point => [point.time, point.timeMs]))));
     const originalTimes = timestamps(parsed);
     await h.click(h.button("Import test run"));
-    await h.select(h.field("Source clock / timezone"), "Asia/Tokyo");
+    await h.select(h.field("Source clock / timezone"), "UTC+05:45");
     await h.fill(h.field("Software version"), "8.4");
     await h.choose();
-    assert.equal(h.window.parses[0].options.timeZone, "Asia/Tokyo");
+    assert.equal(h.window.parses[0].options.timeZone, "UTC+05:45");
     await h.finishParse(parsed);
     const coordinates = () => Array.from(h.document.querySelectorAll("svg[data-time-start]"), chart => ({
       start: chart.dataset.timeStart, end: chart.dataset.timeEnd,
       points: Array.from(chart.querySelectorAll("circle.test-observation"), point => [point.getAttribute("cx"), point.getAttribute("cy")]),
     }));
     const originalGraphs = coordinates();
-    await h.select(h.field("Source clock / timezone"), "Europe/London");
+    await h.select(h.field("Source clock / timezone"), "UTC-03:30");
     assert.deepEqual(coordinates(), originalGraphs);
     if (basis === "absolute") assert.match(h.query(".test-run-facts").textContent, /Graphs use UTC/);
     await h.click(h.button("Read files again"));
-    assert.equal(h.window.parses[1].options.timeZone, "Europe/London");
+    assert.equal(h.window.parses[1].options.timeZone, "UTC-03:30");
     await h.finishParse(parsed);
-    assert.equal(h.field("Source clock / timezone").value, "Europe/London");
+    assert.equal(h.field("Source clock / timezone").value, "UTC-03:30");
     assert.deepEqual(coordinates(), originalGraphs);
     await h.click(h.button("Save test run"));
     const payload = h.window.calls[0].payload;
-    assert.equal(payload.clock.timeZone, "Europe/London");
+    assert.equal(payload.clock.timeZone, "UTC-03:30");
     assert.equal(payload.clock.basis, basis);
     assert.equal(payload.clock.startMs, startMs);
     assert.equal(payload.clock.endMs, startMs + 392_000);
@@ -348,20 +341,20 @@ test("reopening a draft keeps its selected timezone and shows an honest unknown 
   const run = savedRun();
   const h = await setup(t, { runs: [run] });
   await h.click(h.button("Edit run"));
-  await h.select(h.field("Source clock / timezone"), "Asia/Tokyo");
+  await h.select(h.field("Source clock / timezone"), "UTC+09:00");
   const stored = h.stored();
   await h.unmount();
-  const reopened = await setup(t, { runs: [run] }, { stored, localTimeZone: "Europe/London" });
-  assert.equal(reopened.field("Source clock / timezone").value, "Asia/Tokyo");
+  const reopened = await setup(t, { runs: [run] }, { stored, localOffset: 0 });
+  assert.equal(reopened.field("Source clock / timezone").value, "UTC+09:00");
   assert.deepEqual(reopened.stored(), stored, "mounting does not overwrite a recovered selection");
   await reopened.click(reopened.button("Save test run"));
-  assert.equal(reopened.window.calls[0].payload.clock.timeZone, "Asia/Tokyo");
+  assert.equal(reopened.window.calls[0].payload.clock.timeZone, "UTC+09:00");
   await reopened.settle();
 
   const key = Object.keys(stored)[0];
   for (const empty of ["", "   "]) {
     const legacy = { [key]: JSON.stringify({ ...JSON.parse(stored[key]), timeZone: empty }) };
-    const recovered = await setup(t, { runs: [run] }, { stored: legacy, localTimeZone: "Europe/London" });
+    const recovered = await setup(t, { runs: [run] }, { stored: legacy, localOffset: 0 });
     assert.equal(recovered.field("Source clock / timezone").value, "Source clock (timezone not recorded)",
       "empty saved metadata must not visually select the first available timezone");
     await recovered.click(recovered.button("Save test run"));
@@ -393,6 +386,28 @@ test("a revision closing during parsing retains the preview but prevents writes 
   await h.click(h.button("Import test run"));
   assert.equal(h.query("fieldset").disabled, false);
   assert.equal(h.field("Software version").value, "");
+});
+
+test("a missing checker pauses a pending test import without a discard instruction and resumes it after the name is saved", async t => {
+  const h = await setup(t);
+  await h.importPreview();
+  await h.fill(h.field('Software version'), 'Retained software');
+  await h.fill(h.query('[aria-label="Overall test run comment"] textarea'), 'Retained test notes');
+  const stored = h.stored();
+  await h.configure({ readOnly: true, checkerRequired: true });
+  assert.equal(h.query('.test-import-form fieldset').disabled, true);
+  assert.equal(h.button('Save test run').disabled, true);
+  assert.match(h.text(), /Save Checked by to resume this test run/);
+  assert.match(h.text(), /Retained test notes/);
+  assert.doesNotMatch(h.text(), /Discard this draft|revision or test run was closed/);
+  assert.deepEqual(h.stored(), stored);
+  await h.configure({ readOnly: false, checkerRequired: false, project: { ...project, checkedByName: 'Manually entered checker' } });
+  assert.equal(h.field('Software version').value, 'Retained software');
+  assert.equal(h.query('[aria-label="Overall test run comment"] textarea').value, 'Retained test notes');
+  assert.equal(h.button('Save test run').disabled, false);
+  await h.click(h.button('Save test run'));
+  assert.equal(h.window.calls[0].payload.comment, 'Retained test notes');
+  await h.settle();
 });
 
 test("removal is limited to the creator/admin and requires a fresh revision/version-specific confirmation", async t => {

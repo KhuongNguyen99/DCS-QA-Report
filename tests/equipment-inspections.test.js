@@ -54,6 +54,8 @@ test("equipment catalog and per-skid records are exact and independent", async (
   )).rows[0].result;
   const a = await create("Equipment A");
   const b = await create("Equipment B");
+  for (const report of [a, b]) await db.query("select public.qa_set_checked_by($1,$2,$3,$4)",
+    [report.id, "Equipment checker", report.revision, null]);
   for (const report of [a, b]) {
     const snapshot = await state(report.id);
     assert.equal(snapshot.project.revision, 1);

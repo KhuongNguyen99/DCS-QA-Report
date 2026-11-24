@@ -57,6 +57,15 @@ function validateRevision(value) {
   return value;
 }
 
+function validateCheckedBy(value) {
+  if (typeof value !== "string")
+    throw new Error("Enter a name for Checked by between 1 and 120 characters.");
+  const name = value.trim();
+  if (!name || name.length > 120 || /[\u0000-\u001f\u007f-\u009f]/.test(name))
+    throw new Error("Enter a name for Checked by between 1 and 120 characters, without line breaks or control characters.");
+  return name;
+}
+
 function validateTestRunId(value) {
   if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))
     throw new Error("Choose a valid imported test run.");
@@ -480,6 +489,16 @@ export function createBackend(
       async loadRevision(revision) {
         return rpc("qa_load_revision", { p_revision: validateRevision(revision) },
           "Could not load the closed revision");
+      },
+      async setCheckedBy(name, expectedName = null) {
+        const checkedByName = validateCheckedBy(name);
+        if (expectedName !== null && (typeof expectedName !== "string"
+          || !expectedName.trim() || expectedName.length > 120
+          || /[\u0000-\u001f\u007f-\u009f]/.test(expectedName)))
+          throw new Error("Refresh the report before updating Checked by.");
+        return writeRpc("qa_set_checked_by", {
+          p_name: checkedByName, p_expected_name: expectedName,
+        }, "Could not save Checked by");
       },
       async approveRevision(contentVersion) {
         if (!Number.isSafeInteger(contentVersion) || contentVersion < 0)

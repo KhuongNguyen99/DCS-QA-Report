@@ -26,7 +26,12 @@ before(async () => {
             window.calls.push({ kind, value, resolve, reject }));
           return <RevisionPanel {...props} onApprove={value => call('approve', value)}
             onNewRevision={value => call('new', value)} onExport={value => call('export', value)}
-            onExportTests={value => call('test-export', value)} />;
+            onExportTests={value => call('test-export', value)}
+            onSaveCheckedBy={(name, expectedName, revision, walkdownId) => call('checker', { name, expectedName, revision, walkdownId }).then(() => {
+              const project = { ...props.project, checkedByName: name, contentVersion: props.project.contentVersion + 1 };
+              setProps(previous => ({ ...previous, project }));
+              return { project };
+            })} />;
         }
         window.act = React.act;
         window.root = createRoot(document.getElementById('root'));
@@ -42,10 +47,10 @@ after(async () => { if (directory) await rm(directory, { recursive: true, force:
 
 const draft = {
   walkdownId: "11111111-1111-4111-8111-111111111111", skidName: "Skid 2",
-  revision: 4, contentVersion: 9, status: "draft",
+  revision: 4, contentVersion: 9, status: "draft", checkedByName: "Original checker",
 };
 const closed = {
-  ...draft, status: "closed", closedAt: "2026-11-19T17:10:00Z", closedByName: "Kong",
+  ...draft, status: "closed", closedAt: "2026-11-19T17:10:00Z", closedByName: "Kong", closedByTitle: "Engineer",
 };
 
 async function setup(t, props = {}) {
@@ -85,6 +90,14 @@ async function setup(t, props = {}) {
     },
     async click(button) { assert.ok(button, "button exists"); await window.act(async () => button.click()); },
     async configure(changes) { await window.act(async () => window.configure(changes)); },
+    async fill(value) {
+      const input = window.document.getElementById('checked-by-name');
+      assert.ok(input, 'checked-by input exists');
+      await window.act(async () => {
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, value);
+        input.dispatchEvent(new window.Event('input', { bubbles: true }));
+      });
+    },
     async settle(error) {
       await window.act(async () => error ? window.calls.at(-1).reject(new Error(error)) : window.calls.at(-1).resolve());
     },
@@ -110,6 +123,7 @@ test("approval captures the reviewed revision/version and rejects a changed revi
   assert.equal(h.window.calls[0].kind, "approve");
   assert.deepEqual(JSON.parse(JSON.stringify(h.window.calls[0].value)), {
     walkdownId: draft.walkdownId, revision: 4, contentVersion: 10, skidName: "Skid 2",
+    checkedByName: "Original checker",
     photoCount: 7, commentCount: 2, completedCount: 3, testRunCount: 0, setupPhotoCount: 0,
   });
   await h.settle();
@@ -145,7 +159,8 @@ test("closed revisions allow an explicit new draft and export the requested hist
   });
   assert.equal(h.button("Approve & close"), undefined);
   assert.match(h.document.body.textContent, /Approved & closed/);
-  assert.match(h.document.body.textContent, /Approved by Kong/);
+  assert.match(h.document.querySelector('.revision-signatures').textContent, /Checked byOriginal checker.*Signed off byKong · Engineer/);
+  assert.equal(h.document.getElementById('checked-by-name'), null, 'approval makes the checker immutable');
   await h.click(h.button("Export revision 3"));
   assert.equal(h.window.calls[0].kind, "export");
   assert.equal(h.window.calls[0].value, 3);
@@ -155,10 +170,74 @@ test("closed revisions allow an explicit new draft and export the requested hist
   assert.equal(h.window.calls[1].kind, "new");
   assert.equal(h.window.calls[1].value, 4);
   await h.settle();
-  await h.configure({ project: { ...draft, revision: 5, contentVersion: 1 } });
+  await h.configure({ project: { ...draft, revision: 5, contentVersion: 1, checkedByName: null } });
   assert.equal(h.button("New revision"), undefined);
-  assert.equal(h.button("Approve & close").disabled, false);
+  assert.equal(h.button("Approve & close").disabled, true, 'the next revision needs its own manually entered checker');
+  assert.match(h.document.body.textContent, /Save Checked by before entering data or approving/);
   assert.ok(h.button("Export revision 3"), "earlier closed versions remain exportable while drafting");
+});
+
+test("manual checker edits block approval until saved or restored and retain the name after a failed save", async t => {
+  const h = await setup(t);
+  const input = () => h.document.getElementById('checked-by-name');
+  assert.equal(input().value, 'Original checker');
+  assert.equal(input().maxLength, 120);
+  assert.equal(input().getAttribute('autocomplete'), 'off');
+  assert.match(h.document.querySelector('.revision-signatures').textContent, /Signed off byPending approval/);
+  await h.fill('  New checker  ');
+  assert.equal(h.button('Approve & close').disabled, true);
+  assert.match(h.document.body.textContent, /Save Checked by or use the saved name/);
+  await h.click(h.button('Save checked by'));
+  assert.deepEqual(JSON.parse(JSON.stringify(h.window.calls[0])), {
+    kind: 'checker', value: { name: 'New checker', expectedName: 'Original checker', revision: 4, walkdownId: draft.walkdownId },
+  });
+  assert.equal(input().disabled, true);
+  await h.settle('Network interrupted');
+  assert.equal(input().value, '  New checker  ');
+  assert.equal(h.button('Approve & close').disabled, true);
+  await h.click(h.button('Save checked by'));
+  await h.settle();
+  assert.equal(input().value, 'New checker');
+  assert.equal(h.button('Approve & close').disabled, false);
+  await h.click(h.button('Approve & close'));
+  await h.fill('Different checker');
+  assert.equal(h.button('Confirm approval & close').disabled, true, 'an open review cannot approve the old saved name while a new name is visible');
+  await h.click(h.button('Use saved name'));
+  assert.equal(input().value, 'New checker');
+  assert.equal(h.button('Confirm approval & close').disabled, false);
+  await h.fill(' New checker ');
+  assert.equal(h.button('Confirm approval & close').disabled, false, 'whitespace around the unchanged saved name is not a new checker');
+});
+
+test("checker validation and concurrent changes preserve entered text and require reviewing the latest name", async t => {
+  const h = await setup(t);
+  await h.fill('');
+  assert.equal(h.button('Save checked by').disabled, true);
+  for (const invalid of ['X'.repeat(121), 'A\u0085B']) {
+    await h.fill(invalid);
+    await h.click(h.button('Save checked by'));
+    assert.match(h.document.getElementById('checked-by-error').textContent, /1–120 characters without control/);
+    assert.equal(h.window.calls.length, 0);
+  }
+  await h.fill('My pending checker');
+  await h.configure({ project: { ...draft, checkedByName: 'Concurrent checker', contentVersion: 10 } });
+  assert.equal(h.document.getElementById('checked-by-name').value, 'My pending checker');
+  assert.equal(h.button('Save checked by').disabled, true);
+  assert.equal(h.button('Approve & close').disabled, true);
+  assert.match(h.document.querySelector('.checked-by-conflict').textContent, /Concurrent checker/);
+  await h.click(h.button('Use saved name'));
+  assert.equal(h.document.getElementById('checked-by-name').value, 'Concurrent checker');
+  assert.equal(h.button('Approve & close').disabled, false);
+  await h.click(h.button('Approve & close'));
+  await h.configure({ project: { ...draft, checkedByName: 'Latest checker', contentVersion: 10 } });
+  assert.equal(h.button('Confirm approval & close').disabled, true, 'review captures the saved checker as well as the content version');
+});
+
+test("legacy approvals show missing checker and signer honestly without inferring a person from a title", async t => {
+  const h = await setup(t, { project: { ...closed, checkedByName: null, closedByName: null, closedByTitle: 'Engineer' } });
+  const signatures = h.document.querySelector('.revision-signatures');
+  assert.deepEqual(Array.from(signatures.querySelectorAll('dd'), item => item.textContent), ['Not recorded', 'Not recorded']);
+  assert.equal(h.document.getElementById('checked-by-name'), null);
 });
 
 test("unknown revision state never enables approval or a new revision", async t => {
