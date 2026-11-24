@@ -1,0 +1,73 @@
+.test-setup-bulk-dialog .bulk-assignment > textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 150px;
+  resize: vertical;
+  padding: 13px 12px;
+  border: 1px solid #bdccb4;
+  border-radius: 7px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.test-setup-bulk-dialog .bulk-assignment > textarea::placeholder {
+  color: #7c8974;
+}
+.test-setup-bulk-dialog .bulk-assignment > textarea:focus-visible {
+  outline: 2px solid #79a85d;
+  outline-offset: 2px;
+}
+.test-setup-bulk-dialog .bulk-assignment > textarea:disabled {
+  background: #f6f8f3;
+  color: #65715f;
+}
+.test-setup-bulk-optional {
+  font-weight: 400;
+  color: #6c7b68;
+}
+.test-setup-bulk-caption-help {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #63725b;
+}
+.test-setup-bulk-caption-help > :last-child {
+  white-space: nowrap;
+}
+.test-setup-bulk-review-help {
+  margin-top: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #63725b;
+}
+.test-setup-bulk-notice {
+  margin: 0 0 16px;
+  padding: 12px 15px;
+  border-radius: 7px;
+  background: #fff5e5;
+  color: #755728;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.test-setup-bulk-dialog .bulk-progress progress {
+  flex: 1;
+  min-width: 40px;
+  accent-color: var(--green);
+}
+@media (max-width: 480px) {
+  .test-setup-bulk-dialog .bulk-progress {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .test-setup-bulk-dialog .bulk-progress > span:last-child {
+    width: 100%;
+  }
+  .test-setup-bulk-dialog .bulk-save-actions .button {
+    flex-basis: 100%;
+  }
+}

@@ -107,6 +107,7 @@ function fixture(overrides = {}) {
     },
     async rpc(name, args) {
       calls.push([name, args]);
+      if (overrides.rpcThrows?.[name]) throw overrides.rpcThrows[name];
       if (overrides.rpcErrors?.[name])
         return { data: null, error: overrides.rpcErrors[name] };
       if (Object.hasOwn(overrides.rpcResults || {}, name))
@@ -246,6 +247,7 @@ test("setup photo uploads use the saved run and pinned revision without creating
   assert.equal(prepare.p_run_id, runId);
   assert.equal(prepare.p_walkdown_id, walkdownId);
   assert.equal(prepare.p_expected_revision, 17);
+  assert.equal(prepare.p_caption, "");
   assert.ok(!Object.hasOwn(prepare, "p_record_key"));
   assert.equal(h.calls.at(-1)[1].p_id, prepare.p_id);
   assert.equal(h.calls.at(-1)[1].p_run_id, runId);
@@ -253,18 +255,47 @@ test("setup photo uploads use the saved run and pinned revision without creating
   assert.equal(h.calls.at(-1)[0], "signUrl");
 });
 
+test("setup photo captions are saved with the upload instead of a separate post-upload write", async () => {
+  const runId = "66666666-6666-4666-8666-666666666666";
+  const caption = "Air supply at 6 bar\nFeedback connected to CH0";
+  const saved = { id: photoId, walkdownId, testRunId: runId, caption };
+  const h = fixture({ rpcResults: { qa_add_test_setup_photo: saved } });
+  assert.deepEqual(await h.backend.addTestSetupPhoto(runId, { ...sample, caption: `  ${caption}  ` }), saved);
+  assert.deepEqual(h.calls.map(call => call[0]), ["session", "qa_prepare_test_setup_photo", "upload", "qa_add_test_setup_photo"]);
+  assert.equal(h.calls[1][1].p_caption, caption);
+
+  const rejected = fixture({ rpcErrors: { qa_prepare_test_setup_photo: { message: "Caption was rejected" } } });
+  await assert.rejects(rejected.backend.addTestSetupPhoto(runId, { ...sample, caption }), /Caption was rejected/);
+  assert.deepEqual(rejected.calls.map(call => call[0]), ["session", "qa_prepare_test_setup_photo"],
+    "a rejected caption must never leave uploaded image bytes or a ready photo to duplicate on retry");
+});
+
+test("invalid setup upload captions are rejected before authentication, reservation, or image upload", async () => {
+  const h = fixture(), runId = "66666666-6666-4666-8666-666666666666";
+  for (const caption of [null, 12, {}, "x".repeat(1001), "Bad\u0000caption"])
+    await assert.rejects(h.backend.addTestSetupPhoto(runId, { ...sample, caption }), /1,000 characters/);
+  assert.deepEqual(h.calls, []);
+});
+
 test("setup photo upload failures clean up reservations and lost finalization responses recover within the same run", async () => {
   const runId = "66666666-6666-4666-8666-666666666666";
   const failed = fixture({ uploadError: { message: "Offline" } });
   await assert.rejects(failed.backend.addTestSetupPhoto(runId, sample), /Offline/);
   assert.deepEqual(failed.calls.slice(-2).map(call => call[0]), ["qa_cancel_photo", "remove"]);
-  const h = fixture({ rpcErrors: { qa_add_test_setup_photo: { message: "Response lost" } }, recoveredPhoto: true,
-    photo: { test_run_id: runId, record_key: null, caption: "Wiring setup" } });
-  const recovered = await h.backend.addTestSetupPhoto(runId, sample);
-  assert.equal(recovered.testRunId, runId);
-  assert.equal(recovered.caption, "Wiring setup");
-  assert.ok(h.filters.some(([key, value]) => key === "test_run_id" && value === runId));
-  assert.ok(!h.calls.some(call => ["qa_cancel_photo", "remove"].includes(call[0])));
+  for (const failure of [
+    { rpcErrors: { qa_add_test_setup_photo: { message: "Response lost" } } },
+    { rpcThrows: { qa_add_test_setup_photo: new Error("Transport response lost") } },
+  ]) {
+    const h = fixture({ ...failure, recoveredPhoto: true,
+      photo: { test_run_id: runId, record_key: null, caption: "Wiring setup" } });
+    const recovered = await h.backend.addTestSetupPhoto(runId, { ...sample, caption: "Wiring setup" });
+    assert.equal(recovered.testRunId, runId);
+    assert.equal(recovered.caption, "Wiring setup");
+    assert.equal(h.calls.filter(call => call[0] === "upload").length, 1);
+    assert.ok(!h.calls.some(call => call[0] === "qa_update_test_setup_photo"));
+    assert.ok(h.filters.some(([key, value]) => key === "test_run_id" && value === runId));
+    assert.ok(!h.calls.some(call => ["qa_cancel_photo", "remove"].includes(call[0])));
+  }
 });
 
 test("setup captions and removal preserve revision scope and archived objects", async () => {

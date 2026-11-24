@@ -66,11 +66,13 @@ const result = await query(`
       and not has_table_privilege('anon', 'public.qa_test_runs', 'SELECT')
       and (select count(*) = 2 from pg_trigger where not tgisinternal and tgenabled = 'O'
         and tgname in ('qa_test_runs_draft_only','qa_test_runs_report_revision')) as test_runs_protected,
-    (select bool_and(has_function_privilege('authenticated', to_regprocedure(signature), 'EXECUTE')
+    (select bool_and(to_regprocedure(signature) is not null
+      and has_function_privilege('authenticated', to_regprocedure(signature), 'EXECUTE')
       and not has_function_privilege('anon', to_regprocedure(signature), 'EXECUTE')) from unnest(array[
       'public.qa_save_test_run(uuid,uuid,jsonb,bigint,bigint)',
       'public.qa_delete_test_run(uuid,uuid,bigint,bigint)',
       'public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint)',
+      'public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint,text)',
       'public.qa_add_test_setup_photo(uuid,uuid,uuid,bigint)',
       'public.qa_update_test_setup_photo(uuid,uuid,uuid,text,bigint)',
       'public.qa_reorder_test_setup_photos(uuid,uuid,uuid[],uuid[],bigint)',

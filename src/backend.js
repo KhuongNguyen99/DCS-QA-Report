@@ -63,6 +63,12 @@ function validateTestRunId(value) {
   return value.toLowerCase();
 }
 
+function validateSetupPhotoCaption(caption) {
+  if (typeof caption !== "string" || caption.length > 1000 || caption.includes("\u0000"))
+    throw new Error("Keep the setup photo caption within 1,000 characters.");
+  return caption.trim();
+}
+
 function validatePhotoOrder(value, kind, max) {
   if (!Array.isArray(value) || value.length > max)
     throw new Error(`Provide the complete ${kind} order, with at most ${max} photos.`);
@@ -351,10 +357,11 @@ export function createBackend(
     const writeRpc = (name, args, action) => rpc(name, {
       ...args, p_expected_revision: validateRevision(expectedRevision),
     }, action);
-    async function uploadPhoto(recordKey, testRunId, { blob, width, height, name = "Inspection photo" } = {}) {
+    async function uploadPhoto(recordKey, testRunId, { blob, width, height, name = "Inspection photo", caption = "" } = {}) {
       const setup = Boolean(testRunId);
       if (setup) validateTestRunId(testRunId);
       else validateRecordKey(recordKey);
+      const setupCaption = setup ? validateSetupPhotoCaption(caption) : "";
       if (
         !blob ||
         typeof blob.arrayBuffer !== "function" ||
@@ -391,7 +398,7 @@ export function createBackend(
         setup ? "qa_prepare_test_setup_photo" : "qa_prepare_photo",
         {
           p_id: id,
-          ...(setup ? { p_run_id: testRunId } : { p_record_key: recordKey }),
+          ...(setup ? { p_run_id: testRunId, p_caption: setupCaption } : { p_record_key: recordKey }),
           p_path: path,
           p_name: String(name).trim().slice(0, 180) || "Inspection photo",
           p_width: width,
@@ -417,12 +424,21 @@ export function createBackend(
         await cancelUpload().catch(() => {});
         fail(uploadError, "Could not upload the photo");
       }
-      const { data, error } = await client.rpc(setup ? "qa_add_test_setup_photo" : "qa_add_photo", {
-        p_walkdown_id: walkdownId,
-        ...(setup ? { p_run_id: testRunId } : {}),
-        p_id: id,
-        p_expected_revision: expectedRevision,
-      });
+      let registration;
+      try {
+        registration = await client.rpc(setup ? "qa_add_test_setup_photo" : "qa_add_photo", {
+          p_walkdown_id: walkdownId,
+          ...(setup ? { p_run_id: testRunId } : {}),
+          p_id: id,
+          p_expected_revision: expectedRevision,
+        });
+      } catch (error) {
+        if (!setup) throw error;
+        // A transport exception can hide a committed image and caption, just
+        // like a returned RPC error. Recover that reservation before retrying.
+        registration = { data: null, error };
+      }
+      const { data, error } = registration;
       if (error) {
         // Recover a lost RPC response without deleting an already registered photo.
         let query = client
@@ -519,10 +535,8 @@ export function createBackend(
       async updateTestSetupPhoto(runId, photoId, caption) {
         validateTestRunId(runId);
         validateEvidenceId(photoId, "setup photo");
-        if (typeof caption !== "string" || caption.length > 1000 || caption.includes("\u0000"))
-          throw new Error("Keep the setup photo caption within 1,000 characters.");
         return writeRpc("qa_update_test_setup_photo", {
-          p_run_id: runId, p_id: photoId, p_caption: caption.trim(),
+          p_run_id: runId, p_id: photoId, p_caption: validateSetupPhotoCaption(caption),
         }, "Could not save the setup photo caption");
       },
 

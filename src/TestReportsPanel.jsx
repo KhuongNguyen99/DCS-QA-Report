@@ -554,7 +554,7 @@ function ScopedTestReportsPanel({
       </div>
     </div>}
     {!draft && selectedRun && <PhotoGallery key={`${selectedRun.id}:${project.revision}`}
-      run={selectedRun} revision={project.revision} readOnly={!canEdit(selectedRun)} pending={blocked}
+      run={selectedRun} revision={project.revision} skidName={project.skidName} readOnly={!canEdit(selectedRun)} pending={blocked}
       getPhotoUrl={getPhotoUrl} onAddPhoto={onAddSetupPhoto} onUpdatePhoto={onUpdateSetupPhoto}
       onRemovePhoto={onRemoveSetupPhoto} onReorderPhotos={onReorderSetupPhotos} onDirtyChange={setSetupDirty} />}
     {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${revisionNumber(project)}`}</span></header>

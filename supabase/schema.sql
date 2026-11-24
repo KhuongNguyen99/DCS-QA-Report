@@ -1474,10 +1474,11 @@ end;
 $$;
 
 create or replace function public.qa_prepare_test_setup_photo(p_walkdown_id uuid, p_run_id uuid, p_id uuid,
-  p_path text, p_name text, p_width integer, p_height integer, p_expected_revision bigint)
+  p_path text, p_name text, p_width integer, p_height integer, p_expected_revision bigint, p_caption text)
 returns void language plpgsql security definer set search_path = '' as $$
 begin
   perform qa_private.require_test_setup_run(p_walkdown_id, p_run_id, p_expected_revision);
+  if p_caption is null or length(p_caption) > 1000 then raise exception 'A setup photo caption can contain at most 1,000 characters.'; end if;
   if p_id is null or p_path is null or p_path not in (auth.uid()::text || '/' || p_id::text || '.jpg',
     auth.uid()::text || '/' || p_id::text || '.png', auth.uid()::text || '/' || p_id::text || '.webp') then
     raise exception 'Invalid setup photo storage path.';
@@ -1485,9 +1486,20 @@ begin
   if (select count(*) from public.qa_photos where test_run_id = p_run_id and deleted_at is null) >= 30 then
     raise exception 'A test run can contain at most 30 setup photos. Remove an unused photo first.';
   end if;
-  insert into public.qa_photos(id, walkdown_id, test_run_id, path, name, width, height, created_by, reserved_revision)
-  values(p_id, p_walkdown_id, p_run_id, p_path, trim(p_name), p_width, p_height, auth.uid(), p_expected_revision);
+  -- Keep the caption with the pending reservation so finalization exposes both
+  -- together, without a second caption write after an image is already saved.
+  insert into public.qa_photos(id, walkdown_id, test_run_id, path, name, width, height, created_by, reserved_revision, caption)
+  values(p_id, p_walkdown_id, p_run_id, p_path, trim(p_name), p_width, p_height, auth.uid(), p_expected_revision, p_caption);
 end;
+$$;
+
+-- Existing clients omit a caption. Both signatures use the same checked path;
+-- distinct argument counts avoid ambiguous RPC resolution for older requests.
+create or replace function public.qa_prepare_test_setup_photo(p_walkdown_id uuid, p_run_id uuid, p_id uuid,
+  p_path text, p_name text, p_width integer, p_height integer, p_expected_revision bigint)
+returns void language sql security definer set search_path = '' as $$
+  select public.qa_prepare_test_setup_photo(p_walkdown_id, p_run_id, p_id, p_path, p_name,
+    p_width, p_height, p_expected_revision, '');
 $$;
 
 create or replace function public.qa_add_test_setup_photo(p_walkdown_id uuid, p_run_id uuid, p_id uuid, p_expected_revision bigint)
@@ -1629,10 +1641,12 @@ create or replace trigger qa_test_runs_retire_setup after update on public.qa_te
 for each row execute function qa_private.retire_test_setup_photos();
 
 revoke all on function public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint),
+  public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint,text),
   public.qa_add_test_setup_photo(uuid,uuid,uuid,bigint), public.qa_update_test_setup_photo(uuid,uuid,uuid,text,bigint),
   public.qa_delete_test_setup_photo(uuid,uuid,uuid,bigint),
   public.qa_reorder_test_setup_photos(uuid,uuid,uuid[],uuid[],bigint) from public, anon, authenticated;
 grant execute on function public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint),
+  public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint,text),
   public.qa_add_test_setup_photo(uuid,uuid,uuid,bigint), public.qa_update_test_setup_photo(uuid,uuid,uuid,text,bigint),
   public.qa_delete_test_setup_photo(uuid,uuid,uuid,bigint),
   public.qa_reorder_test_setup_photos(uuid,uuid,uuid[],uuid[],bigint) to authenticated;

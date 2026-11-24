@@ -2,6 +2,7 @@ import React, { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Icon from "./Icons.jsx";
 import { normalizePhoto } from "./photos.js";
+import TestSetupBulkDialog from "./TestSetupBulkDialog.jsx";
 import "./test-setup-photos.css";
 
 const MAX_PHOTOS = 30;
@@ -60,7 +61,7 @@ export default function PhotoGallery(props) {
 function ScopedPhotoGallery({
   run, revision, readOnly = false, pending = false, getPhotoUrl,
   onAddPhoto, onUpdatePhoto, onRemovePhoto, onReorderPhotos, onDirtyChange,
-  kind = "setup", headerActions, canRemovePhoto = () => true,
+  kind = "setup", headerActions, canRemovePhoto = () => true, skidName,
 }) {
   const inspection = kind === "inspection";
   const savedPhotos = run.setupPhotos || [];
@@ -79,6 +80,7 @@ function ScopedPhotoGallery({
   const [editing, setEditing] = useState(null);
   const [confirmRemove, setConfirmRemove] = useState(null);
   const [viewedId, setViewedId] = useState(null);
+  const [bulkOpen, setBulkOpen] = useState(false);
   const input = useRef(null);
   const busyRef = useRef(false);
   const mounted = useRef(false);
@@ -88,9 +90,9 @@ function ScopedPhotoGallery({
   const dirtyCallback = useRef(onDirtyChange);
   dirtyCallback.current = onDirtyChange;
   const captionDirty = editing !== null && editing.text !== (editing.photo.caption || "");
-  const dirty = Boolean((busy && busy !== "order") || queue.length || captionDirty);
+  const dirty = Boolean((busy && busy !== "order") || queue.length || captionDirty || bulkOpen);
   const blocked = pending || Boolean(busy);
-  const editingLocked = blocked || Boolean(queue.length) || Boolean(editing);
+  const editingLocked = blocked || Boolean(queue.length) || Boolean(editing) || bulkOpen;
   const canReorder = !readOnly && typeof onReorderPhotos === "function" && photos.length > 1;
   const orderLocked = !canReorder || editingLocked;
   const viewed = photos.find(photo => photo.id === viewedId);
@@ -104,7 +106,7 @@ function ScopedPhotoGallery({
     ++operation.current;
     busyRef.current = false;
     setBusy(""); setQueue([]); setProgress(""); setError(""); setNotice("");
-    setEditing(null); setConfirmRemove(null); setViewedId(null);
+    setEditing(null); setConfirmRemove(null); setViewedId(null); setBulkOpen(false);
   }, [run.id, run.walkdownId, revision]);
   useEffect(() => {
     if (!dirty) return;
@@ -169,6 +171,15 @@ function ScopedPhotoGallery({
     event.target.value = "";
     if (queue.length) return;
     await upload(chosen);
+  }
+  async function saveBulkPhoto(photo) {
+    const task = start("bulk");
+    if (!task) throw new Error("This test setup is busy or no longer editable. Try again when the current save finishes.");
+    const { token, captured } = task;
+    try {
+      requireScope(token, captured);
+      return await onAddPhoto(captured.run, photo, captured.revision);
+    } finally { finish(token, captured); }
   }
   async function saveCaption() {
     if (!editing || !captionDirty || queue.length) return;
@@ -239,6 +250,10 @@ function ScopedPhotoGallery({
           disabled={editingLocked || photos.length >= MAX_PHOTOS} onChange={choosePhotos} />
         <button type="button" className="button secondary" disabled={editingLocked || photos.length >= MAX_PHOTOS}
           onClick={() => input.current?.click()}><Icon name="upload" />Add setup photos</button>
+        {!inspection && <button type="button" className="button primary" disabled={editingLocked || photos.length >= MAX_PHOTOS}
+          onClick={() => { setBulkOpen(true); setError(""); setNotice(""); setConfirmRemove(null); }}>
+          <Icon name="upload" />Bulk upload photos
+        </button>}
       </>}
     </header>
     {error && <p className="field-error test-setup-message" role="alert">{error}</p>}
@@ -288,5 +303,9 @@ function ScopedPhotoGallery({
     </article>)}</div>}
     {viewed && <SetupPhotoDialog photo={viewed} index={photos.indexOf(viewed)} count={photos.length}
       getPhotoUrl={getPhotoUrl} inspection={inspection} onClose={() => setViewedId(null)} />}
+    {bulkOpen && !inspection && <TestSetupBulkDialog
+      runName={run.name} skidName={skidName} scopeKey={JSON.stringify([run.walkdownId, run.id, revision])}
+      remainingSlots={Math.max(0, MAX_PHOTOS - photos.length)} readOnly={readOnly} pending={blocked}
+      onPhoto={saveBulkPhoto} onClose={() => setBulkOpen(false)} />}
   </section>;
 }

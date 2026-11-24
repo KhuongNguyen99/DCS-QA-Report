@@ -182,6 +182,20 @@ function createServer(initiallyClosed = false) {
           server.state.testRuns = server.state.testRuns.filter(run => run.id !== id);
           server.state.project.contentVersion += 1;
         },
+        async addTestSetupPhoto(runId, photo) {
+          writable(revision);
+          assert.equal(photo.blob.type, "image/jpeg");
+          assert.ok(photo.blob.size > 0);
+          server.calls.push({ kind: "addSetupPhoto", revision, runId, name: photo.name, caption: photo.caption });
+          const run = server.state.testRuns.find(item => item.id === runId);
+          assert.ok(run, "setup uploads must target an existing saved run");
+          const saved = { id: `setup-${(run.setupPhotos?.length || 0) + 1}`, walkdownId: SKID, testRunId: runId,
+            path: `private/${photo.name}`, name: photo.name, width: photo.width, height: photo.height,
+            caption: photo.caption || "", createdBy: INSPECTOR, createdAt: "2026-11-19T18:02:00Z" };
+          run.setupPhotos = [...(run.setupPhotos || []), saved];
+          server.state.project.contentVersion += 1;
+          return copy(saved);
+        },
         async updateTestSetupPhoto(runId, photoId, caption) {
           writable(revision); server.calls.push({ kind: "setupCaption", revision, runId, photoId, caption });
           const photo = server.state.testRuns.find(run => run.id === runId).setupPhotos.find(item => item.id === photoId);
@@ -260,6 +274,11 @@ async function setup(t, { closed = false, photos } = {}) {
   window.HTMLAnchorElement.prototype.click = function () { window.downloads.push({ href: this.href, name: this.download }); };
   window.URL.createObjectURL = () => "blob:report";
   window.URL.revokeObjectURL = () => {};
+  window.createImageBitmap = async () => ({ width: 800, height: 600, close() {} });
+  window.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {}, save() {}, restore() {}, translate() {}, rotate() {} });
+  window.HTMLCanvasElement.prototype.toBlob = function (callback, type) {
+    callback(new window.Blob(["normalized image"], { type }));
+  };
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.eval(bundle);
   await window.act(async () => window.mount());
@@ -505,6 +524,108 @@ const testRun = () => ({
   software: { name: "Siemens PRONETA Basic", version: "3.9-test" },
   clock: { basis: "source-local", timeZone: "Source clock", startMs: null, endMs: null },
   sources: [], stations: [], devices: [], unassignedChannels: [], warnings: [],
+});
+
+async function chooseTestSetupPhotos(h, ...names) {
+  const input = h.document.querySelector('.test-setup-bulk-dialog input[aria-label="Choose test setup photos"]');
+  assert.ok(input, "the real test setup upload dialog is open");
+  Object.defineProperty(input, "files", { configurable: true,
+    value: names.map(name => new h.window.File(["image pixels"], name, { type: "image/jpeg" })) });
+  await h.window.act(async () => input.dispatchEvent(new h.window.Event("change", { bubbles: true })));
+  assert.equal(h.button("Save & next").disabled, false, "the selected image is prepared for review");
+}
+
+test("App retains an unsaved setup bulk queue and blocks run changes, approval, and signout until discard", async t => {
+  const h = await setup(t);
+  const otherRun = { ...testRun(), id: "55555555-5555-4555-8555-555555555555", name: "Pressure test" };
+  h.server.state.testRuns = [testRun(), otherRun];
+  await h.notify();
+  await h.nav("Test reports");
+  await h.click(h.button("Bulk upload photos", h.document.querySelector(".test-setup")));
+  await chooseTestSetupPhotos(h, "unsaved-wiring.jpg");
+  await h.fill(h.document.querySelector(".test-setup-bulk-dialog textarea"), "Unsaved setup caption");
+  const runSelect = h.document.querySelector(".test-run-toolbar select");
+  assert.equal(runSelect.disabled, true);
+  assert.equal(runSelect.value, testRun().id);
+  assert.equal(h.button("Edit run").disabled, true);
+  assert.equal(h.document.querySelector("#skid-report").disabled, true);
+  const leaving = new h.window.Event("beforeunload", { cancelable: true });
+  h.window.dispatchEvent(leaving);
+  assert.equal(leaving.defaultPrevented, true);
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, true);
+  await h.click(h.button("Approve & close"));
+  assert.equal(h.server.calls.some(call => call.kind === "approve"), false);
+  await h.nav("Workspace");
+  assert.equal(h.button("Sign out").disabled, true);
+  await h.nav("Test reports");
+  assert.equal(h.document.querySelector(".test-setup-bulk-dialog textarea").value, "Unsaved setup caption");
+
+  const confirmations = [];
+  h.window.confirm = text => { confirmations.push(text); return false; };
+  await h.click(h.button("Close bulk upload"));
+  assert.match(confirmations[0], /Discard 1 photo.*captions/);
+  assert.equal(h.document.querySelector(".test-setup-bulk-dialog textarea").value, "Unsaved setup caption");
+  assert.equal(runSelect.disabled, true);
+  h.window.confirm = () => true;
+  await h.click(h.button("Close bulk upload"));
+  assert.equal(h.document.querySelector(".test-setup-bulk-dialog"), null);
+  assert.equal(runSelect.disabled, false);
+  assert.equal(h.document.querySelector("#skid-report").disabled, false);
+  await h.window.act(async () => {
+    runSelect.value = otherRun.id;
+    runSelect.dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  });
+  assert.equal(h.document.querySelector(".test-preview h2").textContent, otherRun.name);
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, false);
+  await h.nav("Workspace");
+  assert.equal(h.button("Sign out").disabled, false);
+  assert.deepEqual(h.server.calls, [], "discarded images and captions never reach the database");
+});
+
+test("App saves bulk photos with captions once and advances after a successful write even if refresh fails", async t => {
+  const h = await setup(t);
+  h.server.state.testRuns = [testRun()];
+  await h.notify();
+  await h.nav("Test reports");
+  await h.click(h.button("Bulk upload photos", h.document.querySelector(".test-setup")));
+  await chooseTestSetupPhotos(h, "wiring.jpg", "air-supply.jpg");
+  await h.fill(h.document.querySelector(".test-setup-bulk-dialog textarea"), "  Feedback wiring at CH0  ");
+  const backend = h.server.workspace.forWalkdown(SKID), read = backend.loadState;
+  let failNextRead = true;
+  backend.loadState = async () => {
+    if (failNextRead) { failNextRead = false; throw new Error("Connection lost after saving"); }
+    return read();
+  };
+  await h.click(h.button("Save & next"));
+  assert.deepEqual(h.server.calls, [{ kind: "addSetupPhoto", revision: 7, runId: testRun().id,
+    name: "wiring.jpg", caption: "Feedback wiring at CH0" }]);
+  assert.equal(h.server.state.testRuns[0].setupPhotos.length, 1);
+  assert.equal(h.document.querySelector(".test-setup-caption").textContent, "Feedback wiring at CH0",
+    "the committed image and caption remain visible without a successful refresh");
+  assert.match(h.document.body.textContent, /change was saved, but the report could not refresh/);
+  assert.equal(h.document.querySelector(".test-setup-bulk-dialog .bulk-image-caption span").textContent, "air-supply.jpg");
+  assert.equal(h.document.querySelector(".test-setup-bulk-dialog textarea").value, "");
+  assert.equal(h.document.querySelector('.test-setup-bulk-dialog [role="alert"]'), null,
+    "a post-write refresh failure must not offer retrying the already saved image");
+  assert.equal(h.button("Save & next").disabled, false);
+  await h.fill(h.document.querySelector(".test-setup-bulk-dialog textarea"), "Regulated air supply at 6 bar");
+  await h.click(h.button("Save & next"));
+  assert.deepEqual(h.server.calls, [
+    { kind: "addSetupPhoto", revision: 7, runId: testRun().id, name: "wiring.jpg", caption: "Feedback wiring at CH0" },
+    { kind: "addSetupPhoto", revision: 7, runId: testRun().id, name: "air-supply.jpg", caption: "Regulated air supply at 6 bar" },
+  ], "each image carries its caption in one upload call, without a separate caption write or duplicate");
+  assert.equal(h.server.state.testRuns[0].setupPhotos.length, 2);
+  assert.match(h.document.querySelector(".test-setup-bulk-dialog .bulk-complete").textContent, /2 photos saved/);
+  await h.click(h.button("Done"));
+  assert.equal(h.document.querySelector(".test-setup-bulk-dialog"), null);
+  assert.equal(h.document.querySelector(".test-run-toolbar select").disabled, false);
+  assert.equal(h.document.querySelector("#skid-report").disabled, false);
+  await h.nav("Workspace");
+  assert.equal(h.button("Sign out").disabled, false);
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, false);
 });
 
 test("App blocks approval for unsaved setup captions and preserves approved photos after a later removal", async t => {

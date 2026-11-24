@@ -94,6 +94,9 @@ async function setup(t, props = {}) {
   };
   window.HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); };
   window.HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
+  let nextObjectUrl = 0;
+  window.URL.createObjectURL = () => `blob:setup-preview-${++nextObjectUrl}`;
+  window.URL.revokeObjectURL = () => {};
   const bitmap = () => ({ width: 1200, height: 800, close: () => { window.closedBitmaps += 1; } });
   window.createImageBitmap = async file => {
     window.decoded += 1;
@@ -126,7 +129,7 @@ async function setup(t, props = {}) {
       });
     },
     async choose(names) {
-      const input = document.querySelector('input[type="file"]');
+      const input = document.querySelector('dialog input[type="file"]') || document.querySelector('input[type="file"]');
       assert.ok(input);
       await window.act(async () => {
         Object.defineProperty(input, "files", { configurable: true, value: names.map(name => new window.File(["image"], name, { type: "image/jpeg" })) });
@@ -136,7 +139,7 @@ async function setup(t, props = {}) {
     async settle(index, error = null) {
       const call = window.calls[index];
       assert.ok(call);
-      const saved = call.kind === "add" ? { ...photo(`photo-${index + 1}`), name: call.normalized.name }
+      const saved = call.kind === "add" ? { ...photo(`photo-${index + 1}`, call.normalized.caption || ""), name: call.normalized.name }
         : call.kind === "caption" ? { ...call.photo, caption: call.caption }
           : call.kind === 'order' ? call.orderedIds.map(id => call.run.setupPhotos.find(photo => photo.id === id)) : undefined;
       await window.act(async () => error ? call.reject(new Error(error)) : call.resolve(saved));
@@ -270,6 +273,81 @@ test("the setup photo limit is checked before image processing or server writes"
   assert.equal(h.window.decoded, 0);
   assert.match(h.text(), /Choose at most 1 more/);
   assert.equal(h.window.dirty.at(-1), false);
+});
+
+test("bulk review saves each image and caption together in the selected run, including while the parent refreshes", async t => {
+  const h = await setup(t, { skidName: "Skid 101", run: run(Array.from({ length: 28 }, (_, index) => photo(`saved-${index}`))) });
+  await h.click(h.button("Bulk upload photos"));
+  assert.match(h.query("dialog").textContent, /Skid 101.*Control box I\/O test/);
+  await h.choose(["wiring.jpg", "air-supply.jpg"]);
+  assert.equal(h.window.calls.length, 0, "selecting files must not upload before review");
+  assert.equal(h.window.dirty.at(-1), true);
+  await h.fill("  Wiring checked before the test  ");
+  await h.click(h.button("Save & next"));
+  assert.equal(h.window.calls.length, 1);
+  assert.equal(h.window.calls[0].normalized.name, "wiring.jpg");
+  assert.equal(h.window.calls[0].normalized.caption, "Wiring checked before the test");
+  assert.equal(h.window.calls[0].run.id, "run-1");
+  assert.equal(h.window.calls[0].run.walkdownId, "skid-1");
+  assert.equal(h.window.calls[0].revision, 4);
+  await h.configure({ pending: true });
+  await h.settle(0);
+  assert.match(h.query("dialog").textContent, /1 saved.*1 awaiting review/);
+  assert.equal(h.query("dialog textarea").value, "", "the next image has its own caption");
+  assert.equal(h.button("Save & next").disabled, true);
+  await h.configure({ pending: false });
+  await h.fill("Air supply at the test bench");
+  await h.click(h.button("Save & next"));
+  assert.equal(h.window.calls[1].normalized.caption, "Air supply at the test bench");
+  await h.settle(1);
+  assert.match(h.query("dialog").textContent, /All photos reviewed/);
+  assert.equal(h.document.querySelectorAll(".test-setup-photo").length, 30);
+  assert.deepEqual(h.window.calls.map(call => call.kind), ["add", "add"], "captions need no follow-up mutation");
+  assert.equal(h.window.dirty.at(-1), true, "the parent stays locked until the review dialog closes");
+  await h.click(h.button("Done"));
+  assert.equal(h.query("dialog"), null);
+  assert.equal(h.window.dirty.at(-1), false);
+  assert.equal(h.button("Bulk upload photos").disabled, true, "saved photos consume the remaining capacity");
+  assert.match(h.text(), /Wiring checked before the test/);
+  assert.match(h.text(), /Air supply at the test bench/);
+});
+
+test("a bulk upload failure keeps the reviewed caption and permits a single retry", async t => {
+  const h = await setup(t);
+  await h.click(h.button("Bulk upload photos"));
+  await h.choose(["wiring.jpg"]);
+  await h.fill("Connections verified");
+  await h.click(h.button("Save & next"));
+  await h.settle(0, "Connection lost");
+  assert.match(h.query("dialog").textContent, /Connection lost/);
+  assert.equal(h.query("dialog textarea").value, "Connections verified");
+  assert.equal(h.document.querySelectorAll(".test-setup-photo").length, 0);
+  const retry = h.button("Save & next");
+  await h.window.act(async () => { retry.click(); retry.click(); });
+  assert.equal(h.window.calls.length, 2, "rapid retry clicks must start one upload");
+  assert.equal(h.window.calls[1].normalized.caption, "Connections verified");
+  await h.settle(1);
+  await h.click(h.button("Done"));
+  assert.equal(h.document.querySelectorAll(".test-setup-photo").length, 1);
+  assert.equal(h.window.dirty.at(-1), false);
+});
+
+test("bulk review cannot upload into a closed or changed revision and is not added to inspection evidence", async t => {
+  const h = await setup(t);
+  await h.click(h.button("Bulk upload photos"));
+  await h.choose(["wiring.jpg", "air-supply.jpg"]);
+  await h.fill("Pending review");
+  await h.configure({ readOnly: true });
+  assert.equal(h.button("Save & next").disabled, true);
+  assert.equal(h.query("dialog textarea").value, "Pending review");
+  await h.click(h.button("Save & next"));
+  assert.equal(h.window.calls.length, 0);
+  await h.configure({ readOnly: false, revision: 5, run: { ...run([]), id: "run-2" } });
+  assert.equal(h.query("dialog"), null);
+  assert.equal(h.window.calls.length, 0);
+  assert.equal(h.window.dirty.at(-1), false);
+  await h.configure({ kind: "inspection" });
+  assert.equal(h.button("Bulk upload photos"), undefined);
 });
 
 const displayedNames = h => Array.from(h.document.querySelectorAll('.test-setup-photo-body > .test-setup-filename'), e => e.textContent);

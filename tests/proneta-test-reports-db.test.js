@@ -416,6 +416,69 @@ test("setup photos share closeout locks and frozen revisions without entering in
   assert.deepEqual((await h.db.query("select snapshot from public.qa_report_revisions where walkdown_id=$1 and revision=1", [report.id])).rows[0].snapshot, frozen);
 });
 
+test("setup upload captions become visible with the photo, survive retries, and retain legacy upload compatibility", async t => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Captioned setup upload skid"), runId = crypto.randomUUID();
+  await h.rpc("qa_save_test_run", report.id, runId, runData(), 1, null);
+  const id = crypto.randomUUID(), path = `${admin}/${id}.jpg`;
+  const caption = "Air supply at 6 bar\nFeedback connected to CH0";
+  const prepare = value => h.rpc("qa_prepare_test_setup_photo", report.id, runId, id, path, "Connections.jpg", 1600, 900, 1, value);
+  for (const invalid of [null, "x".repeat(1001)])
+    await assert.rejects(prepare(invalid), /at most 1,000/);
+  await prepare(caption);
+  assert.equal((await h.state(report.id)).testRuns[0].setupPhotos, undefined,
+    "a caption reservation must not expose a photo before image bytes are saved and finalized");
+  await assert.rejects(h.rpc("qa_add_test_setup_photo", report.id, runId, id, 1), /Upload the image/);
+  await h.db.query("insert into storage.objects(bucket_id,name) values('qa-evidence',$1)", [path]);
+  const saved = await h.rpc("qa_add_test_setup_photo", report.id, runId, id, 1);
+  assert.equal(saved.caption, caption);
+  assert.deepEqual((await h.state(report.id)).testRuns[0].setupPhotos, [saved]);
+  const version = (await h.state(report.id)).project.contentVersion;
+  assert.deepEqual(await h.rpc("qa_add_test_setup_photo", report.id, runId, id, 1), saved);
+  assert.equal((await h.state(report.id)).project.contentVersion, version,
+    "retrying a lost response does not append a duplicate, rewrite its caption, or change report content");
+
+  const legacy = await setupPhoto(h, report.id, runId, 1);
+  assert.equal(legacy.photo.caption, "", "older requests with no caption retain their original behavior");
+  const reviewed = await h.state(report.id);
+  const closed = await h.rpc("qa_approve_revision", report.id, 1, reviewed.project.contentVersion);
+  assert.equal(closed.testRuns[0].setupPhotos[0].caption, caption);
+  const frozen = (await h.db.query("select snapshot from public.qa_report_revisions where walkdown_id=$1 and revision=1", [report.id])).rows[0].snapshot;
+  await h.db.exec("reset role");
+  await h.db.exec(setupMigration);
+  await h.db.exec(setupMigration);
+  await h.user();
+  assert.deepEqual((await h.db.query("select snapshot from public.qa_report_revisions where walkdown_id=$1 and revision=1", [report.id])).rows[0].snapshot, frozen);
+  await assert.rejects(prepare("Late caption"), /approved and closed/);
+});
+
+test("captioned setup reservations keep both RPC signatures restricted to verified run owners and administrators", async t => {
+  const h = await database(t);
+  const report = await h.rpc("qa_create_walkdown", "Captioned setup access skid"), runId = crypto.randomUUID();
+  await h.rpc("qa_save_test_run", report.id, runId, runData(), 1, null);
+  for (const signature of [
+    "public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint)",
+    "public.qa_prepare_test_setup_photo(uuid,uuid,uuid,text,text,integer,integer,bigint,text)",
+  ]) {
+    const grants = (await h.db.query("select has_function_privilege('authenticated',$1,'EXECUTE') as authenticated, has_function_privilege('anon',$1,'EXECUTE') as anon", [signature])).rows[0];
+    assert.deepEqual(grants, { authenticated: true, anon: false });
+  }
+  const id = crypto.randomUUID(), path = `${second}/${id}.jpg`;
+  await h.user(second);
+  for (const args of [[], ["Cannot bypass ownership with a caption"]])
+    await assert.rejects(h.rpc("qa_prepare_test_setup_photo", report.id, runId, id, path, "Denied.jpg", 100, 100, 1, ...args), /Only the importing inspector/);
+  await h.user(outsider);
+  await assert.rejects(h.rpc("qa_prepare_test_setup_photo", report.id, runId, id, path, "Denied.jpg", 100, 100, 1, "Denied"), /approved project inspector/);
+  await h.user(admin);
+  const secondRunId = crypto.randomUUID();
+  await h.user(second);
+  await h.rpc("qa_save_test_run", report.id, secondRunId, runData(), 1, null);
+  await h.rpc("qa_prepare_test_setup_photo", report.id, secondRunId, id, path, "Owner.jpg", 100, 100, 1, "Owner's setup");
+  await h.user(admin);
+  const adminId = crypto.randomUUID();
+  await h.rpc("qa_prepare_test_setup_photo", report.id, secondRunId, adminId, `${admin}/${adminId}.jpg`, "Admin.jpg", 100, 100, 1, "Administrator's setup");
+});
+
 test("setup photo writes require the owning saved run, validated scope, bounded captions, and bounded reservations", async (t) => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Setup permissions skid");
