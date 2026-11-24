@@ -23,6 +23,14 @@ export function isTestTimeRange(range, clock) {
     && range.startMs < range.endMs && range.startMs >= clock.startMs && range.endMs <= clock.endMs);
 }
 
+function isDeviceTimeRange(range, clock) {
+  return Boolean(range && typeof range === "object" && !Array.isArray(range)
+    && Number.isSafeInteger(range.startMs) && Number.isSafeInteger(range.endMs)
+    && Number.isFinite(clock?.startMs) && Number.isFinite(clock?.endMs)
+    && (range.startMs < range.endMs || (range.startMs === range.endMs && clock.startMs === clock.endMs))
+    && range.startMs >= clock.startMs && range.endMs <= clock.endMs);
+}
+
 export const isDigitalOutputChannel = channel => /(?:^|\s)(?:command|output)$/i.test(channel.role || "");
 
 function automaticTimeRange(series, clock) {
@@ -63,20 +71,25 @@ export function deviceChartTimeRange(device, clock) {
 
 /**
  * Geometry shared by the SVG preview and vector PDF chart. The run-wide clock
- * validates timestamps; each graph fits its observations unless a time range is selected. Dots stay
+ * validates timestamps; a device range aligns its graphs unless a manual range
+ * overrides it. Standalone series still fit their own observations. Dots stay
  * tied to observed after-values. Connections and the held value are display-only
  * geometry, so no synthetic readings enter the saved evidence or event count.
  */
 export function buildTestChart(series, clock, {
   width = 700, height = 220,
   padding = { left: 62, right: 22, top: 20, bottom: 48 },
-  tickCount = 5, timeRange = null, showInitialState = false,
+  tickCount = 5, timeRange = null, deviceTimeRange = null, showInitialState = false,
 } = {}) {
   const manualTimeRange = timeRange !== null;
   if (manualTimeRange && !isTestTimeRange(timeRange, clock))
     throw new Error("Choose an increasing whole-millisecond time range within the test run.");
+  if (!manualTimeRange && deviceTimeRange !== null && !isDeviceTimeRange(deviceTimeRange, clock))
+    throw new Error("A valid whole-millisecond device time range within the test run is required for the graph.");
+  const suppliedRange = manualTimeRange ? timeRange : deviceTimeRange;
+  const clipToRange = suppliedRange !== null;
   const automaticRange = automaticTimeRange(series, clock);
-  const { startMs, endMs } = timeRange || automaticRange || clock;
+  const { startMs, endMs } = suppliedRange || automaticRange || clock;
   const { left, right, top, bottom } = padding;
   if (![width, height, left, right, top, bottom].every(Number.isFinite)
     || width <= left + right || height <= top + bottom
@@ -142,12 +155,12 @@ export function buildTestChart(series, clock, {
     min = 0; max = 1;
   }
   const yFor = (value) => top + (max - value) / (max - min) * plot.height;
-  const visible = point => !manualTimeRange || (point.timeMs >= startMs && point.timeMs <= endMs);
+  const visible = point => !clipToRange || (point.timeMs >= startMs && point.timeMs <= endMs);
   const points = valid.filter(visible).map((point) => ({ ...point, y: yFor(point.value) }));
   const connections = [];
   const coordinate = (point) => ({ x: point.x, y: yFor(point.value) });
   const segment = (from, to) => {
-    if (manualTimeRange) {
+    if (clipToRange) {
       const rightEdge = plot.left + plot.width;
       if (to.x < plot.left || from.x > rightEdge) return null;
       if (from.x !== to.x) {

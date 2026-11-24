@@ -169,6 +169,20 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false,
   return h;
 }
 
+function expectSharedAxis(h, start, end) {
+  const plots = Array.from(h.document.querySelectorAll("svg[data-time-start]"));
+  assert.ok(plots.length > 0, "the selected device has rendered graphs");
+  const ticks = plot => Array.from(plot.querySelectorAll('text[text-anchor="middle"]'), label =>
+    [label.getAttribute("x"), label.getAttribute("y"), label.textContent]);
+  const expectedTicks = ticks(plots[0]);
+  for (const plot of plots) {
+    assert.equal(Number(plot.dataset.timeStart), start);
+    assert.equal(Number(plot.dataset.timeEnd), end);
+    assert.deepEqual(ticks(plot), expectedTicks, "every graph uses the same horizontal ticks and labels");
+  }
+  return plots;
+}
+
 test("multi-file preview leaves the software version blank and shows separate signal graphs before an explicit save", async t => {
   const h = await setup(t);
   await h.click(h.button("Import test run"));
@@ -185,14 +199,11 @@ test("multi-file preview leaves the software version blank and shows separate si
   assert.equal(h.field("Software version").value, "");
   assert.equal(h.window.calls.length, 0);
   assert.match(h.text(), /Encoded selection/i);
-  const charts = [...h.document.querySelectorAll("svg[data-time-start]")];
+  const charts = expectSharedAxis(h, startMs, startMs + 392_000);
   assert.equal(charts.length, 2);
-  assert.equal(charts[0].dataset.timeStart, String(startMs));
-  assert.equal(charts[0].dataset.timeEnd, String(startMs + 1000));
-  assert.equal(charts[1].dataset.timeStart, String(startMs + 391_000));
-  assert.equal(charts[1].dataset.timeEnd, String(startMs + 392_000));
+  assert.match(h.query(".test-time-axis-heading").textContent, /Automatic/);
   assert.ok(charts.every(chart => chart.querySelectorAll("circle.test-observation").length === 1), "no invented endpoints");
-  assert.equal(charts[0].querySelectorAll(".test-held-value").length, 1, "the final reading extends only to its own fitted graph end");
+  assert.equal(charts[0].querySelectorAll(".test-held-value").length, 1, "the final reading extends to the shared device graph end");
   assert.equal(h.document.querySelectorAll('.test-device-content .test-comment').length, 1);
   await h.click(h.button("Save test run"));
   assert.equal(h.window.calls.length, 0);
@@ -450,15 +461,16 @@ test("SVG feedback graphs start at 0.0 V and retain measured voltage steps witho
   const sample = linear.points[0];
   Object.assign(linear, { name: "V-3501-POS", kind: "analog", unit: "mA", points: [
     { ...sample, timeMs: startMs + 1000, value: 4, rawValue: "4 mA" },
-    { ...sample, timeMs: startMs + 5000, value: 20, rawValue: "20 mA" },
+    { ...sample, timeMs: startMs + 30_000, value: 20, rawValue: "20 mA" },
   ] });
   Object.assign(feedback, { name: "V-3501_fb", kind: "analog", unit: "V", points: [
-    { ...sample, timeMs: startMs + 1000, value: 0.3, rawValue: "0.3 V" },
-    { ...sample, timeMs: startMs + 5000, value: 0.1, rawValue: "0.1 V", previousValue: 0.3, previousRawValue: "0.3 V" },
+    { ...sample, timeMs: startMs + 10_000, value: 0.3, rawValue: "0.3 V" },
+    { ...sample, timeMs: startMs + 20_000, value: 0.1, rawValue: "0.1 V", previousValue: 0.3, previousRawValue: "0.3 V" },
   ] });
   run.devices[0].channels[1].role = "Feedback";
   const before = structuredClone(run);
   const h = await setup(t, { runs: [run] });
+  expectSharedAxis(h, startMs, startMs + 31_160);
   const figures = Array.from(h.document.querySelectorAll(".test-chart"));
   const figure = figures.find(item => item.querySelector("figcaption strong").textContent === "V-3501_fb");
   const dots = figure.querySelectorAll(".test-observation");
@@ -479,6 +491,11 @@ test("SVG feedback graphs start at 0.0 V and retain measured voltage steps witho
     .filter(line => line.getAttribute("y1") === line.getAttribute("y2"))
     .map(line => Number(line.getAttribute("y1")));
   assert.ok(zeroY >= Math.min(...gridY) && zeroY <= Math.max(...gridY), "the zero baseline fits inside the plot even when every measured voltage is positive");
+  const horizontalGrid = Array.from(figure.querySelectorAll(".test-gridline"))
+    .find(line => line.getAttribute("y1") === line.getAttribute("y2"));
+  assert.equal(initial.getAttribute("x1"), horizontalGrid.getAttribute("x1"), "the zero baseline begins at the shared device interval");
+  assert.equal(figure.querySelector('.test-held-value:not(.test-initial-state)').getAttribute("x2"), horizontalGrid.getAttribute("x2"),
+    "the final feedback voltage holds through the shared device interval");
   assert.equal(traces.length, 3);
   const [firstJump, hold, jump] = traces;
   assert.equal(initial.getAttribute("x2"), dots[0].getAttribute("cx"));
@@ -501,7 +518,8 @@ test("SVG feedback graphs start at 0.0 V and retain measured voltage steps witho
   assert.notEqual(diagonal.getAttribute("x1"), diagonal.getAttribute("x2"));
   assert.notEqual(diagonal.getAttribute("y1"), diagonal.getAttribute("y2"));
   const firstVoltageY = dots[0].getAttribute("cy");
-  await applyRange(h, 2000, 4000);
+  await applyRange(h, 15_000, 18_000);
+  expectSharedAxis(h, startMs + 15_000, startMs + 18_000);
   assert.equal(figure.querySelector(".test-initial-state"), null, "a later manual window must not restart feedback at zero");
   assert.doesNotMatch(figure.querySelector("svg").getAttribute("aria-label"), /Initial value/);
   const clipped = figure.querySelectorAll(".test-trace");
@@ -526,13 +544,42 @@ test("a device shows separate mixed-unit graphs with individual scales and one s
   assert.deepEqual(Array.from(h.document.querySelectorAll('.test-chart figcaption span'), label => label.textContent), ["mA", "State"]);
   assert.deepEqual(Array.from(plots[0].querySelectorAll("text"), label => label.textContent).slice(0, 5), ["0", "6.25", "12.5", "18.75", "25"]);
   assert.deepEqual(Array.from(plots[1].querySelectorAll("text"), label => label.textContent).slice(0, 2), ["0", "1"]);
-  assert.ok(Number(plots[0].dataset.timeEnd) < Number(plots[1].dataset.timeStart), "each graph fits only its own signal's observations");
+  expectSharedAxis(h, startMs, startMs + 392_000);
+  assert.match(plots[0].closest("figure").querySelector("p").textContent, /same automatic time axis/);
+  assert.doesNotMatch(plots[0].closest("figure").querySelector("p").textContent, /recorded change values shown/);
   const comments = h.document.querySelectorAll('.test-device-content .test-comment');
   assert.equal(comments.length, 1);
   assert.equal(comments[0].querySelector('textarea').value, "One comment for the entire device");
   assert.equal(h.document.querySelectorAll('[aria-label="Overall test run comment"]').length, 1);
   assert.equal(h.window.calls.length, 0);
   assert.deepEqual(run, before, "splitting the graphs preserves saved evidence and comments");
+});
+
+test("dated invalid observations extend the shared axis while empty, undated, and excluded peers do not", async t => {
+  const run = savedRun();
+  const channel = run.devices[0].channels[0];
+  const sample = channel.series[0].points[0];
+  const series = (id, points) => ({ id, name: id, kind: "analog", unit: "V", points });
+  channel.series = [
+    series("Measured signal", [10_000, 20_000].map((offset, index) => ({ ...sample, timeMs: startMs + offset,
+      value: index + 1, sourceRow: index + 2 }))),
+    series("Invalid signal", [{ ...sample, timeMs: startMs + 40_000, value: null, valid: false, rawValue: "Invalid", sourceRow: 5 }]),
+    series("Excluded signal", [{ ...sample, timeMs: startMs + 200_000, excluded: true }]),
+    series("Undated signal", [{ ...sample, timeMs: null, time: "Unrecognized source time" }]),
+    series("Empty signal", []),
+  ];
+  run.devices[0].channels = [channel];
+  const before = structuredClone(run);
+  const h = await setup(t, { runs: [run] });
+  const plots = expectSharedAxis(h, startMs + 9000, startMs + 41_000);
+  assert.equal(plots.length, 4, "empty series do not add an empty graph");
+  assert.equal(plots[1].querySelectorAll(".test-invalid-observation").length, 1);
+  assert.equal(plots[2].querySelectorAll(".test-observation,.test-trace,.test-held-value").length, 0);
+  assert.equal(plots[3].querySelectorAll(".test-observation,.test-trace,.test-held-value").length, 0);
+  assert.equal(h.query(".field-error"), null);
+  await h.click(h.button("Remove event from Invalid signal, source row 5"));
+  expectSharedAxis(h, startMs + 9000, startMs + 21_000);
+  assert.deepEqual(run, before, "shared display bounds do not mutate source evidence");
 });
 
 function eventRun() {
@@ -960,19 +1007,26 @@ test("slider bounds follow the selected device's longest graph coverage and refr
     return [Number(input.min) - startMs, Number(input.max) - startMs, input.valueAsNumber - startMs];
   });
   assert.deepEqual(bounds(), [[17_600, 82_400, 17_600], [17_600, 82_400, 82_400]]);
+  expectSharedAxis(h, startMs + 17_600, startMs + 82_400);
   await h.click(h.button('Remove event from PD-EXAMPLE, source row 4'));
   assert.deepEqual(bounds(), [[19_000, 61_000, 19_000], [19_000, 61_000, 61_000]]);
+  expectSharedAxis(h, startMs + 19_000, startMs + 61_000);
   await h.click(h.button('Restore event from PD-EXAMPLE, source row 4'));
   assert.deepEqual(bounds(), [[17_600, 82_400, 17_600], [17_600, 82_400, 82_400]]);
+  expectSharedAxis(h, startMs + 17_600, startMs + 82_400);
   await h.click(h.button('Remove event from feedback state, source row 2'));
   assert.deepEqual(bounds(), [[17_600, 82_400, 17_600], [17_600, 82_400, 82_400]], 'an empty graph does not force the run-wide span');
+  expectSharedAxis(h, startMs + 17_600, startMs + 82_400);
   await h.click(h.button('OTHERPassed'));
   assert.equal(Number(h.query('input[name="rangeEnd"]').max), run.clock.endMs);
+  expectSharedAxis(h, startMs, run.clock.endMs);
   await h.click(h.button('VALVE-EXAMPLEPassed'));
   assert.deepEqual(bounds(), [[17_600, 82_400, 17_600], [17_600, 82_400, 82_400]]);
+  expectSharedAxis(h, startMs + 17_600, startMs + 82_400);
   const stored = h.stored(); await h.unmount();
   const reopened = await setup(t, { runs: [run] }, { stored });
   assert.equal(reopened.query('input[name="rangeEnd"]').valueAsNumber, startMs + 82_400);
+  expectSharedAxis(reopened, startMs + 17_600, startMs + 82_400);
   assert.equal(reopened.window.calls.length, 0);
   assert.equal(reopened.window.dirty.at(-1), true);
 });
@@ -994,6 +1048,8 @@ test("saved manual intervals remain available beyond automatic bounds until Rese
   await h.click(h.button('Reset to auto'));
   assert.equal(Number(h.query('input[name="rangeStart"]').min), startMs + 39_000);
   assert.equal(h.query('input[name="rangeEnd"]').valueAsNumber, startMs + 41_000);
+  expectSharedAxis(h, startMs + 39_000, startMs + 41_000);
+  assert.match(h.query('.test-time-axis-heading').textContent, /Automatic/);
   assert.deepEqual(h.stored(), {});
   assert.equal(h.window.calls.length, 0);
 });
@@ -1009,17 +1065,15 @@ test("one manual device range aligns every graph without changing comments or cr
   feedback.points = [20_000, 40_000, 80_000].map((offset, index) => ({ ...feedback.points[0], timeMs: startMs + offset, value: index % 2 }));
   const before = structuredClone(run);
   const h = await setup(t, { runs: [run] });
+  expectSharedAxis(h, startMs, startMs + 82_400);
   await applyRange(h, 10_000, 60_000);
   assert.equal(h.query('input[name="rangeStart"]').valueAsNumber, startMs + 10_000);
   assert.equal(h.query('input[name="rangeEnd"]').valueAsNumber, startMs + 60_000);
   assert.equal(h.document.querySelectorAll('.test-time-slider input[type="range"]').length, 2);
   assert.equal(h.query('input[type="datetime-local"]'), null);
-  const plots = h.document.querySelectorAll('svg[data-time-start]');
+  const plots = expectSharedAxis(h, startMs + 10_000, startMs + 60_000);
   assert.equal(plots.length, 2);
-  for (const plot of plots) {
-    assert.equal(plot.dataset.timeStart, String(startMs + 10_000));
-    assert.equal(plot.dataset.timeEnd, String(startMs + 60_000));
-  }
+  assert.match(h.query('.test-time-axis-heading').textContent, /Manual/);
   assert.equal(plots[0].querySelector('circle').getAttribute('cx'), plots[1].querySelectorAll('circle')[1].getAttribute('cx'));
   assert.match(h.text(), /1 of 2 recorded change values shown/);
   assert.match(h.text(), /2 of 3 recorded change values shown/);
@@ -1029,12 +1083,15 @@ test("one manual device range aligns every graph without changing comments or cr
   assert.deepEqual(run, before);
   await h.click(h.button('SECONDPassed'));
   assert.notEqual(h.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
+  expectSharedAxis(h, startMs, startMs + 392_000);
   await h.click(h.button('VALVE-EXAMPLEPassed'));
   assert.equal(h.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
+  expectSharedAxis(h, startMs + 10_000, startMs + 60_000);
   const stored = h.stored();
   await h.unmount();
   const reopened = await setup(t, { runs: [run] }, { stored });
   assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
+  expectSharedAxis(reopened, startMs + 10_000, startMs + 60_000);
   assert.equal(reopened.query('input[name="rangeStart"]').valueAsNumber, startMs + 10_000, 'source-clock coordinates are not shifted by the browser timezone');
   await reopened.fill(reopened.query('input[name="rangeStart"]'), rangeInput(70_000));
   assert.equal(reopened.query('input[name="rangeStart"]').valueAsNumber, startMs + 60_000 - 1, 'start handle cannot cross the end handle');
@@ -1043,6 +1100,8 @@ test("one manual device range aligns every graph without changing comments or cr
   assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs + 10_000));
   await reopened.click(reopened.button('Reset to auto'));
   assert.equal(reopened.query('svg[data-time-start]').dataset.timeStart, String(startMs));
+  expectSharedAxis(reopened, startMs, startMs + 82_400);
+  assert.match(reopened.query('.test-time-axis-heading').textContent, /Automatic/);
   assert.deepEqual(Object.values(reopened.stored()), [run.devices[0].id], 'reset clears the range and keeps the selected device');
   assert.equal(reopened.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea').value, before.devices[0].comment);
 });

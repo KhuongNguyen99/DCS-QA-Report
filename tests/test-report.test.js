@@ -166,7 +166,10 @@ function readPlot(result, title) {
   const top = Math.max(...grid.map(line => line.from.y));
   const inside = point => point.x >= left - 0.01 && point.x <= right + 0.01
     && point.y >= bottom - 0.01 && point.y <= top + 0.01;
-  return { page, left, right, width: right - left, height: top - bottom,
+  const timeTicks = result.blocks[page].filter(block => /^\d{2}:\d{2}:\d{2}(?:\.\d{3})?$/.test(block.text)
+    && Math.abs(block.y - (612 - bottom + 15)) < 0.01
+    && block.x >= left - 30 && block.x <= right + 0.01).sort((a, b) => a.x - b.x).map(block => block.text);
+  return { page, left, right, width: right - left, height: top - bottom, timeTicks,
     traces: lines.filter(line => hasColor(line, [24, 108, 161]) && inside(line.from) && inside(line.to)) };
 }
 
@@ -205,7 +208,7 @@ test("test PDF rejects drafts, incomplete approval data, wrong skid, and missing
   } finally { globalThis.fetch = original; }
 });
 
-test("approved test PDF preserves evidence and run context while fitting each graph's time axis", async () => {
+test("approved test PDF preserves evidence and run context while fitting each device's time axis", async () => {
   await withFonts(async (requested) => {
     const state = closedState();
     state.project.closedByTitle = "Project Manager";
@@ -663,7 +666,7 @@ test("PDF connects analog values and digital steps, draws held tails, and breaks
     };
     const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.01, `${actual} differs from ${expected}`);
     const same = (a, b) => { near(a.x, b.x); near(a.y, b.y); };
-    // Fixed page positions contain a separate fitted time range for each graph.
+    // These single-signal devices keep their own fitted device time ranges.
     const left = 100.2, right = 723.8, width = right - left;
     const analog = graphLines("Analog ramp");
     assert.equal(analog.length, 2);
@@ -818,7 +821,8 @@ test("PDF separates mixed-unit and same-unit signals within a device while print
     assert.match(summary, /Device name\nSlot\nChannels\nTest Result\nValve device\n1, 3\n3\nNot tested/);
     assert.doesNotMatch(result.text, /Logged changes|Each signal has a separate graph|Original tokens are retained below|Parameter tables show/);
     assert.match(devicePage, /Engineering note covering every valve graph/);
-    for (const time of ["19:18:44", "19:17:46", "19:19:34"]) assert.ok(devicePage.includes(time));
+    for (const plot of plots) assert.deepEqual(plot.timeTicks, ["19:17:00", "19:18:14", "19:19:29", "19:20:44"],
+      "every signal uses the same automatic device time interval");
     assert.ok(devicePage.indexOf("Device comment") > devicePage.indexOf("Figure 4."));
     const traces = plots.map(plot => plot.traces);
     assert.deepEqual(traces.map(lines => lines.length), [2, 2, 3, 2], "individual plots preserve connections, digital steps, held tails, and invalid gaps");
@@ -827,12 +831,74 @@ test("PDF separates mixed-unit and same-unit signals within a device while print
     for (const index of [0, 1, 3]) near(Math.abs(traces[index][0].from.y - traces[index][0].to.y), plots[index].height);
     near(Math.abs(traces[2][1].from.y - traces[2][1].to.y), plots[2].height);
     near(traces[0][0].from.x, plots[0].left);
-    near(traces[0][0].to.x, plots[0].left + plots[0].width / 1.04);
-    near(traces[1][0].from.x, plots[1].left + plots[1].width / 27);
+    near(traces[0][0].to.x, plots[0].left + plots[0].width * 100_000 / 224_800);
+    near(traces[1][0].from.x, plots[1].left + plots[1].width * 50_000 / 224_800);
     for (const page of result.blocks) for (const block of page) {
       if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps footer: ${JSON.stringify(block)}`);
     }
+  });
+});
+
+test("automatic PDF device axes align disjoint channels across rows and pages without including filtered evidence", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const point = (offset, value, extra = {}) => ({ timeMs: startMs + offset, value, valid: value !== null,
+      previousValue: 0, rawValue: String(value), sourceId: "source-log", sourceRow: 8, ...extra });
+    const channel = (name, unit, kind, offsets, values, index, extra = {}) => ({
+      id: `shared-channel-${index}`, symbolicName: name, stationId: "station-1", slot: index + 1,
+      channel: 0, sourceChannel: "Channel 1", role: kind === "digital" ? "Command" : "Analog input",
+      status: "Passed", parameters: [], series: [{ id: `shared-series-${index}`, name, kind, unit,
+        points: offsets.map((offset, index) => point(offset, values[index])) }], ...extra,
+    });
+    const channels = [
+      channel("Shared command", "", "digital", [20_000, 120_000], [0, 1], 0),
+      channel("Shared_FB", "V", "analog", [40_000, 140_000], [0.3, 0.1], 1),
+      channel("Shared-POS", "mA", "analog", [80_000, 180_000], [4, 20], 2),
+      channel("Late command", "", "digital", [200_000, 250_000], [0, 1], 3),
+      channel("Coincident voltage", "V", "analog", [120_000, 220_000], [2, 3], 4),
+      channel("Shared temperature", "°C", "analog", [60_000, 160_000], [21, 25], 5),
+      channel("Earliest current", "mA", "analog", [10_000, 30_000], [4, 5], 6),
+      channel("Latest voltage", "V", "analog", [260_000, 280_000], [0.2, 0.1], 7),
+    ];
+    channels[6].series[0].points.unshift(point(0, 4, { excluded: true }));
+    channels[6].series[0].points.push(point(392_000, 4, { excluded: true }));
+    channels.push(channel("Filtered signal", "V", "analog", [0, 392_000], [1, 2], 8, { status: "Not applicable" }));
+    run.devices = [{ id: "shared-device", name: "Shared valve", status: "Passed", channels },
+      { id: "other-device", name: "Separate device", status: "Passed", channels: [
+        channel("Other early", "V", "analog", [0, 2000], [1, 2], 9),
+        channel("Other late", "V", "analog", [500, 2500], [2, 3], 10),
+      ] }];
+    run.unassignedChannels = [];
+    const before = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    const titles = channels.slice(0, 8).map(channel => channel.series[0].name);
+    const plots = titles.map(title => readPlot(result, title));
+    assert.ok(new Set(plots.map(plot => plot.page)).size > 1, "the fixture exercises repeated chart rows across a page break");
+    for (const plot of plots) assert.deepEqual(plot.timeTicks, ["19:17:09", "19:19:25", "19:21:41"],
+      "each exported signal carries the same earliest-to-latest device axis on every page");
+    assert.doesNotMatch(result.text, /Filtered signal/);
+    const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} differs from ${b}`);
+    const normalizedX = (plot, x) => (x - plot.left) / plot.width;
+    const commandJump = plots[0].traces.find(line => line.dash.length === 0 && line.from.x === line.to.x);
+    const coincidentLine = plots[4].traces.find(line => line.dash.length === 0);
+    assert.ok(commandJump && coincidentLine);
+    near(normalizedX(plots[0], commandJump.from.x), 111_000 / 272_000);
+    near(normalizedX(plots[0], commandJump.from.x), normalizedX(plots[4], coincidentLine.from.x),
+      "the same recorded timestamp has the same relative horizontal position in different rows");
+    const feedback = plots[1];
+    const [initial, tail] = feedback.traces.filter(line => line.dash.length > 0);
+    assert.ok(initial && tail);
+    near(initial.from.x, feedback.left);
+    near(normalizedX(feedback, initial.to.x), 31_000 / 272_000);
+    near(normalizedX(feedback, tail.from.x), 131_000 / 272_000);
+    near(tail.to.x, feedback.right);
+    assert.match(result.pages[feedback.page], /Initial value 0\.0 V/);
+    const otherPlots = ["Other early", "Other late"].map(title => readPlot(result, title));
+    for (const plot of otherPlots) assert.deepEqual(plot.timeTicks, ["19:17:00", "19:17:01", "19:17:02", "19:17:03"],
+      "a second device uses its own shared range");
+    assert.deepEqual(state, before, "shared display axes leave approved timestamps, excluded events, and measurements intact");
   });
 });
 

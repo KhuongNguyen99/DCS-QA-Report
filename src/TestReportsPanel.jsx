@@ -126,9 +126,9 @@ function TestEventTable({ entries, seriesName = "recorded signal", onExclusionCh
   </table></div>;
 }
 
-export function TestSeriesChart({ series, clock, timeRange = null, onExclusionChange, editsDisabled = false, showInitialState = false }) {
+export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRange = null, onExclusionChange, editsDisabled = false, showInitialState = false }) {
   let chart;
-  try { chart = buildTestChart(series, clock, { timeRange, showInitialState }); }
+  try { chart = buildTestChart(series, clock, { timeRange, deviceTimeRange, showInitialState }); }
   catch (e) { return <p className="field-error">{e.message}</p>; }
   const { plot } = chart;
   const entries = series.points.map((point, index) => ({ point, index }));
@@ -170,7 +170,7 @@ export function TestSeriesChart({ series, clock, timeRange = null, onExclusionCh
             </path>)}
         </svg>
       </div>
-      <p>{chart.initialLabel && <>{chart.initialLabel}. </>}{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}{chart.excludedCount ? ` · ${chart.excludedCount} removed events` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : chart.interpolation === "step" ? "Steps hold each recorded value until the next reading" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "The time axis automatically fits this series."}{clock.basis === "absolute" && " Times are UTC."}</p>
+      <p>{chart.initialLabel && <>{chart.initialLabel}. </>}{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}{chart.excludedCount ? ` · ${chart.excludedCount} removed events` : ""}. {series.kind === "digital" ? "Steps connect recorded states" : chart.interpolation === "step" ? "Steps hold each recorded value until the next reading" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "All graphs for this device share the same automatic time axis."}{clock.basis === "absolute" && " Times are UTC."}</p>
       <details className="test-events"><summary>View recorded events ({retained.length})</summary>
         <TestEventTable entries={retained} seriesName={series.name} onExclusionChange={onExclusionChange} disabled={editsDisabled} />
       </details>
@@ -267,7 +267,8 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
               <p className="test-source-result">Recorded wiring status: <strong>{channel.rawStatus || "Not recorded"}</strong>{channel.comment ? ` · ${channel.comment}` : ""}</p>
               {!channel.series?.some(series => series.points?.length) && <p className="test-muted">No signal changes were recorded for this channel in the supplied logs.</p>}
               {(channel.series || []).map((series, seriesIndex) => series.points?.length ?
-                <TestSeriesChart key={series.id || seriesIndex} series={series} clock={run.clock} timeRange={chosenRange.range}
+                <TestSeriesChart key={series.id || seriesIndex} series={series} clock={run.clock}
+                  timeRange={chosenRange.range} deviceTimeRange={automaticRange}
                   editsDisabled={commentsDisabled} showInitialState={isDigitalOutputChannel(channel)}
                   onExclusionChange={onEventExclusionChange && ((pointIndex, excluded) =>
                     onEventExclusionChange(device.id, channel.id, seriesIndex, pointIndex, excluded))} /> : null)}

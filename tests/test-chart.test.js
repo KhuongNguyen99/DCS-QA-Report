@@ -11,7 +11,8 @@ const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-8
 
 function assertBounded(chart) {
   const coordinates = [...chart.points, ...chart.invalidPoints.filter(point => point.x !== null),
-    ...chart.connections.flatMap(line => [line.from, line.to]), ...(chart.extension ? [chart.extension.from, chart.extension.to] : [])];
+    ...chart.connections.flatMap(line => [line.from, line.to]), ...(chart.extension ? [chart.extension.from, chart.extension.to] : []),
+    ...(chart.leading ? [chart.leading.from, chart.leading.to] : [])];
   for (const point of coordinates) {
     assert.ok(point.x >= chart.plot.left, `${point.x} is inside the left edge`);
     assert.ok(point.x <= chart.plot.left + chart.plot.width, `${point.x} is inside the right edge`);
@@ -74,7 +75,7 @@ test("default axes exclude invalid readings, handle empty series and preserve sa
   assert.equal(digital.domain.max, 1);
 });
 
-test("different channel coverage automatically fits each graph inside the shared run clock", () => {
+test("standalone graphs without device context still fit their own coverage inside the run clock", () => {
   const early = buildTestChart({ kind: "analog", unit: "mA", points: [point(0, 4), point(40_000, 20)] }, clock);
   const late = buildTestChart({ kind: "analog", unit: "°C", points: [point(310_000, 19.7), point(392_000, 20)] }, clock);
   assert.notDeepEqual(early.xTicks, late.xTicks);
@@ -151,6 +152,173 @@ test("device time bounds update for removals and retain dated warnings while emp
   assert.deepEqual(deviceChartTimeRange({ channels: [] }, clock), clock);
   assert.deepEqual(deviceChartTimeRange({ channels: [{ series: [{ points: [point(-1, 1)] }] }] }, clock), clock);
   assert.deepEqual(deviceChartTimeRange({ channels: [] }, { startMs, endMs: startMs }), { startMs, endMs: startMs });
+});
+
+test("a shared automatic device range aligns every channel while preserving its scale, feedback baseline and held tail", () => {
+  const series = [
+    { kind: "digital", points: [point(20_000, 1, { previousValue: 0 }), point(80_000, 0)] },
+    { name: "V-3501_FB", kind: "analog", unit: "V", points: [point(100_000, 0.3), point(160_000, 0.1)] },
+    { name: "DP-3501", kind: "analog", unit: "mA", points: [point(160_000, 4), point(310_000, 20)] },
+  ];
+  const device = { channels: series.map(item => ({ series: [item] })) };
+  const original = structuredClone(device);
+  const deviceTimeRange = deviceChartTimeRange(device, clock);
+  assert.deepEqual(deviceTimeRange, timeRange(17_600, 316_000));
+  const charts = series.map(item => buildTestChart(item, clock, { deviceTimeRange, showInitialState: true }));
+  for (const chart of charts) {
+    assert.equal(chart.domain.startMs, deviceTimeRange.startMs);
+    assert.equal(chart.domain.endMs, deviceTimeRange.endMs);
+    assert.deepEqual(chart.xTicks, charts[0].xTicks);
+    assert.equal(chart.manualTimeRange, false);
+    assert.equal(chart.observedCount, 2);
+    assert.equal(chart.visibleObservedCount, 2);
+    assert.equal(chart.extension.to.x, chart.plot.left + chart.plot.width);
+    assertBounded(chart);
+  }
+  const [digital, feedback, pressure] = charts;
+  assert.equal(feedback.points[1].x, pressure.points[0].x, "equal timestamps align across different channels");
+  assert.deepEqual(digital.yTicks.map(tick => tick.value), [0, 1]);
+  assert.equal(digital.initialLabel, "Initial state 0");
+  assert.deepEqual([pressure.domain.min, pressure.domain.max], [0, 25]);
+  assert.equal(pressure.interpolation, "linear");
+  assert.equal(feedback.interpolation, "step");
+  assert.equal(feedback.unit, "V");
+  assert.equal(feedback.initialLabel, "Initial value 0.0 V");
+  assert.deepEqual(feedback.leading, {
+    from: { x: feedback.plot.left, y: yFor(feedback, 0) },
+    to: { x: feedback.points[0].x, y: yFor(feedback, 0) },
+  });
+  assert.equal(feedback.extension.from.y, yFor(feedback, 0.1));
+  for (let index = 0; index < series.length; index++) {
+    const standalone = buildTestChart(series[index], clock);
+    assert.equal(charts[index].domain.min, standalone.domain.min);
+    assert.equal(charts[index].domain.max, standalone.domain.max);
+    assert.notDeepEqual(charts[index].xTicks, standalone.xTicks, "device alignment does not refit individual series");
+  }
+  assert.deepEqual(device, original, "a shared axis never rewrites the evidence");
+});
+
+test("single-point, invalid, excluded and empty peers retain one automatic device axis as evidence is excluded", () => {
+  const series = [
+    { kind: "analog", points: [point(40_000, 5)] },
+    { kind: "analog", points: [point(100_000, null, { valid: false })] },
+    { kind: "digital", points: [point(0, 1, { excluded: true }), point(392_000, 0, { excluded: true })] },
+    { kind: "analog", points: [{ value: null, valid: false }] },
+    { kind: "analog", points: [] },
+  ];
+  const device = { channels: [{ series }] };
+  const deviceTimeRange = deviceChartTimeRange(device, clock);
+  assert.deepEqual(deviceTimeRange, timeRange(39_000, 101_000));
+  const charts = series.map(item => buildTestChart(item, clock, { deviceTimeRange }));
+  for (const chart of charts) {
+    assert.deepEqual(chart.xTicks, charts[0].xTicks, "empty peers must not fall back to a different run-wide axis");
+    assert.equal(chart.manualTimeRange, false);
+    assertBounded(chart);
+  }
+  assert.equal(charts[0].observedCount, 1);
+  assert.equal(charts[0].extension.to.x, charts[0].plot.left + charts[0].plot.width);
+  assert.equal(charts[1].invalidPoints.length, 1);
+  assert.equal(charts[1].invalidPoints[0].timeMs, startMs + 100_000);
+  assert.equal(charts[2].excludedCount, 2);
+  assert.equal(charts[2].observedCount, 0);
+  assert.equal(charts[3].invalidPoints[0].x, null);
+  assert.deepEqual(charts[4].points, []);
+  series[1].points[0].excluded = true;
+  const narrowedRange = deviceChartTimeRange(device, clock);
+  assert.deepEqual(narrowedRange, timeRange(39_000, 41_000));
+  const narrowed = series.map(item => buildTestChart(item, clock, { deviceTimeRange: narrowedRange }));
+  for (const chart of narrowed) assert.deepEqual(chart.xTicks, narrowed[0].xTicks);
+  assert.equal(narrowed[0].points[0].x, narrowed[0].plot.left + narrowed[0].plot.width / 2);
+  assert.equal(narrowed[1].invalidCount, 0);
+  assert.equal(narrowed[1].excludedCount, 1);
+});
+
+test("zero-duration runs share a finite single-tick device axis even with empty or invalid peers", () => {
+  const instantClock = { startMs, endMs: startMs };
+  const series = [
+    { name: "V-3501_FB", kind: "analog", unit: "V", points: [point(0, 0.3)] },
+    { kind: "digital", points: [point(0, 1)] },
+    { kind: "analog", points: [point(0, null, { valid: false })] },
+    { kind: "analog", points: [] },
+  ];
+  const deviceTimeRange = deviceChartTimeRange({ channels: [{ series }] }, instantClock);
+  assert.deepEqual(deviceTimeRange, instantClock);
+  const charts = series.map(item => buildTestChart(item, instantClock, { deviceTimeRange }));
+  for (const chart of charts) {
+    assert.equal(chart.domain.startMs, startMs);
+    assert.equal(chart.domain.endMs, startMs);
+    assert.equal(chart.manualTimeRange, false);
+    assert.equal(chart.xTicks.length, 1);
+    assert.deepEqual(chart.xTicks, charts[0].xTicks);
+    assert.equal(chart.xTicks[0].x, chart.plot.left + chart.plot.width / 2);
+    assert.equal(chart.extension, null);
+    assertBounded(chart);
+  }
+  assert.equal(charts[0].points[0].x, charts[0].xTicks[0].x);
+  assert.equal(charts[2].invalidPoints[0].x, charts[0].xTicks[0].x);
+  assert.throws(() => buildTestChart(series[0], instantClock, { timeRange: instantClock, deviceTimeRange }), /increasing/);
+});
+
+test("explicit device ranges clip geometry and a manual override takes precedence without changing source counts", () => {
+  const series = { kind: "analog", points: [point(0, 0), point(10_000, 10), point(20_000, 20)] };
+  const original = structuredClone(series);
+  const deviceTimeRange = timeRange(5000, 15_000);
+  const automatic = buildTestChart(series, clock, { deviceTimeRange });
+  assert.equal(automatic.manualTimeRange, false);
+  assert.equal(automatic.observedCount, 3);
+  assert.deepEqual(automatic.points.map(point => point.value), [10]);
+  assert.equal(automatic.connections.length, 2);
+  close(automatic.connections[0].from.y, yFor(automatic, 5));
+  close(automatic.connections[1].to.y, yFor(automatic, 15));
+  assert.equal(automatic.connections[0].from.x, automatic.plot.left);
+  assert.equal(automatic.connections[1].to.x, automatic.plot.left + automatic.plot.width);
+  assert.equal(automatic.extension, null);
+  assertBounded(automatic);
+  const manualRange = timeRange(12_000, 18_000);
+  const manual = buildTestChart(series, clock, { timeRange: manualRange, deviceTimeRange });
+  assert.equal(manual.manualTimeRange, true);
+  assert.equal(manual.domain.startMs, manualRange.startMs);
+  assert.equal(manual.domain.endMs, manualRange.endMs);
+  assert.deepEqual(manual.points, []);
+  assert.equal(manual.observedCount, 3);
+  assertBounded(manual);
+  assert.deepEqual(buildTestChart(series, clock, { timeRange: manualRange, deviceTimeRange: { stale: true } }), manual,
+    "an unused automatic range cannot block a valid explicit manual override");
+  assert.throws(() => buildTestChart(series, clock, { timeRange: timeRange(15_000, 5000), deviceTimeRange }), /increasing/);
+  const feedbackSeries = { name: "V-3501_FB", kind: "analog", unit: "V", points: [point(20_000, 0.3), point(50_000, 0.1)] };
+  for (const range of [timeRange(1000, 10_000), timeRange(25_000, 35_000), timeRange(60_000, 70_000)]) {
+    const shared = buildTestChart(feedbackSeries, clock, { deviceTimeRange: range });
+    const manuallyClipped = buildTestChart(feedbackSeries, clock, { timeRange: range });
+    assert.deepEqual(shared, { ...manuallyClipped, manualTimeRange: false },
+      "shared clipping preserves initial zero, actual carry-in and final held values");
+    assertBounded(shared);
+  }
+  assert.deepEqual(series, original);
+});
+
+test("device range validation cannot hide malformed or out-of-run source observations", () => {
+  const series = { points: [point(10_000, 4), point(20_000, 5)] };
+  const deviceTimeRange = timeRange(5000, 15_000);
+  for (const range of [[], true, {}, { startMs }, timeRange(15_000, 5000), timeRange(5000, 5000),
+    timeRange(-1, 5000), timeRange(5000, 392_001), timeRange(5000.5, 10_000),
+    { ...deviceTimeRange, startMs: String(deviceTimeRange.startMs) },
+    { ...deviceTimeRange, endMs: Infinity }, { ...deviceTimeRange, startMs: NaN }]) {
+    assert.throws(() => buildTestChart(series, clock, { deviceTimeRange: range }), /device time range/);
+  }
+  for (const bad of [point(-1, 4), point(393_000, null, { valid: false }), point(393_000, 4, { excluded: true })])
+    assert.throws(() => buildTestChart({ points: [bad] }, clock, { deviceTimeRange }), /outside/);
+  for (const points of [
+    [point(30_000, 4), point(20_000, 5)],
+    [point(30_000, 4, { excluded: true }), point(20_000, 5, { excluded: true })],
+  ]) assert.throws(() => buildTestChart({ points }, clock, { deviceTimeRange }), /ordered by time/);
+  assert.throws(() => buildTestChart({ points: [point(30_000, 4, { excluded: "true" })] }, clock,
+    { deviceTimeRange }), /excluded flag.*true or false/);
+  assert.throws(() => buildTestChart({}, clock, { deviceTimeRange }), /observation list/);
+  const invalidHidden = buildTestChart({ kind: "digital", points: [point(0, 3), point(10_000, 1)] }, clock, { deviceTimeRange });
+  assert.equal(invalidHidden.invalidCount, 1);
+  assert.deepEqual(invalidHidden.invalidPoints, []);
+  assert.equal(invalidHidden.observedCount, 1);
+  assert.deepEqual(buildTestChart(series, clock, { deviceTimeRange: null }), buildTestChart(series, clock));
 });
 
 test("horizontal autoscaling keeps dated invalid events visible without changing evidence", () => {

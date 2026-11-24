@@ -2,7 +2,7 @@ import { jsPDF } from "jspdf";
 import { revisionNumber } from "./domain.js";
 import { normalizePronetaStatus } from "./proneta-parser.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
-import { buildTestChart, formatSourceTime, isTestTimeRange, isDigitalOutputChannel } from "./test-chart.js";
+import { buildTestChart, deviceChartTimeRange, formatSourceTime, isTestTimeRange, isDigitalOutputChannel } from "./test-chart.js";
 import { testCommentBlocks } from "./test-comment-format.js";
 import { summarizeTestSettings } from "./test-settings-summary.js";
 
@@ -321,13 +321,13 @@ function reportWriter(doc, y) {
     }
     y += 12;
   }
-  function prepareChart({ series, description, location, showInitialState }, clock, timeRange, width, title) {
+  function prepareChart({ series, description, location, showInitialState }, clock, timeRange, deviceTimeRange, width, title) {
     const compact = width < WIDTH;
     const geometry = buildTestChart(series, clock, {
       width, height: compact ? 91 : 201,
       padding: compact ? { left: 49, right: 24, top: 8, bottom: 31 } : { left: 57, right: 25, top: 20, bottom: 45 },
       tickCount: width < 250 ? 3 : compact ? 4 : 5,
-      timeRange, showInitialState,
+      timeRange, deviceTimeRange, showInitialState,
     });
     const initial = geometry.initialLabel ? ` | ${geometry.initialLabel}` : "";
     const legend = `Figure ${++figureNumber}. ${description}.${compact ? "\n" : " "}${location}${initial}`;
@@ -345,7 +345,7 @@ function reportWriter(doc, y) {
       paragraph(legend, { ...legendStyle, left, width });
     } };
   }
-  function chartGrid(charts, clock, timeRange) {
+  function chartGrid(charts, clock, timeRange, deviceTimeRange) {
     const columns = charts.length === 3 || charts.length >= 5 ? 3 : charts.length >= 2 ? 2 : 1;
     const gap = 18;
     const width = (WIDTH - gap * (columns - 1)) / columns;
@@ -354,7 +354,7 @@ function reportWriter(doc, y) {
         .map(chart => {
           const name = chart.series.name;
           const title = charts.length > 1 || name !== sectionTitle ? name : "";
-          return prepareChart(chart, clock, timeRange, width, title);
+          return prepareChart(chart, clock, timeRange, deviceTimeRange, width, title);
         });
       ensure(Math.max(...row.map(chart => chart.height)));
       const top = y;
@@ -598,7 +598,7 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
   if (!runs.length) throw new Error("No saved test run was found in this closed revision.");
   if (runId !== null && runs.length !== 1) throw new Error("The closed revision contains duplicate test run identifiers.");
   if (!isTimeRangeMap(snapshot.timeRanges)) throw new Error("Manual graph time ranges must be grouped by test run and device.");
-  const deviceTimeRanges = new Map();
+  const deviceRanges = new Map();
   for (const run of runs) {
     if (run.walkdownId && run.walkdownId !== project.walkdownId)
       throw new Error("The test report contains data from another skid.");
@@ -622,10 +622,11 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       const timeRange = Object.hasOwn(ranges, device.id) ? ranges[device.id] : undefined;
       if (Object.hasOwn(ranges, device.id) && !isTestTimeRange(timeRange, run.clock))
         throw new Error(`The manual graph time range for "${device.name}" is invalid. Select a start before the end within this test run.`);
-      deviceTimeRanges.set(device, timeRange);
+      const deviceTimeRange = deviceChartTimeRange(device, run.clock);
+      deviceRanges.set(device, { timeRange, deviceTimeRange });
       for (const channel of device.channels)
         for (const series of channel.series || [])
-          if (series.points?.length) buildTestChart(series, run.clock, { timeRange });
+          if (series.points?.length) buildTestChart(series, run.clock, { timeRange, deviceTimeRange });
     }
     for (const channel of run.unassignedChannels || [])
       for (const series of channel.series || [])
@@ -705,7 +706,8 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,
         charts, deviceName: device.name,
       });
-      writer.chartGrid(charts, run.clock, deviceTimeRanges.get(device));
+      const { timeRange, deviceTimeRange } = deviceRanges.get(device);
+      writer.chartGrid(charts, run.clock, timeRange, deviceTimeRange);
       reportComment(writer, "Device comment", device.comment);
       for (const { series } of charts) seriesAudit(writer, series, run);
     }
