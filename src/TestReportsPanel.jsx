@@ -4,7 +4,8 @@ import { revisionNumber } from "./domain.js";
 import PhotoGallery from "./PhotoGallery.jsx";
 import { parsePronetaFiles } from "./proneta-parser.js";
 import { importNoteClarification } from "./proneta-notes.js";
-import { buildTestChart, deviceChartTimeRange, isTestTimeRange, formatSourceTime, formatTestValue, isDigitalOutputChannel } from "./test-chart.js";
+import { isTestTimeRange, formatSourceTime, formatTestValue, isDigitalOutputChannel } from "./test-chart.js";
+import { buildAnnotatedTestChart, deviceCalculationTimeRange } from "./test-graph-annotations.js";
 import { testCommentDraftScope, readTestCommentDrafts, writeTestCommentDraft, removeTestCommentDraft } from "./test-comment-drafts.js";
 import { testCommentBlocks } from "./test-comment-format.js";
 import { testTimeRangeScope, readDeviceTimeRange, saveDeviceTimeRange, resetDeviceTimeRange,
@@ -14,7 +15,7 @@ import { testGraphOrderScope, normalizeGraphOrder, orderDeviceGraphs,
 import { createTestEventEdit, setTestEventEdit, applyTestEventEdits } from "./test-event-edits.js";
 import { UNKNOWN_TIME_ZONE, getLocalTimeZone, getTimeZoneOptions } from "./test-timezones.js";
 import GraphToolsPanel, { DisplayNameEditor } from "./GraphToolsPanel.jsx";
-import { emptyGraphTools, assertGraphTools, getDeviceDisplayName, getGraphSettings, runGraphEntries, createPointEndpoint } from "./test-graph-tools.js";
+import { emptyGraphTools, assertGraphTools, getDeviceDisplayName, getGraphSettings, runGraphEntries, createPointEndpoint, resolveGraphMeasurement } from "./test-graph-tools.js";
 import "./test-reports.css";
 
 const statusClass = (status) => status === "Passed" ? "passed" : status === "Failed" ? "failed" : "untested";
@@ -216,6 +217,38 @@ function TestEventTable({ entries, seriesName = "recorded signal", onExclusionCh
   </table></div>;
 }
 
+function calculationDescription(annotation) {
+  const interval = annotation.status === "resolved" && Number.isFinite(annotation.startMs) && Number.isFinite(annotation.endMs)
+    ? `, from ${formatSourceTime(annotation.startMs, true, true)} to ${formatSourceTime(annotation.endMs, true, true)}` : "";
+  const crop = annotation.outside ? `outside the displayed time range to the ${annotation.outside}`
+    : [annotation.clippedStart && "start continues before the displayed range", annotation.clippedEnd && "end continues after the displayed range"].filter(Boolean).join(", ");
+  return `${annotation.label}${interval}${crop ? `, ${crop}` : ""}`;
+}
+
+function GraphCalculationAnnotations({ chart }) {
+  const segment = (line, className, key) => <line key={key} className={className}
+    x1={line.from.x} y1={line.from.y} x2={line.to.x} y2={line.to.y}
+    strokeDashoffset={className === "test-calculation-guide" ? line.from.y % 8 : undefined} />;
+  return <g className="test-calculation-annotations" pointerEvents="none">
+    {chart.annotations.flatMap(annotation => annotation.guides.map((line, index) =>
+      segment(line, "test-calculation-guide", `${annotation.id}:guide:${index}`)))}
+    {chart.annotations.map(annotation => <g key={annotation.id} className="test-calculation-annotation"
+      data-calculation-id={annotation.id} data-status={annotation.status}
+      data-clipped-start={annotation.clippedStart || undefined} data-clipped-end={annotation.clippedEnd || undefined}
+      data-outside={annotation.outside || undefined} role="img" aria-label={calculationDescription(annotation)}>
+      <title>{calculationDescription(annotation)}</title>
+      {annotation.arrow && segment(annotation.arrow, "test-calculation-arrow")}
+      {annotation.arrowheads.map((line, index) => segment(line, "test-calculation-arrowhead", index))}
+      {annotation.continuations.map((line, index) => segment(line, "test-calculation-continuation", index))}
+      {annotation.marker && segment(annotation.marker, "test-calculation-marker")}
+      <rect className="test-calculation-label-background" x={annotation.labelBox.left} y={annotation.labelBox.top}
+        width={annotation.labelBox.width} height={annotation.labelBox.height} rx={3} />
+      {annotation.labelLines.map((line, index) => <text key={index} className="test-calculation-label"
+        x={line.x} y={line.y} textAnchor="middle" style={{ fontSize: chart.annotationLayout.fontSize }}>{line.text}</text>)}
+    </g>)}
+  </g>;
+}
+
 export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRange = null, onExclusionChange, editsDisabled = false, showInitialState = false,
   run, deviceId, graphKey, settings = {}, graphChoices = [], graphEditorScope, onGraphSettingsChange, onGraphEditorDirty }) {
   const [picker, setPicker] = useState(null);
@@ -224,6 +257,8 @@ export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRan
   const cancelPicking = useCallback(() => { setPicker(null); setPickError(""); }, []);
   const canPick = Boolean(picker && onGraphSettingsChange && !editsDisabled);
   const displayName = settings.name || series.name;
+  const measurements = useMemo(() => (settings.measurements || []).map(measurement => ({ measurement,
+    result: resolveGraphMeasurement(run, measurement) })), [settings.measurements, run]);
   useEffect(() => { if (picker) figure.current?.querySelector('.test-observation[role="button"]')?.focus(); }, [picker]);
   useEffect(() => { if (!onGraphSettingsChange || editsDisabled) setPicker(null); }, [onGraphSettingsChange, editsDisabled]);
   function pick(point) {
@@ -232,13 +267,14 @@ export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRan
     catch (failure) { setPickError(failure.message); }
   }
   let chart;
-  try { chart = buildTestChart(series, clock, { timeRange, deviceTimeRange, showInitialState, style: settings.style || "auto" }); }
+  try { chart = buildAnnotatedTestChart(series, clock, { measurements, timeRange, deviceTimeRange, showInitialState, style: settings.style || "auto" }); }
   catch (e) { return <p className="field-error">{e.message}</p>; }
   const { plot } = chart;
   const entries = series.points.map((point, index) => ({ point, index }));
   const retained = entries.filter(({ point }) => point.excluded !== true);
   const removed = entries.filter(({ point }) => point.excluded === true);
   const graphClock = { ...clock, startMs: chart.domain.startMs, endMs: chart.domain.endMs };
+  const calculationSummary = chart.annotations.map(calculationDescription).join("; ");
   return (
     <figure className="test-chart" ref={figure} onKeyDown={event => { if (event.key === "Escape" && picker) { event.preventDefault(); setPicker(null); } }}>
       <figcaption><div><strong>{displayName}</strong>{displayName !== series.name && <small>Source: {series.name}</small>}</div><span>{chart.unit}</span></figcaption>
@@ -251,17 +287,18 @@ export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRan
       {pickError && <p className="field-error" role="alert">{pickError}</p>}
       <div className="test-chart-scroll">
         <svg viewBox={`0 0 ${chart.width} ${chart.height}`} role={canPick ? "group" : "img"}
-          aria-label={`${displayName}: ${chart.observedCount} recorded values, ${describeTime(graphClock)}${chart.initialLabel ? `, ${chart.initialLabel}` : ""}`}
+          aria-label={`${displayName}: ${chart.observedCount} recorded values, ${describeTime(graphClock)}${chart.initialLabel ? `, ${chart.initialLabel}` : ""}${calculationSummary ? `. Calculations: ${calculationSummary}` : ""}`}
           data-time-start={chart.domain.startMs} data-time-end={chart.domain.endMs}>
           {chart.yTicks.map((tick, index) => <g key={`y-${index}`}>
             <line x1={plot.left} y1={tick.y} x2={plot.left + plot.width} y2={tick.y} className="test-gridline" />
             <text x={plot.left - 8} y={tick.y + 4} textAnchor="end">{tick.label}</text>
           </g>)}
-          {chart.xTicks.map((tick, index) => <g key={`x-${index}`}>
+          {chart.xTicks.map((tick, index) => <g key={`x-${index}`} className="test-x-tick">
             <line x1={tick.x} y1={plot.top} x2={tick.x} y2={plot.top + plot.height} className="test-gridline" />
             <text x={tick.x} y={plot.top + plot.height + 21} textAnchor="middle">{tick.label}</text>
             {tick.dateLabel && <text x={tick.x} y={plot.top + plot.height + 37} textAnchor="middle">{tick.dateLabel}</text>}
           </g>)}
+          <GraphCalculationAnnotations chart={chart} />
           {chart.connections.map((segment, index) => <line key={`trace-${index}`}
             x1={segment.from.x} y1={segment.from.y} x2={segment.to.x} y2={segment.to.y} className="test-trace" />)}
           {chart.curves.map((curve, index) => <path key={`curve-${index}`} className="test-trace test-smooth-trace"
@@ -343,7 +380,7 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
   const override = rangeOverrides[device?.id];
   const chosenRange = localRanges[viewKey] || (Object.hasOwn(rangeOverrides, device?.id)
     && (override === null || isTestTimeRange(override, run.clock)) ? { range: override, error: "" } : storedRange);
-  const automaticRange = deviceChartTimeRange(device, run.clock);
+  const automaticRange = useMemo(() => deviceCalculationTimeRange(device, run), [device, run]);
   const sliderClock = { ...run.clock,
     startMs: Math.min(automaticRange.startMs, chosenRange.range?.startMs ?? automaticRange.startMs),
     endMs: Math.max(automaticRange.endMs, chosenRange.range?.endMs ?? automaticRange.endMs) };

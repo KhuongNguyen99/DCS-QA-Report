@@ -5,7 +5,8 @@ import { inflateSync } from "node:zlib";
 import { createTestReportPdf } from "../src/test-report.js";
 import { deviceGraphEntries } from "../src/test-graph-order.js";
 import { buildTestChart, deviceChartTimeRange, formatSourceTime } from "../src/test-chart.js";
-import { createPointEndpoint, emptyGraphTools } from "../src/test-graph-tools.js";
+import { createPointEndpoint, emptyGraphTools, resolveGraphMeasurement } from "../src/test-graph-tools.js";
+import { buildAnnotatedTestChart, deviceCalculationTimeRange, formatGraphMeasurementResult } from "../src/test-graph-annotations.js";
 
 const fonts = {
   "NotoSans-Regular.ttf": await readFile(new URL("../public/assets/NotoSans-Regular.ttf", import.meta.url)),
@@ -161,7 +162,7 @@ async function pdfContent(blob) {
 // Read the actual PDF line operators, including their stroke color and dash
 // state, so the regression checks the exported vectors rather than a mock.
 function pdfLines(stream) {
-  let color = [], dash = [], cursor = null, path = [];
+  let color = [], dash = [], dashPhase = 0, cursor = null, path = [];
   const result = [];
   for (const line of stream.split(/\r?\n/)) {
     const tokens = line.trim().split(/\s+/);
@@ -170,12 +171,13 @@ function pdfLines(stream) {
     else if (operator === "d") {
       const pattern = line.match(/\[([^\]]*)\]/)?.[1].trim();
       dash = pattern ? pattern.split(/\s+/).map(Number) : [];
+      dashPhase = Number(line.match(/\]\s*([\d.+-]+)\s+d/)?.[1] || 0);
     } else if (operator === "m" && tokens.length === 3) cursor = { x: Number(tokens[0]), y: Number(tokens[1]) };
     else if (operator === "l" && tokens.length === 3 && cursor) {
       const next = { x: Number(tokens[0]), y: Number(tokens[1]) };
       path.push({ from: cursor, to: next }); cursor = next;
     } else if (operator === "S") {
-      result.push(...path.map(segment => ({ ...segment, color: [...color], dash: [...dash] })));
+      result.push(...path.map(segment => ({ ...segment, color: [...color], dash: [...dash], dashPhase })));
       path = []; cursor = null;
     } else if (["f", "F", "f*", "n"].includes(operator)) { path = []; cursor = null; }
   }
@@ -204,7 +206,25 @@ function pdfCurves(stream) {
   return result;
 }
 
-function readPlot(result, title) {
+function pdfFilledRectangles(stream) {
+  let color = [], rectangles = [];
+  const result = [];
+  for (const line of stream.split(/\r?\n/)) {
+    const tokens = line.trim().split(/\s+/), operator = tokens.at(-1);
+    if (operator === "rg" && tokens.length === 4) color = tokens.slice(0, 3).map(Number);
+    else if (operator === "g" && tokens.length === 2) color = [Number(tokens[0]), Number(tokens[0]), Number(tokens[0])];
+    else if (operator === "re" && tokens.length === 5) {
+      const [x, y, width, height] = tokens.slice(0, 4).map(Number);
+      rectangles.push({ x, y, width, height });
+    } else if (["f", "F", "f*"].includes(operator)) {
+      result.push(...rectangles.map(rectangle => ({ ...rectangle, color: [...color] })));
+      rectangles = [];
+    } else if (["S", "n"].includes(operator)) rectangles = [];
+  }
+  return result;
+}
+
+function readPlot(result, title, { annotationHeight = 0 } = {}) {
   const page = result.blocks.findIndex(blocks => blocks.some(block => block.text === title));
   assert.ok(page >= 0, `Missing graph ${title}`);
   const heading = result.blocks[page].find(block => block.text === title);
@@ -213,7 +233,7 @@ function readPlot(result, title) {
     && line.color.every((value, index) => Math.abs(value - rgb[index] / 255) < 0.005);
   const grid = lines.filter(line => hasColor(line, [213, 222, 229])
     && line.from.y === line.to.y && Math.abs(line.from.x - heading.x - 49) < 0.01
-    && 612 - line.from.y > heading.y && 612 - line.from.y < heading.y + 105);
+    && 612 - line.from.y > heading.y + annotationHeight && 612 - line.from.y < heading.y + annotationHeight + 105);
   assert.ok(grid.length >= 2, `Missing plot grid for ${title}`);
   const left = grid[0].from.x;
   const right = grid[0].to.x;
@@ -1529,7 +1549,7 @@ function measurementState() {
   return { state, run, device, trigger, graphKey, triggerKey };
 }
 
-test("PDF named durations retain endpoint definitions and units and resolve triggers from the original run independently of crop and style", async () => {
+test("PDF calculations show only names and compact results while retaining original trigger results across crop and style", async () => {
   await withFonts(async () => {
     const { state, run, device } = measurementState();
     const saved = structuredClone(state);
@@ -1543,25 +1563,122 @@ test("PDF named durations retain endpoint definitions and units and resolve trig
     for (const result of [first, cropped]) {
       const text = result.text.replace(/\s+/g, " ");
       for (const value of ["Pump delay", "30 s", "Selected settling", "2 min", "One hour hold", "1 h",
-        "Feedback transition", "4 s", "Strict transition", "2 s", "Missing crossing", "Not resolved", "Reversed endpoints", "Invalid",
-        "Changed source point", "Manual source time", "Selected point on Timing valve / Valve timing",
-        "First recorded Trigger station / Trigger voltage value >= 0.5 V",
-        "First recorded Trigger station / Trigger voltage value < 0.5 V at or after the start",
-        "First recorded Trigger station / Trigger voltage value > 0.5 V",
-        "First recorded Trigger station / Trigger voltage value <= 0.3 V at or after the start",
-        "No retained valid observation matches the trigger at or after the start.",
-        "The end time must be at or after the start time.", "The selected point no longer matches its original source observation.",
-        "Selected source time: 2026-11-19 19:17:01.000", "Source: synthetic-log.csv, row 33"])
-        assert.ok(text.includes(value), `Missing calculation detail: ${value}`);
-      assert.ok(text.includes("Duration calculations - Valve timing"));
-      assert.ok(text.includes("2026-11-19 19:17:04.000"));
-      assert.ok(text.includes("2026-11-19 19:17:08.000"));
-      assert.ok(text.includes("2026-11-19 19:17:01.500"), "millisecond source times are preserved");
-      assert.ok(text.includes("Source graph: SENSOR-02"), "renamed cross-graph endpoints retain the source tag");
+        "Feedback transition", "4 s", "Strict transition", "2 s", "Missing crossing", "Unresolved", "Reversed endpoints", "Invalid interval",
+        "Changed source point"])
+        assert.ok(text.includes(value), `Missing calculation name or result: ${value}`);
+      assert.ok(text.includes("Calculations - Valve timing Name Result"));
+      assert.doesNotMatch(text, /Manual source time|Selected point on|First recorded|Selected source time:|Source: synthetic-log.csv, row/);
+      assert.doesNotMatch(text, /No retained valid observation|The end time must|The selected point no longer/);
+      assert.doesNotMatch(text, /2026-11-19 19:17:(?:01\.500|04\.000|08\.000)/,
+        "calculation endpoint timestamps are not printed");
+      assert.doesNotMatch(result.text, /\nStart\n|\nEnd\n|\nDuration\n/);
+      assert.doesNotMatch(text, /Source graph: SENSOR-02/,
+        "filtered reference metadata is not reintroduced as calculation prose");
       assert.equal(result.blocks.filter(page => page.some(block => block.text === "Trigger station")).length, 0,
         "a filtered device does not acquire a page just because a calculation references its original data");
-      assert.equal(result.text.match(/Figure \d+\./g)?.length, 1);
+      assert.deepEqual([...new Set(result.text.match(/Figure \d+\./g))], ["Figure 1."],
+        "repeated annotation panels belong to the same source graph");
     }
+  });
+});
+
+test("PDF interval arrows and dashed guides match shared annotation vectors, extend the shared device axis, and mark manual clipping", async () => {
+  await withFonts(async () => {
+    const { state, run, device, trigger } = measurementState();
+    run.clock = { ...CLOCK };
+    const owner = device.channels[0];
+    owner.comment = "";
+    owner.series[0].points.forEach((point, index) => { point.timeMs = startMs + 200_000 + index * 50_000; });
+    const comparison = structuredClone(owner);
+    comparison.id = "comparison-channel"; comparison.symbolicName = "Comparison";
+    comparison.series[0].id = "comparison-series"; comparison.series[0].name = "Comparison";
+    device.channels.push(comparison);
+    trigger.channels[0].series[0].points = [{
+      timeMs: startMs + 50_000, value: 0.8, rawValue: "0.8", valid: true, sourceId: "source-log", sourceRow: 42,
+    }];
+    const [entry, comparisonEntry] = deviceGraphEntries(device), triggerEntry = deviceGraphEntries(trigger)[0];
+    const time = offset => ({ kind: "time", timeMs: startMs + offset });
+    const measurements = [
+      { id: "response", name: "Response", unit: "s", start: { kind: "trigger", deviceId: trigger.id,
+        graphKey: triggerEntry.key, operator: ">", threshold: 0.5 }, end: time(250_000) },
+      { id: "instant", name: "Instant", unit: "s", start: time(250_000), end: time(250_000) },
+      { id: "earlier", name: "Earlier", unit: "s", start: time(10_000), end: time(20_000) },
+      { id: "later", name: "Later", unit: "s", start: time(200_000), end: time(350_000) },
+      { id: "waiting", name: "Waiting", unit: "s", start: time(0), end: { kind: "trigger", deviceId: trigger.id,
+        graphKey: triggerEntry.key, operator: ">", threshold: 10 } },
+    ];
+    run.graphTools.graphs = [
+      { deviceId: device.id, graphKey: entry.key, name: "Interval graph", style: "step", measurements },
+      { deviceId: device.id, graphKey: comparisonEntry.key, name: "Comparison graph", style: "line" },
+    ];
+    const resolved = measurements.map(measurement => ({ measurement, result: resolveGraphMeasurement(run, measurement) }));
+    const deviceTimeRange = deviceCalculationTimeRange(device, run, resolved);
+    assert.deepEqual(deviceTimeRange, { startMs: startMs + 10_000, endMs: startMs + 350_000 });
+    const crop = { startMs: startMs + 100_000, endMs: startMs + 275_000 };
+    const saved = structuredClone(state);
+    const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 0.001, `${actual} differs from ${expected}`);
+    for (const timeRange of [null, crop]) {
+      const geometry = buildAnnotatedTestChart(entry.series, run.clock, {
+        width: (705.6 - 18) / 2, height: 91, padding: { left: 49, right: 24, top: 8, bottom: 31 },
+        tickCount: 4, style: "step", measurements: resolved, annotationFontSize: 7.5, annotationLineHeight: 10.5,
+        deviceTimeRange, timeRange,
+      });
+      const result = await pdfContent(await createTestReportPdf({ state,
+        timeRanges: timeRange ? { [run.id]: { [device.id]: timeRange } } : {},
+      }));
+      const plot = readPlot(result, "Interval graph", { annotationHeight: geometry.annotationLayout.height });
+      const other = readPlot(result, "Comparison graph");
+      assert.equal(plot.page, other.page, "ordinary annotation sets retain the side-by-side graph layout");
+      assert.deepEqual(plot.timeTicks, other.timeTicks, "every graph uses the calculation-expanded or manually cropped device axis");
+      const dark = pdfLines(result.streams[plot.page]).filter(line => line.color.length === 3
+        && line.color.every((value, index) => Math.abs(value - [30, 43, 54][index] / 255) < 0.005)
+        && [line.from, line.to].every(point => point.x >= plot.left - 0.01 && point.x <= plot.right + 0.01
+          && point.y >= plot.bottom - 0.01));
+      const expectedPoint = point => ({ x: plot.left - geometry.plot.left + point.x,
+        y: plot.top + geometry.plot.top - point.y });
+      const expectedGuides = geometry.annotations.flatMap(annotation => annotation.guides);
+      const expectedSolid = geometry.annotations.flatMap(annotation => [annotation.arrow, ...annotation.arrowheads,
+        ...annotation.continuations, annotation.marker].filter(Boolean));
+      for (const [actual, expected] of [
+        [dark.filter(line => line.dash.length), expectedGuides], [dark.filter(line => !line.dash.length), expectedSolid],
+      ]) {
+        assert.equal(actual.length, expected.length, "PDF emits every shared annotation segment without extra lines");
+        actual.forEach((line, index) => {
+          if (line.dash.length) {
+            assert.deepEqual(line.dash, [2, 2], "endpoint guides remain distinct in grayscale");
+            near(line.dashPhase, expected[index].from.y % 4);
+          }
+          for (const side of ["from", "to"]) {
+            const point = expectedPoint(expected[index][side]);
+            near(line[side].x, point.x); near(line[side].y, point.y);
+          }
+        });
+      }
+      const guides = dark.filter(line => line.dash.length);
+      const endPhase = line => (line.dashPhase + line.from.y - line.to.y) % 4;
+      for (const guide of guides) near(endPhase(guide), endPhase(guides[0]));
+      for (const { measurement, result: value } of resolved)
+        assert.ok(result.pages[plot.page].includes(`${measurement.name}: ${formatGraphMeasurementResult(value)}`));
+      const labelBoxes = pdfFilledRectangles(result.streams[plot.page]).filter(box => box.x >= plot.left - 0.01
+        && box.x + box.width <= plot.right + 0.01 && box.y > plot.top);
+      assert.equal(labelBoxes.length, measurements.length);
+      assert.ok(labelBoxes.every(box => box.color.length === 3 && box.color.every(value => value === 1)),
+        "each annotation label has a white backing so later PDF text cannot create dark unreadable boxes");
+      const [response, instant, earlier, later, waiting] = geometry.annotations;
+      if (timeRange) {
+        assert.equal(response.clippedStart, true); assert.equal(response.guides.length, 1);
+        assert.equal(later.clippedEnd, true); assert.equal(later.guides.length, 1);
+        assert.equal(earlier.outside, "left"); assert.equal(earlier.arrow, null); assert.equal(earlier.guides.length, 0);
+        assert.ok([response, later, earlier].every(annotation => annotation.continuations.length > 0));
+      } else {
+        assert.equal(response.guides.length, 2); assert.equal(response.arrowheads.length, 4);
+        near((response.arrow.from.x - geometry.plot.left) / geometry.plot.width, 40_000 / 340_000);
+      }
+      assert.equal(instant.zeroDuration, true); assert.ok(instant.marker); assert.equal(instant.guides.length, 1);
+      assert.equal(waiting.status, "unresolved"); assert.equal(waiting.arrow, null); assert.equal(waiting.guides.length, 0);
+      assert.doesNotMatch(result.text, /First recorded|Source: synthetic-log.csv, row 42|Source graph omitted/);
+    }
+    assert.deepEqual(state, saved, "annotating and expanding the view cannot change approved source data or authored endpoints");
   });
 });
 
@@ -1606,23 +1723,22 @@ test("PDF preserves named calculations for filtered and replaced owning graphs w
     const result = await pdfContent(await createTestReportPdf({ state }));
     const text = result.text.replace(/\s+/g, " ");
     assert.match(text, /Preserved duration calculations/);
-    assert.match(text, /Duration calculations - Timing valve \/ Valve timing/);
+    assert.match(text, /Calculations - Timing valve \/ Valve timing/);
     assert.match(text, /Old named timer Unavailable/);
-    assert.match(text, /The graph this calculation belongs to is no longer available in this test run/);
-    assert.match(text, /The original graph is unavailable\. Saved calculation definitions are retained/);
-    assert.match(text, /2026-11-19 19:17:01\.500/);
-    assert.match(text, /2026-11-19 19:17:31\.500/);
+    assert.doesNotMatch(text, /The graph this calculation belongs to|The original graph is unavailable|Saved calculation definitions/);
+    assert.doesNotMatch(text, /2026-11-19 19:17:(?:01|31)\.500/);
     assert.doesNotMatch(result.text, /\n30 s\n/, "missing owners do not acquire a duration from unrelated replacement evidence");
-    assert.match(text, /Duration calculations - Trigger station \/ Trigger voltage/);
+    assert.match(text, /Calculations - Trigger station \/ Trigger voltage/);
     assert.match(text, /Filtered trigger timer 4 s/);
-    assert.match(text, /Source graph omitted by report applicability settings/);
-    assert.match(text, /Source graph: SENSOR-02/);
+    assert.doesNotMatch(text, /Source graph omitted|Source graph: SENSOR-02|First recorded|Manual source time/);
+    const calculations = result.pages.find(page => page.includes("Preserved duration calculations"));
+    assert.equal(calculations.match(/Name\nResult/g)?.length, 2);
     assert.equal(result.text.match(/Figure \d+\./g)?.length, 1, "only the applicable replacement graph is plotted");
     assert.deepEqual(state, original);
   });
 });
 
-test("PDF duration tables preserve long calculation and graph names through clean repeated headers and pagination", async () => {
+test("PDF keeps twenty long calculation labels and results in repeated graph panels and compact paginated tables", async () => {
   await withFonts(async () => {
     const { state, run } = measurementState();
     const long = label => `${label} ${"extended descriptive label ".repeat(12)}`.slice(0, 160).trim();
@@ -1634,9 +1750,26 @@ test("PDF duration tables preserve long calculation and graph names through clea
     const result = await pdfContent(await createTestReportPdf({ state }));
     const normalized = result.text.replace(/\s+/g, "");
     for (const { name } of graph.measurements) assert.ok(normalized.includes(name.replace(/\s+/g, "")), name);
-    const calculationPages = result.pages.filter(page => page.includes("Duration calculations -"));
-    assert.ok(calculationPages.length >= 3, "long endpoint details continue onto additional device pages");
-    for (const page of calculationPages) assert.match(page, /Calculation\nDuration\nStart\nEnd/);
+    const calculationPages = result.pages.filter(page => page.includes("Calculations -"));
+    assert.ok(calculationPages.length >= 2, "long names continue in simple two-column tables");
+    for (const page of calculationPages) assert.match(page, /Name\nResult/);
+    assert.doesNotMatch(result.text, /First recorded|source row|Source: synthetic-log.csv|\nStart\n|\nEnd\n/);
+    const figurePages = result.pages.map((page, index) => page.includes("Figure 1.") ? index : null).filter(index => index !== null);
+    assert.ok(figurePages.length >= 3, "successive annotation subsets retain full-size repeated graph panels");
+    const figureText = figurePages.map(index => result.pages[index]).join(" ").replace(/\s+/g, "");
+    for (const { name } of graph.measurements) {
+      const label = `${name}: 4 s`.replace(/\s+/g, "");
+      assert.ok(figureText.includes(label), `Missing graph annotation: ${name}`);
+    }
+    for (const index of figurePages) {
+      const lines = pdfLines(result.streams[index]);
+      const horizontal = lines.filter(line => line.color.length === 3 && Math.abs(line.color[0] - 213 / 255) < 0.005
+        && line.from.y === line.to.y && Math.abs(line.from.x - (43.2 + 57)) < 0.01 && line.to.x > 700);
+      assert.ok(horizontal.length >= 2, "each repeated panel includes its graph and axes");
+      const plotHeight = Math.max(...horizontal.map(line => line.from.y)) - Math.min(...horizontal.map(line => line.from.y));
+      assert.ok(Math.abs(plotHeight - 136) < 0.01, `Graph plot was compressed to ${plotHeight}`);
+      assert.ok(horizontal.every(line => line.from.y >= 612 - 548), "plots stay above the footer");
+    }
     for (const page of result.blocks) for (const block of page) {
       if (!block.text || block.y === null || /^(Approved(?: date)?:|Revision \d+ \| Skid:|Page \d+ of)/.test(block.text)) continue;
       assert.ok(block.y >= 15.9 && block.y <= 548.1, `Body text overlaps the footer: ${JSON.stringify(block)}`);

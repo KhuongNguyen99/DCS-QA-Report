@@ -137,6 +137,14 @@
 .test-chart-scroll { overflow-x: auto; }
 .test-chart-scroll > svg { display: block; width: 100%; min-width: 410px; }
 .test-chart svg text { fill: #65735f; font: 11px "QC Sans", sans-serif; }
+.test-calculation-annotations { pointer-events: none; }
+.test-calculation-guide { stroke: #7e8c9f; stroke-width: 1; stroke-dasharray: 4 4; fill: none; }
+.test-calculation-arrow,
+.test-calculation-arrowhead,
+.test-calculation-continuation,
+.test-calculation-marker { stroke: #405b80; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+.test-calculation-label-background { fill: #fff; }
+.test-chart svg .test-calculation-label { fill: #334c6c; font-weight: 600; }
 .test-gridline { stroke: #e2e7df; stroke-width: 1; }
 .test-trace,
 .test-held-value { stroke: #39724e; stroke-width: 1.5; fill: none; }

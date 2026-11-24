@@ -173,8 +173,8 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false, local
 function expectSharedAxis(h, start, end) {
   const plots = Array.from(h.document.querySelectorAll("svg[data-time-start]"));
   assert.ok(plots.length > 0, "the selected device has rendered graphs");
-  const ticks = plot => Array.from(plot.querySelectorAll('text[text-anchor="middle"]'), label =>
-    [label.getAttribute("x"), label.getAttribute("y"), label.textContent]);
+  const ticks = plot => Array.from(plot.querySelectorAll('.test-x-tick text'), label =>
+    [label.getAttribute("x"), label.textContent]);
   const expectedTicks = ticks(plots[0]);
   for (const plot of plots) {
     assert.equal(Number(plot.dataset.timeStart), start);
@@ -773,6 +773,135 @@ test("named durations pick original point indices and mix cross-device threshold
   await h.settle();
 });
 
+test("calculation arrows align trigger-to-point times, expand every device graph, and update only when applied", async t => {
+  const run = eventRun();
+  const device = run.devices[0]; device.comment = '';
+  device.channels[0].series[1].points.forEach((point, index) => { point.timeMs = startMs + [100_000, 110_000, 120_000][index]; });
+  device.channels[1].series[0].points[0].timeMs = startMs + 160_000;
+  const other = structuredClone(device); other.id = 'trigger-device'; other.name = 'TRIGGER'; other.channels = [other.channels[0]];
+  other.channels[0].series[1].points.forEach((point, index) => { point.timeMs = startMs + [5000, 10_000, 15_000][index]; point.value = index * 10; });
+  run.devices.push(other);
+  const before = structuredClone(run);
+  const h = await setup(t, { runs: [run] });
+  expectSharedAxis(h, startMs + 99_000, startMs + 161_000);
+  const figure = firstGraph(h);
+  await h.click(graphButton(h, 'Add duration calculation'));
+  await h.fill(h.field('Calculation name'), 'Valve response');
+  await h.select(h.field('Start time source'), 'trigger');
+  const triggerChoice = Array.from(h.field('Start threshold graph').options).find(option => option.textContent.includes('TRIGGER / PD-EXAMPLE'));
+  await h.select(h.field('Start threshold graph'), triggerChoice.value);
+  await h.fill(h.field('Start threshold'), '5');
+  await h.click(h.button('Pick end point'));
+  await h.window.act(async () => figure.querySelector('.test-observation[data-point-index="1"]')
+    .dispatchEvent(new h.window.MouseEvent('click', { bubbles: true })));
+  assert.equal(figure.querySelector('.test-calculation-annotation'), null, 'unapplied editor values do not change the graph');
+  await h.click(h.button('Add calculation'));
+  const annotation = () => figure.querySelector('.test-calculation-annotation');
+  assert.match(annotation().textContent, /Valve response.*100 s/);
+  assert.match(figure.querySelector('svg').getAttribute('aria-label'), /Valve response.*100 s.*12:00:10.*12:01:50/);
+  assert.equal(figure.querySelector('.test-calculation-annotations').getAttribute('pointer-events'), 'none');
+  const svg = figure.querySelector('svg');
+  assert.ok(Number(svg.dataset.timeStart) <= startMs + 10_000, 'the trigger before this device’s first reading is included automatically');
+  expectSharedAxis(h, Number(svg.dataset.timeStart), Number(svg.dataset.timeEnd));
+  const arrow = annotation().querySelector('.test-calculation-arrow');
+  const plot = figure.querySelector('.test-x-tick line');
+  assert.equal(arrow.getAttribute('y1'), arrow.getAttribute('y2'));
+  assert.ok(Number(arrow.getAttribute('y1')) < Number(plot.getAttribute('y1')), 'the duration arrow sits above the plotting area');
+  assert.equal(arrow.getAttribute('x2'), figure.querySelector('.test-observation[data-point-index="1"]').getAttribute('cx'));
+  const guides = Array.from(figure.querySelectorAll('.test-calculation-guide'));
+  assert.equal(guides.length, 2);
+  assert.deepEqual(guides.map(line => line.getAttribute('x1')), [arrow.getAttribute('x1'), arrow.getAttribute('x2')]);
+  assert.ok(guides.every(line => line.getAttribute('x1') === line.getAttribute('x2')));
+  assert.equal(annotation().querySelectorAll('.test-calculation-arrowhead').length, 4, 'both endpoints have arrowheads');
+  assert.equal(h.window.calls.length, 0, 'applied calculations preview before saving the test run');
+  await h.click(h.button('Edit calculation Valve response'));
+  await h.click(h.button('Pick end point'));
+  const point = figure.querySelector('.test-observation[data-point-index="2"]');
+  await h.window.act(async () => point.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+  assert.equal(figure.querySelector('.test-point-picker'), null, 'keyboard point picking still works with annotations visible');
+  await h.fill(h.field('Calculation name'), 'Valve settling');
+  await h.select(h.field('End time source'), 'time');
+  await h.fill(h.field('End source time'), sourceTimeInput(170_000));
+  assert.match(annotation().textContent, /Valve response.*100 s/);
+  assert.equal(h.button('Save test run').disabled, true);
+  await h.click(h.button('Update calculation'));
+  assert.match(annotation().textContent, /Valve settling.*160 s/);
+  assert.ok(Number(svg.dataset.timeEnd) >= startMs + 170_000);
+  expectSharedAxis(h, Number(svg.dataset.timeStart), Number(svg.dataset.timeEnd));
+  await h.click(h.button('Save test run'));
+  assert.deepEqual(structuredClone(h.window.calls[0].payload.devices), before.devices, 'annotation layout never creates or edits source readings');
+  await h.settle();
+  await h.configure({ readOnly: true, project: { ...project, status: 'closed' } });
+  assert.match(figure.querySelector('.test-calculation-annotation').textContent, /Valve settling.*160 s/);
+  assert.equal(h.button('Edit calculation Valve settling'), undefined);
+  assert.deepEqual(run, before);
+});
+
+test("manual crops keep full calculation results with edge continuations and no invented endpoint guides", async t => {
+  const run = eventRun();
+  run.graphTools = { version: 1, deviceNames: [], graphs: [{ deviceId: 'valve', graphKey: deviceGraphEntries(run.devices[0])[0].key,
+    measurements: [{ id: 'response', name: 'Response', unit: 's', start: { kind: 'time', timeMs: startMs + 10_000 }, end: { kind: 'time', timeMs: startMs + 20_000 } }] }] };
+  const before = structuredClone(run);
+  const h = await setup(t, { runs: [run], readOnly: true, project: { ...project, status: 'closed' } });
+  await applyRange(h, 12_000, 18_000);
+  const figure = firstGraph(h);
+  let annotation = figure.querySelector('.test-calculation-annotation');
+  const horizontalGrid = Array.from(figure.querySelectorAll('.test-gridline')).find(line => line.getAttribute('y1') === line.getAttribute('y2'));
+  const arrow = annotation.querySelector('.test-calculation-arrow');
+  assert.equal(arrow.getAttribute('x1'), horizontalGrid.getAttribute('x1'));
+  assert.equal(arrow.getAttribute('x2'), horizontalGrid.getAttribute('x2'));
+  assert.equal(annotation.dataset.clippedStart, 'true');
+  assert.equal(annotation.dataset.clippedEnd, 'true');
+  assert.equal(figure.querySelectorAll('.test-calculation-guide').length, 0);
+  assert.equal(annotation.querySelectorAll('.test-calculation-arrowhead').length, 0);
+  assert.ok(annotation.querySelectorAll('.test-calculation-continuation').length >= 4);
+  assert.match(annotation.textContent, /Response.*10 s/, 'cropping never changes the calculated duration');
+  expectSharedAxis(h, startMs + 12_000, startMs + 18_000);
+  await h.fill(h.query('input[name="rangeEnd"]'), String(startMs + 30_000));
+  await h.fill(h.query('input[name="rangeStart"]'), String(startMs + 25_000));
+  await h.click(h.button('Apply time range'));
+  annotation = figure.querySelector('.test-calculation-annotation');
+  assert.equal(annotation.dataset.outside, 'left');
+  assert.equal(annotation.querySelector('.test-calculation-arrow'), null);
+  assert.equal(figure.querySelector('.test-calculation-guide'), null);
+  assert.ok(annotation.querySelector('.test-calculation-continuation'));
+  assert.match(annotation.getAttribute('aria-label'), /outside the displayed time range to the left/);
+  await h.click(h.button('Reset to auto'));
+  assert.equal(figure.querySelectorAll('.test-calculation-guide').length, 2);
+  assert.equal(h.window.dirty.at(-1), false);
+  assert.deepEqual(run, before);
+});
+
+test("twenty long calculation labels keep separate SVG lanes without reducing the plot height", async t => {
+  const run = eventRun();
+  const measurements = Array.from({ length: 20 }, (_, index) => ({ id: `calculation-${index}`, name: `C${String(index + 1).padStart(2, '0')}_`.padEnd(160, 'x'), unit: 'min',
+    start: { kind: 'time', timeMs: startMs + 10_000 }, end: { kind: 'time', timeMs: startMs + 20_000 } }));
+  run.graphTools = { version: 1, deviceNames: [], graphs: [{ deviceId: 'valve', graphKey: deviceGraphEntries(run.devices[0])[0].key, measurements }] };
+  const h = await setup(t, { runs: [run], readOnly: true });
+  const figure = firstGraph(h), svg = figure.querySelector('svg');
+  const plot = figure.querySelector('.test-x-tick line');
+  assert.equal(Number(plot.getAttribute('y2')) - Number(plot.getAttribute('y1')), 152, 'annotations add height above the unchanged plot');
+  assert.ok(Number(svg.getAttribute('viewBox').split(' ')[3]) > 220);
+  const annotations = Array.from(figure.querySelectorAll('.test-calculation-annotation'));
+  assert.equal(annotations.length, 20);
+  for (const guide of figure.querySelectorAll('.test-calculation-guide')) {
+    assert.equal(Number(guide.getAttribute('stroke-dashoffset')), Number(guide.getAttribute('y1')) % 8,
+      'coincident guides share the global 4/4 dash phase across annotation lanes');
+  }
+  let previousBottom = 0;
+  for (const [index, annotation] of annotations.entries()) {
+    const text = Array.from(annotation.querySelectorAll('.test-calculation-label'), label => label.textContent).join('');
+    assert.ok(text.includes(measurements[index].name), 'the entire long name is rendered without truncation');
+    const box = annotation.querySelector('.test-calculation-label-background');
+    assert.ok(Number(box.getAttribute('y')) >= previousBottom, 'label boxes never overlap vertically');
+    previousBottom = Number(box.getAttribute('y')) + Number(box.getAttribute('height'));
+    assert.ok(previousBottom < Number(plot.getAttribute('y1')));
+    assert.ok(Number(box.getAttribute('x')) >= 0);
+    assert.ok(Number(box.getAttribute('x')) + Number(box.getAttribute('width')) <= 700);
+  }
+  expectSharedAxis(h, startMs, startMs + 392_000);
+});
+
 test("manual intervals reject out-of-run and reversed times, allow zero, and retain unmatched trigger status on approved reports", async t => {
   const run = eventRun();
   const h = await setup(t, { runs: [run] });
@@ -792,6 +921,8 @@ test("manual intervals reject out-of-run and reversed times, allow zero, and ret
   await h.fill(h.field('End source time'), sourceTimeInput(10_000));
   await h.click(h.button('Add calculation'));
   assert.match(firstGraph(h).querySelector('.test-duration-list').textContent, /0 seconds/);
+  assert.match(firstGraph(h).querySelector('.test-calculation-annotation').textContent, /Zero interval.*0 s/);
+  assert.ok(firstGraph(h).querySelector('.test-calculation-marker'), 'a valid zero duration gets a precise marker');
   await h.click(graphButton(h, 'Add duration calculation'));
   await h.fill(h.field('Calculation name'), 'Unmatched threshold');
   await h.select(h.field('Start time source'), 'time');
@@ -801,6 +932,9 @@ test("manual intervals reject out-of-run and reversed times, allow zero, and ret
   await h.fill(h.field('End threshold'), '1000');
   await h.click(h.button('Add calculation'));
   assert.match(firstGraph(h).querySelector('.test-duration-list').textContent, /Unresolved: End: No retained valid observation/);
+  const unresolved = firstGraph(h).querySelector('.test-calculation-annotation[data-status="unresolved"]');
+  assert.ok(unresolved);
+  assert.equal(unresolved.querySelector('.test-calculation-arrow'), null, 'unresolved calculations never invent an interval');
   await h.click(h.button('Save test run')); await h.settle();
   await h.configure({ readOnly: true, project: { ...project, status: 'closed' } });
   assert.equal(firstGraph(h).querySelector('.test-graph-style select'), null);

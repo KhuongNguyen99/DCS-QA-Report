@@ -2,9 +2,10 @@ import { jsPDF } from "jspdf";
 import { revisionNumber } from "./domain.js";
 import { normalizePronetaStatus } from "./proneta-parser.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText, reportSignatories } from "./report.js";
-import { buildTestChart, deviceChartTimeRange, formatSourceTime, formatTestValue, isTestTimeRange, isDigitalOutputChannel } from "./test-chart.js";
+import { buildTestChart, formatSourceTime, isTestTimeRange, isDigitalOutputChannel } from "./test-chart.js";
 import { isGraphOrder, orderDeviceGraphs } from "./test-graph-order.js";
 import { assertGraphTools, getDeviceDisplayName, runGraphEntries, resolveGraphMeasurement } from "./test-graph-tools.js";
+import { buildAnnotatedTestChart, deviceCalculationTimeRange, formatGraphMeasurementResult } from "./test-graph-annotations.js";
 import { testCommentBlocks } from "./test-comment-format.js";
 import { summarizeTestSettings } from "./test-settings-summary.js";
 
@@ -323,18 +324,22 @@ function reportWriter(doc, y) {
     }
     y += 12;
   }
-  function prepareChart({ series, name, style, description, location, showInitialState }, clock, timeRange, deviceTimeRange, width, title) {
+  function prepareChart({ series, name, style, description, location, showInitialState, measurements = [] }, clock, timeRange, deviceTimeRange, width, title, figure) {
     const compact = width < WIDTH;
-    const geometry = buildTestChart(series, clock, {
+    const annotationFontSize = compact ? 7.5 : 8.5;
+    textStyle(doc, annotationFontSize, true);
+    const geometry = buildAnnotatedTestChart(series, clock, {
       width, height: compact ? 91 : 201,
       padding: compact ? { left: 49, right: 24, top: 8, bottom: 31 } : { left: 57, right: 25, top: 20, bottom: 45 },
       tickCount: width < 250 ? 3 : compact ? 4 : 5,
-      timeRange, deviceTimeRange, showInitialState, style,
+      timeRange, deviceTimeRange, showInitialState, style, measurements,
+      annotationFontSize, annotationLineHeight: compact ? 10.5 : 12,
+      measureAnnotationText: value => doc.getTextWidth(printableText(value)),
     });
     const initial = geometry.initialLabel ? ` | ${geometry.initialLabel}` : "";
     const source = name !== (series.name || "Recorded signal") ? ` | Source graph: ${series.name || "Recorded signal"}` : "";
     const displayStyle = style !== "auto" ? ` | Style: ${style}` : "";
-    const legend = `Figure ${++figureNumber}. ${description}.${compact ? "\n" : " "}${location}${source}${displayStyle}${initial}`;
+    const legend = `Figure ${figure}. ${description}.${compact ? "\n" : " "}${location}${source}${displayStyle}${initial}`;
     const titleStyle = { size: 10, bold: true, gap: 3, lineHeight: 14.5 };
     const legendStyle = { size: 8, color: COLOR.muted, gap: 10, lineHeight: 11 };
     const heightFor = (value, style) => {
@@ -353,22 +358,48 @@ function reportWriter(doc, y) {
     const columns = charts.length === 3 || charts.length >= 5 ? 3 : charts.length >= 2 ? 2 : 1;
     const gap = 18;
     const width = (WIDTH - gap * (columns - 1)) / columns;
+    // Every repeated panel retains the original plot dimensions. Only the
+    // annotation subset changes, so many calculations cannot squeeze the plot
+    // or push its axis and legend into the footer.
+    textStyle(doc, 20, true);
+    const pageTitleLines = doc.splitTextToSize(printableText(`${sectionTitle} (continued)`), WIDTH).length;
+    const pageCapacity = PAGE.bottom - (55 + pageTitleLines * 24 + 4);
+    const panelsFor = chart => {
+      const figure = ++figureNumber;
+      const measurements = chart.measurements || [];
+      const panels = [];
+      const prepare = subset => {
+        const title = panels.length ? `${chart.name} (continued)`
+          : charts.length > 1 || chart.name !== sectionTitle ? chart.name : "";
+        return prepareChart({ ...chart, measurements: subset }, clock, timeRange, deviceTimeRange, width, title, figure);
+      };
+      if (!measurements.length) return [prepare([])];
+      let subset = [];
+      for (const measurement of measurements) {
+        const candidate = [...subset, measurement];
+        if (subset.length && prepare(candidate).height > pageCapacity) {
+          panels.push(prepare(subset));
+          subset = [measurement];
+        } else subset = candidate;
+      }
+      panels.push(prepare(subset));
+      return panels;
+    };
     for (let start = 0; start < charts.length; start += columns) {
-      const row = charts.slice(start, start + columns)
-        .map(chart => {
-          const name = chart.name;
-          const title = charts.length > 1 || name !== sectionTitle ? name : "";
-          return prepareChart(chart, clock, timeRange, deviceTimeRange, width, title);
+      const chartPanels = charts.slice(start, start + columns).map(panelsFor);
+      for (let panelIndex = 0; panelIndex < Math.max(...chartPanels.map(panels => panels.length)); panelIndex += 1) {
+        const row = chartPanels.map(panels => panels[panelIndex]);
+        ensure(Math.max(...row.filter(Boolean).map(chart => chart.height)));
+        const top = y;
+        let rowBottom = y;
+        row.forEach((chart, column) => {
+          if (!chart) return;
+          y = top;
+          chart.draw(PAGE.margin + column * (width + gap));
+          rowBottom = Math.max(rowBottom, y);
         });
-      ensure(Math.max(...row.map(chart => chart.height)));
-      const top = y;
-      let rowBottom = y;
-      row.forEach((chart, column) => {
-        y = top;
-        chart.draw(PAGE.margin + column * (width + gap));
-        rowBottom = Math.max(rowBottom, y);
-      });
-      y = rowBottom;
+        y = rowBottom;
+      }
     }
   }
   function drawChart(doc, geometry, left, originY, compact) {
@@ -416,6 +447,35 @@ function reportWriter(doc, y) {
       const markerY = originY + plot.top + plot.height + 6;
       doc.line(x - 1.8, markerY - 1.8, x + 1.8, markerY + 1.8);
       doc.line(x - 1.8, markerY + 1.8, x + 1.8, markerY - 1.8);
+    }
+    const annotations = geometry.annotations || [];
+    doc.setDrawColor(...COLOR.ink);
+    doc.setLineWidth(0.65);
+    const segment = ({ from, to }) => doc.line(left + from.x, originY + from.y, left + to.x, originY + to.y);
+    for (const annotation of annotations) for (const guide of annotation.guides) {
+      // Anchor every dash to chart coordinates. Coincident endpoints then
+      // share the same gaps instead of overlapping into a solid guide.
+      doc.setLineDashPattern([2, 2], guide.from.y % 4);
+      segment(guide);
+    }
+    doc.setLineDashPattern([], 0);
+    doc.setLineWidth(0.8);
+    for (const annotation of annotations) {
+      if (annotation.arrow) segment(annotation.arrow);
+      annotation.arrowheads.forEach(segment);
+      annotation.continuations.forEach(segment);
+      if (annotation.marker) segment(annotation.marker);
+    }
+    if (annotations.length) {
+      textStyle(doc, geometry.annotationLayout.fontSize, true);
+      for (const { labelBox, labelLines } of annotations) {
+        // PDF text changes the non-stroking color used by the next rectangle.
+        // Restore white for every label, including labels after the first one.
+        doc.setFillColor(255, 255, 255);
+        doc.rect(left + labelBox.left, originY + labelBox.top, labelBox.width, labelBox.height, "F");
+        for (const line of labelLines)
+          doc.text(printableText(line.text), left + line.x, originY + line.y, { align: "center" });
+      }
     }
   }
   function setupPhoto(run, photo, data, properties, index, total) {
@@ -550,32 +610,14 @@ function seriesAudit(writer, series, run, name = series.name || "Recorded values
   }
 }
 
-function graphMeasurements(writer, charts, run) {
-  const endpointText = (endpoint, definition) => {
-    if (!endpoint) return "Not resolved";
-    const details = [Number.isFinite(endpoint.timeMs) ? formatSourceTime(endpoint.timeMs, true, true) : "Not resolved",
-      endpoint.detail];
-    if (!Number.isFinite(endpoint.timeMs) && ["time", "point"].includes(definition.kind))
-      details.push(`Selected source time: ${formatSourceTime(definition.timeMs, true, true)}`);
-    if (endpoint.sourceGraphName && endpoint.graphName !== endpoint.sourceGraphName)
-      details.push(`Source graph: ${endpoint.sourceGraphName}`);
-    if (endpoint.sourceDeviceName && endpoint.deviceName !== endpoint.sourceDeviceName)
-      details.push(`Source device: ${endpoint.sourceDeviceName}`);
-    if (endpoint.sourceId) details.push(`Source: ${sourceLabel(run, endpoint)}`);
-    if (endpoint.status !== "resolved" && endpoint.reason) details.push(endpoint.reason);
-    return details.filter(Boolean).join("\n");
-  };
-  for (const { name, measurements, calculationNote } of charts) {
+function graphMeasurements(writer, charts) {
+  for (const { name, measurements } of charts) {
     if (!measurements.length) continue;
     writer.table([
-      { label: "Calculation", width: 150 }, { label: "Duration", width: 87 },
-      { label: "Start", width: 234 }, { label: "End", width: WIDTH - 471 },
+      { label: "Name", width: WIDTH - 150 }, { label: "Result", width: 150 },
     ], measurements.map(({ measurement, result }) => [
-      measurement.name,
-      result.status === "resolved" ? `${formatTestValue(result.value)} ${result.unit}`
-        : `${result.unavailable ? "Unavailable" : result.status === "invalid" ? "Invalid" : "Not resolved"}\n${result.reason}`,
-      endpointText(result.start, measurement.start), endpointText(result.end, measurement.end),
-    ]), { caption: `Duration calculations - ${name} | ${clockLabel(run.clock)}${calculationNote ? `\n${calculationNote}` : ""}`, compact: true });
+      measurement.name, formatGraphMeasurementResult(result),
+    ]), { caption: `Calculations - ${name}`, compact: true });
   }
 }
 
@@ -686,8 +728,6 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       const timeRange = Object.hasOwn(ranges, device.id) ? ranges[device.id] : undefined;
       if (Object.hasOwn(ranges, device.id) && !isTestTimeRange(timeRange, run.clock))
         throw new Error(`The manual graph time range for "${device.name}" is invalid. Select a start before the end within this test run.`);
-      const deviceTimeRange = deviceChartTimeRange(device, run.clock);
-      deviceRanges.set(device, { timeRange, deviceTimeRange });
       const graphOrder = Object.hasOwn(orders, device.id) ? orders[device.id] : undefined;
       if (Object.hasOwn(orders, device.id) && !isGraphOrder(graphOrder))
         throw new Error(`The graph order for "${device.name}" is invalid. Choose a list of graph identifiers.`);
@@ -707,6 +747,8 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
           });
         });
       deviceGraphs.set(device, charts);
+      const deviceTimeRange = deviceCalculationTimeRange(device, sourceRun, charts.flatMap(chart => chart.measurements));
+      deviceRanges.set(device, { timeRange, deviceTimeRange });
       for (const channel of device.channels)
         for (const series of channel.series || [])
           if (series.points?.length) buildTestChart(series, run.clock, { timeRange, deviceTimeRange });
@@ -724,12 +766,8 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
         const sourceDevice = sourceRun.devices.find(device => device.id === settings.deviceId);
         const deviceName = getDeviceDisplayName(sourceDevice || { id: settings.deviceId, name: "Unavailable device" }, run.graphTools);
         const name = settings.name || entry?.name || "Unavailable graph";
-        const sourceTags = entry ? [entry.name !== entry.series.name && entry.series.name ? `Source graph: ${entry.series.name}` : "",
-          entry.deviceName !== entry.device.name ? `Source device: ${entry.device.name}` : ""].filter(Boolean).join(" | ") : "";
         return {
           name: `${deviceName} / ${name}`,
-          calculationNote: entry ? `Source graph omitted by report applicability settings.${sourceTags ? ` ${sourceTags}` : ""}`
-            : "The original graph is unavailable. Saved calculation definitions are retained.",
           measurements: settings.measurements.map(measurement => {
             const result = resolveGraphMeasurement(sourceRun, measurement);
             return { measurement, result: entry ? result : { ...result, status: "unresolved", unavailable: true,
@@ -814,13 +852,13 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       const charts = deviceGraphs.get(device);
       const { timeRange, deviceTimeRange } = deviceRanges.get(device);
       writer.chartGrid(charts, run.clock, timeRange, deviceTimeRange);
-      graphMeasurements(writer, charts, run);
+      graphMeasurements(writer, charts);
       reportComment(writer, "Device comment", device.comment);
       for (const { series, name } of charts) seriesAudit(writer, series, run, name);
     }
     if (preservedMeasurements.get(run).length) {
       writer.page(`${run.name || "Test run"} - Preserved duration calculations`);
-      graphMeasurements(writer, preservedMeasurements.get(run), run);
+      graphMeasurements(writer, preservedMeasurements.get(run));
     }
     runAppendices(writer, run);
   }
