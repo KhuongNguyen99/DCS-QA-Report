@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { inflateSync } from "node:zlib";
 import { createTestReportPdf } from "../src/test-report.js";
+import { deviceGraphEntries } from "../src/test-graph-order.js";
 
 const fonts = {
   "NotoSans-Regular.ttf": await readFile(new URL("../public/assets/NotoSans-Regular.ttf", import.meta.url)),
@@ -89,6 +90,36 @@ function runFixture(id = "run-1") {
 function closedState() {
   return { project: { status: "closed", revision: 2, walkdownId: "skid-1", skidName: "Skid Example",
     closedAt: "2026-11-20T11:30:00Z", closedByName: "Inspector Example" }, testRuns: [runFixture()] };
+}
+
+function graphOrderDevice(prefix, count = 8) {
+  const types = [
+    ["command", "digital", "", [0, 1]], ["feedback_FB", "analog", "V", [0.3, 0.1]],
+    ["current", "analog", "mA", [4, 20]], ["voltage", "analog", "V", [2, 3]],
+    ["temperature", "analog", "°C", [21, 25]], ["state", "digital", "", [1, 0]],
+    ["pressure", "analog", "mA", [5, 15]], ["position", "analog", "mA", [6, 18]],
+  ];
+  const channels = [];
+  for (let index = 0; index < count; index += 1) {
+    const [suffix, kind, unit, values] = types[index];
+    const channelIndex = Math.floor(index / 2);
+    if (!channels[channelIndex]) channels[channelIndex] = {
+      id: `${prefix}-channel-${channelIndex}`, symbolicName: `${prefix} input bank ${channelIndex + 1}`,
+      stationId: "station-1", slot: channelIndex + 1, channel: channelIndex,
+      sourceChannel: `Channel ${channelIndex + 1}`, role: "Input", status: "Passed", parameters: [], series: [],
+    };
+    const points = values.map((value, pointIndex) => ({
+      timeMs: startMs + index * 10_000 + pointIndex * 2000 + 1000,
+      time: `${prefix} recorded time ${index}:${pointIndex}`, value, previousValue: 0,
+      rawValue: String(value), valid: true, sourceId: "source-log", sourceRow: index * 3 + pointIndex + 10,
+    }));
+    if (index === 1 || index === 6) points.splice(1, 0, {
+      timeMs: startMs + index * 10_000 + 2000, time: `${prefix} invalid time ${index}`,
+      value: null, rawValue: `${prefix} INVALID-${index}`, valid: false, sourceId: "source-log", sourceRow: index + 40,
+    });
+    channels[channelIndex].series.push({ id: `${prefix}-graph-${index}`, name: `${prefix} ${suffix}`, kind, unit, points });
+  }
+  return { id: `${prefix}-device`, name: `${prefix} device`, status: "Passed", channels };
 }
 
 async function pdfContent(blob) {
@@ -1017,6 +1048,120 @@ test("long run and device comments paginate completely above the footer through 
   });
 });
 
+test("PDF graph ordering moves individual mixed-unit graphs across rows and pages with their legends and audits", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const device = graphOrderDevice("Ordered");
+    run.devices = [device];
+    run.unassignedChannels = [];
+    const entries = deviceGraphEntries(device);
+    const selected = [7, 6, 0, 1, 4, 5, 2];
+    const graphOrders = { [run.id]: { [device.id]: ["removed-graph", entries[7].key, ...selected.map(index => entries[index].key)] } };
+    const before = structuredClone({ state, graphOrders });
+    const result = await pdfContent(await createTestReportPdf({ state, graphOrders }));
+    const expected = [...selected, 3].map(index => entries[index]);
+    const titles = entries.map(({ series }) => series.name);
+    const plotted = result.blocks.flat().filter(block => titles.includes(block.text)).map(block => block.text);
+    assert.deepEqual(plotted, expected.map(({ series }) => series.name),
+      "unknown keys and duplicates cannot hide graphs; an unlisted new graph is appended");
+    assert.equal(result.text.match(/Figure \d+\./g)?.length, entries.length);
+    const plots = expected.map(({ series }) => readPlot(result, series.name));
+    assert.ok(new Set(plots.map(plot => plot.page)).size > 1, "ordering is global across page breaks");
+    for (const plot of plots) assert.deepEqual(plot.timeTicks, plots[0].timeTicks, "graph order does not change the shared device axis");
+    const text = result.text.replace(/\s+/g, " ");
+    expected.forEach(({ series, channel }, index) => {
+      const label = `Figure ${index + 1}.`;
+      const next = text.indexOf(`Figure ${index + 2}.`);
+      const legend = text.slice(text.indexOf(label), next < 0 ? undefined : next);
+      const measurement = series.kind === "digital" ? "Recorded state" : series.unit === "V" ? "Measured voltage"
+        : series.unit === "°C" ? "Measured temperature" : "Measured current";
+      assert.ok(legend.startsWith(`${label} ${measurement} for the input. Station Example | Slot ${channel.slot} | ${channel.sourceChannel}`),
+        `Figure ${index + 1} keeps ${series.name}'s measurement and location`);
+    });
+    const audits = [...result.text.matchAll(/Invalid or unplottable values - ([^\n]+)/g)].map(match => match[1]);
+    assert.deepEqual(audits, [entries[6].series.name, entries[1].series.name], "source audit details follow their graph order");
+    const feedback = readPlot(result, entries[1].series.name);
+    assert.match(result.pages[feedback.page], /Initial value 0\.0 V/);
+    assert.equal(feedback.traces.filter(line => line.dash.length > 0).length, 2, "reordering preserves the feedback zero baseline and held tail");
+    assert.deepEqual({ state, graphOrders }, before, "view ordering cannot mutate approved observations or caller preferences");
+  });
+});
+
+test("PDF graph orders stay scoped to each run and device and retain legacy keys through N/A filtering", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const [run] = state.testRuns;
+    const first = graphOrderDevice("First", 4), second = graphOrderDevice("Second", 2);
+    for (const channel of first.channels) {
+      delete channel.id;
+      for (const series of channel.series) delete series.id;
+    }
+    first.channels.unshift({ ...structuredClone(first.channels[0]), status: "Not applicable" });
+    run.devices = [first, second];
+    run.unassignedChannels = [];
+    const another = runFixture("other-run");
+    another.devices = [graphOrderDevice("Other run", 3)];
+    another.unassignedChannels = [];
+    state.testRuns.push(another);
+    const firstEntries = deviceGraphEntries(first).filter(({ channel }) => channel.status !== "Not applicable");
+    const secondEntries = deviceGraphEntries(second);
+    const anotherEntries = deviceGraphEntries(another.devices[0]);
+    const graphOrders = {
+      [run.id]: { [first.id]: firstEntries.map(entry => entry.key).reverse(), "absent-device": "ignored" },
+      [another.id]: { [another.devices[0].id]: [anotherEntries[2].key] },
+      "absent-run": null,
+    };
+    const result = await pdfContent(await createTestReportPdf({ state, graphOrders }));
+    const allTitles = [...firstEntries, ...secondEntries, ...anotherEntries].map(({ series }) => series.name);
+    const plotted = result.blocks.flat().filter(block => allTitles.includes(block.text)).map(block => block.text);
+    assert.deepEqual(plotted, [...firstEntries].reverse().concat(secondEntries, anotherEntries[2], anotherEntries.slice(0, 2)).map(({ series }) => series.name));
+    assert.equal(result.text.match(/Figure \d+\./g)?.length, 9, "N/A duplicate channels stay omitted without shifting retained legacy graph keys");
+    const selected = await pdfContent(await createTestReportPdf({ state, runId: run.id,
+      graphOrders: { ...graphOrders, [another.id]: "ignored for an unselected run" } }));
+    assert.doesNotMatch(selected.text, /Other run (?:command|feedback_FB|current)/);
+    assert.equal(selected.text.match(/Figure \d+\./g)?.length, 6);
+  });
+});
+
+test("PDF graph order is captured before asynchronous asset loading", async () => {
+  const original = globalThis.fetch;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  globalThis.fetch = async url => { await gate; return assetResponse(String(url).split("/").pop()); };
+  try {
+    const state = closedState();
+    const run = state.testRuns[0], device = graphOrderDevice("Captured", 3);
+    run.devices = [device]; run.unassignedChannels = [];
+    const entries = deviceGraphEntries(device);
+    const graphOrders = { [run.id]: { [device.id]: entries.map(entry => entry.key).reverse() } };
+    const pending = createTestReportPdf({ state, graphOrders });
+    graphOrders[run.id][device.id].reverse();
+    release();
+    const result = await pdfContent(await pending);
+    const titles = entries.map(({ series }) => series.name);
+    assert.deepEqual(result.blocks.flat().filter(block => titles.includes(block.text)).map(block => block.text), [...titles].reverse());
+    assert.equal(run.graphOrders, undefined, "view order is never inserted into approved run evidence");
+  } finally { release(); globalThis.fetch = original; }
+});
+
+test("invalid selected PDF graph orders fail before fonts or private photos load", async () => {
+  const original = globalThis.fetch;
+  let fetched = false, accessed = false;
+  globalThis.fetch = async () => { fetched = true; throw new Error("No assets expected"); };
+  const backend = { getPhotoUrl: async () => { accessed = true; return "/private/setup.png"; } };
+  try {
+    const state = closedState();
+    state.testRuns[0].setupPhotos = [setupPhoto("order")];
+    for (const order of [null, undefined, "order", {}, [null], [1], [""], ["bad\0key"], new Array(1)])
+      await assert.rejects(createTestReportPdf({ state, backend, graphOrders: { "run-1": { "device-1": order } } }), /graph order.*invalid/);
+    for (const graphOrders of [null, [], "orders", new Map(), { "run-1": null }, { "run-1": [] }, { "run-1": "orders" }])
+      await assert.rejects(createTestReportPdf({ state, backend, graphOrders }), /Graph orders must be grouped by test run and device/);
+    assert.equal(fetched, false);
+    assert.equal(accessed, false);
+  } finally { globalThis.fetch = original; }
+});
+
 test("manual device ranges apply to every separate channel graph and preserve hidden source evidence", async () => {
   await withFonts(async () => {
     const state = closedState();
@@ -1030,9 +1175,12 @@ test("manual device ranges apply to every separate channel graph and preserve hi
     run.comment = "Overall review stays saved";
     device.comment = "Device review stays saved";
     const timeRanges = { [run.id]: { [device.id]: { startMs: startMs + 100_000, endMs: startMs + 200_000 } } };
+    const graphOrders = { [run.id]: { [device.id]: deviceGraphEntries(device).map(entry => entry.key).reverse() } };
     const originalState = structuredClone(state), originalRanges = structuredClone(timeRanges);
-    const result = await pdfContent(await createTestReportPdf({ state, timeRanges }));
+    const result = await pdfContent(await createTestReportPdf({ state, timeRanges, graphOrders }));
     const titles = ["Temperature", "Manual command", "V-900-POS"];
+    assert.deepEqual(result.blocks.flat().filter(block => titles.includes(block.text)).map(block => block.text), [...titles].reverse(),
+      "manual horizontal windows remain independent of the selected graph order");
     const pages = titles.map(title => {
       const page = result.pages.findIndex(text => text.includes(`\n${title}\n`));
       assert.ok(page >= 0, `Missing graph ${title}`);

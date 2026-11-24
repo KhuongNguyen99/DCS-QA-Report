@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { inspectionTargets } from "../src/domain.js";
+import { deviceGraphEntries } from "../src/test-graph-order.js";
 
 const schedule = JSON.parse(await readFile(new URL("../src/data/schedule.json", import.meta.url), "utf8"));
 const SKID = "11111111-1111-4111-8111-111111111111";
@@ -31,10 +32,11 @@ before(async () => {
         window.pdfExports.push(JSON.parse(JSON.stringify(state)));
         return new Blob(['test-pdf'], { type: 'application/pdf' });
       }`,
-    'test-report': `export async function createTestReportPdf({ state, runId, backend, timeRanges }) {
+    'test-report': `export async function createTestReportPdf({ state, runId, backend, timeRanges, graphOrders }) {
       if (state.project.status !== 'closed') throw new Error('Only closed revisions can export.');
       if (typeof backend?.getPhotoUrl !== 'function') throw new Error('Private setup image access must be supplied.');
-      window.testPdfExports.push({ state: JSON.parse(JSON.stringify(state)), runId, timeRanges: JSON.parse(JSON.stringify(timeRanges || {})) });
+      window.testPdfExports.push({ state: JSON.parse(JSON.stringify(state)), runId,
+        timeRanges: JSON.parse(JSON.stringify(timeRanges || {})), graphOrders: JSON.parse(JSON.stringify(graphOrders || {})) });
       return new Blob(['test-run-pdf'], { type: 'application/pdf' });
     }`,
     VoiceComment: `export default function VoiceComment({ disabled }) {
@@ -526,6 +528,21 @@ const testRun = () => ({
   sources: [], stations: [], devices: [], unassignedChannels: [], warnings: [],
 });
 
+function graphOrderRun() {
+  const startMs = Date.UTC(2026, 10, 19, 12);
+  const signals = [
+    { id: "command", name: "Close command", kind: "digital", unit: "", values: [0, 1, 0] },
+    { id: "feedback", name: "Close feedback", kind: "analog", unit: "V", values: [0, 0.3, 0] },
+    { id: "position", name: "Position", kind: "analog", unit: "mA", values: [4, 20, 4] },
+  ];
+  return { ...testRun(), clock: { basis: "source-local", timeZone: "Source clock", startMs, endMs: startMs + 60_000 },
+    devices: [{ id: "valve", name: "VALVE", status: "Passed", channels: signals.map(signal => ({
+      id: signal.id, symbolicName: signal.name, status: "Passed", parameters: [],
+      series: [{ id: `${signal.id}-series`, name: signal.name, kind: signal.kind, unit: signal.unit,
+        points: [5000, 20_000, 50_000].map((offset, index) => ({ timeMs: startMs + offset, value: signal.values[index], valid: true })) }],
+    })) }] };
+}
+
 async function chooseTestSetupPhotos(h, ...names) {
   const input = h.document.querySelector('.test-setup-bulk-dialog input[aria-label="Choose test setup photos"]');
   assert.ok(input, "the real test setup upload dialog is open");
@@ -845,4 +862,68 @@ test("App exports the current device view range on approved reports even when br
   assert.deepEqual(copy(h.window.testPdfExports.at(-1).timeRanges), {}, 'an in-memory reset overrides a cache entry that could not be cleared');
   assert.equal(h.server.calls.filter(call => call.kind === 'saveTestRun').length, 0);
   assert.deepEqual(h.server.state, approved, 'view changes and PDF exports cannot alter approved evidence');
+});
+
+test("App exports the arranged graph order on approved reports even when browser storage fails", async t => {
+  const h = await setup(t);
+  const run = graphOrderRun();
+  const [command, feedback, position] = deviceGraphEntries(run.devices[0]).map(entry => entry.key);
+  h.server.state.testRuns = [run];
+  await h.notify();
+  await h.nav("Report");
+  await h.click(h.button("Approve & close"));
+  await h.click(h.button("Confirm approval & close"));
+  const approved = copy(h.server.state);
+  await h.nav("Test reports");
+  const names = () => Array.from(h.document.querySelectorAll(".test-chart figcaption strong"), element => element.textContent);
+  await h.click([...h.document.querySelectorAll("summary")].find(element => element.textContent === "Arrange graphs"));
+  await h.click(h.button("Move Position up"));
+  assert.deepEqual(names(), ["Close command", "Position", "Close feedback"]);
+  assert.equal(h.button("Save test run"), undefined);
+  await h.click(h.button("Export test PDF"));
+  assert.deepEqual(copy(h.window.testPdfExports.at(-1).graphOrders), { [run.id]: { valve: [command, position, feedback] } });
+  h.window.Storage.prototype.setItem = () => { throw new Error("Quota exceeded"); };
+  h.window.Storage.prototype.removeItem = () => { throw new Error("Storage blocked"); };
+  await h.click(h.button("Move Position up"));
+  assert.deepEqual(names(), ["Position", "Close command", "Close feedback"]);
+  assert.match(h.document.querySelector('[aria-label="Graph order"]').parentElement.textContent, /could not be saved/);
+  await h.click(h.button("Export test PDF"));
+  assert.deepEqual(copy(h.window.testPdfExports.at(-1).graphOrders), { [run.id]: { valve: [position, command, feedback] } });
+  await h.click(h.button("Reset graph order"));
+  assert.deepEqual(names(), ["Close command", "Close feedback", "Position"]);
+  await h.click(h.button("Export test PDF"));
+  assert.deepEqual(copy(h.window.testPdfExports.at(-1).graphOrders), {}, "an in-memory reset overrides a cache entry that could not be cleared");
+  assert.equal(h.server.calls.filter(call => call.kind === "saveTestRun").length, 0);
+  assert.deepEqual(h.server.state, approved, "arranging and exporting graphs cannot alter approved evidence");
+});
+
+test("App carries graph order into the next revision while historical PDF exports retain their own order", async t => {
+  const h = await setup(t);
+  const run = graphOrderRun();
+  const [command, feedback, position] = deviceGraphEntries(run.devices[0]).map(entry => entry.key);
+  h.server.state.testRuns = [run];
+  await h.notify();
+  await h.nav("Test reports");
+  await h.click([...h.document.querySelectorAll("summary")].find(element => element.textContent === "Arrange graphs"));
+  await h.click(h.button("Move Position up"));
+  await h.click(h.button("Move Position up"));
+  await h.nav("Report");
+  assert.equal(h.button("Approve & close").disabled, false, "a display order does not create an unsaved evidence draft");
+  await h.click(h.button("Approve & close"));
+  await h.click(h.button("Confirm approval & close"));
+  await h.click(h.button("New revision"));
+  await h.nav("Test reports");
+  const names = () => Array.from(h.document.querySelectorAll(".test-chart figcaption strong"), element => element.textContent);
+  assert.deepEqual(names(), ["Position", "Close command", "Close feedback"], "the new revision starts with the saved device arrangement");
+  await h.click(h.button("Move Close feedback up"));
+  await h.click(h.button("Move Close feedback up"));
+  assert.deepEqual(names(), ["Close feedback", "Position", "Close command"]);
+  await h.nav("Report");
+  await h.click(h.button("Export test reports revision 7"));
+  const historical = h.window.testPdfExports.at(-1);
+  assert.equal(historical.state.project.revision, 7);
+  assert.deepEqual(copy(historical.graphOrders), { [run.id]: { valve: [position, command, feedback] } });
+  assert.equal(h.server.state.project.revision, 8);
+  assert.equal(h.server.calls.filter(call => call.kind === "saveTestRun").length, 0);
+  assert.deepEqual(h.server.state.testRuns[0].devices, run.devices, "arrangements never reorder the stored source channels");
 });

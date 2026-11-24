@@ -28,6 +28,7 @@ import RevisionPanel from "./RevisionPanel.jsx";
 import TestReportsPanel from "./TestReportsPanel.jsx";
 import PhotoGallery from "./PhotoGallery.jsx";
 import { testTimeRangeScope, readTestTimeRanges, inheritTestTimeRanges } from "./test-time-ranges.js";
+import { testGraphOrderScope, readTestGraphOrders, inheritTestGraphOrders } from "./test-graph-order.js";
 
 const EMPTY = { records: [], photos: [], comments: [], testRuns: [], inspector: null };
 const TARGETS = inspectionTargets(schedule);
@@ -163,6 +164,12 @@ function App() {
     setTimeRangeChanges(previous => ({ ...previous, [scope]: { ...previous[scope],
       [runId]: { ...previous[scope]?.[runId], [deviceId]: range } } }));
   }, []);
+  const [graphOrderChanges, setGraphOrderChanges] = useState({});
+  const changeGraphOrder = useCallback((scope, runId, deviceId, order) => {
+    if (!scope || !runId) return;
+    setGraphOrderChanges(previous => ({ ...previous, [scope]: { ...previous[scope],
+      [runId]: { ...previous[scope]?.[runId], [deviceId]: order === null ? null : [...order] } } }));
+  }, []);
   const [camera, setCamera] = useState(null);
   const [manualEntry, setManualEntry] = useState(false);
   const [bulkUpload, setBulkUpload] = useState(null);
@@ -254,6 +261,7 @@ function App() {
         selectedIdRef.current === backend.walkdownId
       ) {
         inheritTestTimeRanges(config.url, loaded);
+        inheritTestGraphOrders(config.url, loaded);
         setState(loaded);
         setWorkspace((previous) => ({
           ...previous,
@@ -563,6 +571,7 @@ function App() {
       if (activeBackend.current === backend && selectedIdRef.current === backend.walkdownId) {
         ++request.current;
         inheritTestTimeRanges(config.url, saved);
+        inheritTestGraphOrders(config.url, saved);
         setState(saved);
         setLoading(false);
         setLastSync(new Date());
@@ -590,10 +599,12 @@ function App() {
       const { createInspectionPdf, approvedReportDate } = await import("./report.js");
       const generatedAt = approvedReportDate(snapshot);
       const rangeScope = testTimeRangeScope(config.url, inspector?.id, snapshot.project.walkdownId, snapshot.project.revision);
+      const orderScope = testGraphOrderScope(config.url, inspector?.id, snapshot.project.walkdownId, snapshot.project.revision);
       const blob = kind === "tests"
         ? await (await import("./test-report.js")).createTestReportPdf({
           state: snapshot, runId, backend, onProgress: setReporting,
           timeRanges: readTestTimeRanges(rangeScope, snapshot.testRuns || [], timeRangeChanges[rangeScope]),
+          graphOrders: readTestGraphOrders(orderScope, snapshot.testRuns || [], graphOrderChanges[orderScope]),
         })
         : await createInspectionPdf({
           schedule, state: snapshot, backend, onProgress: setReporting,
@@ -1295,6 +1306,8 @@ function App() {
               storageScope={config.url}
               timeRangeChanges={timeRangeChanges}
               onTimeRangeChange={changeTimeRange}
+              graphOrderChanges={graphOrderChanges}
+              onGraphOrderChange={changeGraphOrder}
               readOnly={!editable}
               pending={pending > 0 || Boolean(reporting)}
               exportProgress={reporting}

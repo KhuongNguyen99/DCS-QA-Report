@@ -8,6 +8,7 @@ import { build } from "esbuild";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { testCommentDraftScope, testCommentDraftKey } from "../src/test-comment-drafts.js";
 import { testTimeRangeScope, readTestTimeRanges, inheritTestTimeRanges, resetDeviceTimeRange } from "../src/test-time-ranges.js";
+import { testGraphOrderScope, deviceGraphEntries } from "../src/test-graph-order.js";
 
 let directory;
 let bundle;
@@ -36,7 +37,8 @@ before(async () => {
             window.calls.push({ kind: 'delete', run, revision, resolve, reject });
           }).then(() => setProps(previous => ({ ...previous, runs: previous.runs.filter(item => item.id !== run.id) }))), []);
           return <TestReportsPanel {...props} onSave={save} onDelete={remove}
-            onExport={id => window.exports.push(id)} onReview={() => window.reviews.push(true)} onDirtyChange={dirty} />;
+            onExport={id => window.exports.push(id)} onReview={() => window.reviews.push(true)} onDirtyChange={dirty}
+            onGraphOrderChange={(scope, runId, deviceId, order) => window.graphOrders.push({ scope, runId, deviceId, order })} />;
         }
         window.act = React.act;
         window.root = createRoot(document.getElementById('root'));
@@ -92,7 +94,7 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false,
   });
   const { window } = dom;
   Object.assign(window, {
-    IS_REACT_ACT_ENVIRONMENT: true, structuredClone, calls: [], parses: [], dirty: [], exports: [], reviews: [], localTimeZone,
+    IS_REACT_ACT_ENVIRONMENT: true, structuredClone, calls: [], parses: [], dirty: [], exports: [], reviews: [], graphOrders: [], localTimeZone,
     initialProps: { project, runs: [], inspector: { id: "inspector-1", isAdmin: false }, storageScope: "https://example.supabase.co", ...props },
   });
   const DateTimeFormat = window.Intl.DateTimeFormat;
@@ -138,6 +140,18 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false,
     button: name => [...document.querySelectorAll("button")].find(button => button.textContent.trim() === name || button.getAttribute('aria-label') === name),
     field: name => [...document.querySelectorAll("label")].find(label => label.textContent.trim() === name)?.control,
     async click(button) { assert.ok(button, "button exists"); await window.act(async () => button.click()); },
+    async drag(source, target) {
+      const values = new Map();
+      const dataTransfer = { setData: (type, value) => values.set(type, value), getData: type => values.get(type) };
+      for (const [element, type] of [[source, "dragstart"], [target, "dragover"], [target, "drop"], [source, "dragend"]]) {
+        await window.act(async () => {
+          const event = new window.Event(type, { bubbles: true, cancelable: true });
+          Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+          element.dispatchEvent(event);
+        });
+      }
+      return dataTransfer;
+    },
     async configure(changes) { await window.act(async () => window.configure(changes)); },
     async fill(input, value) {
       assert.ok(input, "field exists");
@@ -149,7 +163,7 @@ async function setup(t, props = {}, { stored = {}, storageBlocked = false,
     },
     async select(input, value) {
       assert.equal(input?.tagName, "SELECT", "field is a native select");
-      assert.ok(Array.from(input.options, option => option.value).includes(value), "requested timezone is selectable");
+      assert.ok(Array.from(input.options, option => option.value).includes(value), "requested option is selectable");
       await window.act(async () => {
         input.value = value;
         input.dispatchEvent(new window.Event("change", { bubbles: true }));
@@ -591,6 +605,159 @@ function eventRun() {
   channel.series = [{ ...series, id: "empty-series", points: [] }, series];
   return run;
 }
+
+function graphOrderRun() {
+  const run = eventRun();
+  const channel = run.devices[0].channels[0];
+  const temperature = structuredClone(channel.series[1]);
+  Object.assign(temperature, { id: "temperature-series", name: "Temperature", unit: "°C" });
+  temperature.points.forEach((point, index) => Object.assign(point, { value: 22 + index, rawValue: `${22 + index} °C` }));
+  channel.series.push(temperature);
+  run.devices[0].channels.splice(1, 0, { ...structuredClone(channel), id: "parameters-only", symbolicName: "Parameters only",
+    series: [], parameters: [{ name: "Retained setting", value: "Enabled" }] });
+  return run;
+}
+
+const graphNames = h => Array.from(h.document.querySelectorAll('.test-chart figcaption strong'), element => element.textContent);
+
+test("graph move buttons reorder individual signals across channels and keep their metadata without creating a report edit", async t => {
+  const run = graphOrderRun(), before = structuredClone(run);
+  const h = await setup(t, { runs: [run] });
+  const sourceOrder = ["PD-EXAMPLE", "Temperature", "feedback state"];
+  assert.deepEqual(graphNames(h), sourceOrder);
+  assert.equal(h.query('.test-graph-order').open, false);
+  await h.click(h.query('.test-graph-order summary'));
+  assert.equal(h.query('.test-graph-order').open, true);
+  assert.deepEqual(Array.from(h.document.querySelectorAll('.test-graph-order-label > span'), item => item.textContent), ["mA", "°C", "State"]);
+  assert.deepEqual(Array.from(h.document.querySelectorAll('.test-channel-heading h4'), item => item.textContent),
+    ["VALVE-EXAMPLE-output", "Parameters only", "VALVE-EXAMPLE-feedback"], "source order preserves the existing channel layout");
+  assert.equal(h.button('Move PD-EXAMPLE up').disabled, true);
+  assert.equal(h.button('Move feedback state down').disabled, true);
+  const geometryBefore = Array.from(h.document.querySelectorAll('.test-chart svg'), svg => svg.outerHTML);
+  const move = h.button('Move Temperature down');
+  move.focus();
+  await h.click(move);
+  assert.deepEqual(graphNames(h), ["PD-EXAMPLE", "feedback state", "Temperature"]);
+  assert.equal(h.document.activeElement, h.button('Move Temperature up'), "keyboard focus stays with the moved graph when its button reaches a boundary");
+  assert.equal(h.button('Move Temperature down').disabled, true);
+  assert.match(h.query('.test-graph-order [role="status"]').textContent, /Temperature moved to position 3 of 3/);
+  assert.equal(h.query('.test-graph-order [role="status"]').getAttribute('aria-live'), 'polite');
+  const figures = Array.from(h.document.querySelectorAll('.test-chart'));
+  assert.deepEqual(figures.map(figure => figure.closest('.test-channel').querySelector('h4').textContent),
+    ["VALVE-EXAMPLE-output", "VALVE-EXAMPLE-feedback", "VALVE-EXAMPLE-output"]);
+  assert.ok(figures.every(figure => figure.closest('.test-channel').textContent.includes('Input filter')), "channel parameters stay with their graphs");
+  assert.equal(Array.from(h.document.querySelectorAll('.test-channel')).filter(channel => channel.textContent.includes('Retained setting')).length, 1);
+  assert.deepEqual(figures.map(figure => figure.querySelector('svg').outerHTML), [geometryBefore[0], geometryBefore[2], geometryBefore[1]]);
+  expectSharedAxis(h, startMs, startMs + 392_000);
+  assert.equal(h.query('.test-import-form'), null);
+  assert.equal(h.window.dirty.at(-1), false);
+  assert.equal(h.window.calls.length, 0);
+  assert.deepEqual(run, before);
+  const change = structuredClone(h.window.graphOrders.at(-1));
+  const keys = deviceGraphEntries(run.devices[0]).map(entry => entry.key);
+  assert.deepEqual(change, { scope: testGraphOrderScope('https://example.supabase.co', 'inspector-1', project.walkdownId, 4),
+    runId: run.id, deviceId: 'valve', order: [keys[0], keys[2], keys[1]] });
+  assert.deepEqual(JSON.parse(Object.values(h.stored())[0]), change.order, "the viewing preference saves immediately");
+});
+
+test("dragged graph order persists across reopening, stays separate for each device and run, and resets", async t => {
+  const run = graphOrderRun();
+  run.devices.push({ ...structuredClone(run.devices[0]), id: 'second', name: 'SECOND' });
+  const otherRun = graphOrderRun(); otherRun.id = 'other-run'; otherRun.name = 'Other run';
+  const h = await setup(t, { runs: [run, otherRun] });
+  await h.click(h.query('.test-graph-order summary'));
+  const rows = h.document.querySelectorAll('.test-graph-order li');
+  const transfer = await h.drag(rows[0], rows[2]);
+  assert.equal(transfer.effectAllowed, 'move');
+  assert.equal(transfer.dropEffect, 'move');
+  assert.deepEqual(graphNames(h), ['Temperature', 'feedback state', 'PD-EXAMPLE']);
+  assert.match(h.query('.test-graph-order [role="status"]').textContent, /PD-EXAMPLE moved to position 3 of 3/);
+  await h.click(h.button('SECONDPassed'));
+  assert.deepEqual(graphNames(h), ['PD-EXAMPLE', 'Temperature', 'feedback state']);
+  await h.click(h.button('Move Temperature up'));
+  assert.deepEqual(graphNames(h), ['Temperature', 'PD-EXAMPLE', 'feedback state']);
+  await h.select(h.query('.test-run-toolbar select'), 'other-run');
+  assert.deepEqual(graphNames(h), ['PD-EXAMPLE', 'Temperature', 'feedback state']);
+  await h.select(h.query('.test-run-toolbar select'), 'run-1');
+  await h.click(h.button('VALVE-EXAMPLEPassed'));
+  assert.deepEqual(graphNames(h), ['Temperature', 'feedback state', 'PD-EXAMPLE']);
+  const stored = h.stored(); await h.unmount();
+  const reopened = await setup(t, { runs: [run, otherRun] }, { stored });
+  assert.deepEqual(graphNames(reopened), ['Temperature', 'feedback state', 'PD-EXAMPLE']);
+  await reopened.click(reopened.button('Reset graph order'));
+  assert.deepEqual(graphNames(reopened), ['PD-EXAMPLE', 'Temperature', 'feedback state']);
+  assert.equal(reopened.window.graphOrders.at(-1).order, null);
+  assert.match(reopened.query('.test-graph-order [role="status"]').textContent, /reset to the original order/);
+  await reopened.click(reopened.button('SECONDPassed'));
+  assert.deepEqual(graphNames(reopened), ['Temperature', 'PD-EXAMPLE', 'feedback state']);
+  assert.equal(reopened.window.calls.length, 0);
+  assert.equal(reopened.window.dirty.at(-1), false);
+});
+
+test("approved read-only reports allow graph ordering and retain an in-memory export override when local storage is blocked", async t => {
+  const run = graphOrderRun();
+  const props = { runs: [run], readOnly: true, project: { ...project, status: 'closed' } };
+  const h = await setup(t, props, { storageBlocked: true });
+  assert.equal(h.button('Edit run'), undefined);
+  assert.equal(h.button('Move feedback state up').disabled, false);
+  await h.click(h.button('Move feedback state up'));
+  assert.deepEqual(graphNames(h), ['PD-EXAMPLE', 'feedback state', 'Temperature']);
+  assert.match(h.query('.test-graph-order .field-error').textContent, /could not be saved/);
+  assert.equal(h.window.calls.length, 0);
+  assert.equal(h.window.dirty.at(-1), false);
+  const { scope, runId, deviceId, order } = structuredClone(h.window.graphOrders.at(-1));
+  await h.click(h.button('Export test PDF'));
+  assert.deepEqual(Array.from(h.window.exports), [run.id]);
+  await h.unmount();
+  const reopened = await setup(t, { ...props, graphOrderChanges: { [scope]: { [runId]: { [deviceId]: order } } } }, { storageBlocked: true });
+  assert.deepEqual(graphNames(reopened), ['PD-EXAMPLE', 'feedback state', 'Temperature']);
+  await reopened.click(reopened.button('Reset graph order'));
+  assert.deepEqual(graphNames(reopened), ['PD-EXAMPLE', 'Temperature', 'feedback state']);
+  assert.equal(reopened.window.graphOrders.at(-1).order, null);
+});
+
+test("event actions after graph reordering still address the original channel and series indices", async t => {
+  const run = graphOrderRun(), before = structuredClone(run);
+  const h = await setup(t, { runs: [run] });
+  await h.click(h.button('Move PD-EXAMPLE down'));
+  await h.click(h.button('Move PD-EXAMPLE down'));
+  assert.deepEqual(graphNames(h), ['Temperature', 'feedback state', 'PD-EXAMPLE']);
+  await h.click(h.button('Remove event from PD-EXAMPLE, source row 3'));
+  await h.click(h.button('Remove event from feedback state, source row 2'));
+  assert.deepEqual(graphNames(h), ['Temperature', 'feedback state', 'PD-EXAMPLE']);
+  assert.deepEqual(Array.from(h.document.querySelectorAll('.test-chart'), figure => figure.querySelectorAll('.test-observation').length), [3, 0, 2]);
+  assert.equal(h.window.dirty.at(-1), true);
+  await h.click(h.button('Save test run'));
+  const expected = structuredClone(before.devices);
+  expected[0].comment = '';
+  expected[0].channels[0].series[1].points[1].excluded = true;
+  expected[0].channels[2].series[0].points[0].excluded = true;
+  assert.deepEqual(structuredClone(h.window.calls[0].payload.devices), expected, 'only original evidence flags change; raw channel and series order stays intact');
+  assert.deepEqual(run, before);
+  await h.settle();
+  assert.deepEqual(graphNames(h), ['Temperature', 'feedback state', 'PD-EXAMPLE']);
+});
+
+test("a device with one populated graph keeps channel details without showing arrangement controls", async t => {
+  const run = savedRun(); run.devices[0].channels[0].series[0].points = [];
+  const h = await setup(t, { runs: [run] });
+  assert.equal(h.query('.test-graph-order'), null);
+  assert.deepEqual(graphNames(h), ['feedback state']);
+  assert.equal(h.document.querySelectorAll('.test-channel').length, 2);
+  assert.match(h.query('.test-channel').textContent, /No signal changes.*Input filter/s);
+});
+
+test("repeated graph names have distinct move controls", async t => {
+  const run = savedRun();
+  for (const channel of run.devices[0].channels) channel.series[0].name = 'Repeated signal';
+  const h = await setup(t, { runs: [run] });
+  assert.equal(h.button('Move Repeated signal (graph 1 of 2) up').disabled, true);
+  assert.equal(h.button('Move Repeated signal (graph 2 of 2) down').disabled, true);
+  await h.click(h.button('Move Repeated signal (graph 2 of 2) up'));
+  assert.equal(h.query('.test-chart').closest('.test-channel').querySelector('h4').textContent, 'VALVE-EXAMPLE-feedback');
+  const labels = Array.from(h.document.querySelectorAll('.test-graph-order button[aria-label]'), button => button.getAttribute('aria-label'));
+  assert.equal(new Set(labels).size, 4);
+});
 
 test("removing a recorded row updates graph geometry immediately and saves only an exclusion of its original evidence", async t => {
   const run = eventRun(), before = structuredClone(run);

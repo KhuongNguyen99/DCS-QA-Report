@@ -3,6 +3,7 @@ import { revisionNumber } from "./domain.js";
 import { normalizePronetaStatus } from "./proneta-parser.js";
 import { approvedReportDate, drawCover, drawReportFooter, fitImageInBox, loadReportLogo, printableText } from "./report.js";
 import { buildTestChart, deviceChartTimeRange, formatSourceTime, isTestTimeRange, isDigitalOutputChannel } from "./test-chart.js";
+import { isGraphOrder, orderDeviceGraphs } from "./test-graph-order.js";
 import { testCommentBlocks } from "./test-comment-format.js";
 import { summarizeTestSettings } from "./test-settings-summary.js";
 
@@ -35,7 +36,7 @@ function reportComment(writer, label, value) {
   }
 }
 
-function isTimeRangeMap(value) {
+function isRunDeviceMap(value) {
   return value !== null && typeof value === "object"
     && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 }
@@ -488,11 +489,15 @@ function figureDescription(series, channel, deviceName) {
   return channel.role ? `${measurement} for the ${channel.role.toLowerCase()}` : measurement;
 }
 
-function channelDetails(writer, channel, run, { heading = true, charts, deviceName } = {}) {
+function channelChart(series, channel, run, deviceName) {
+  return { series, description: figureDescription(series, channel, deviceName),
+    location: `${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}`,
+    showInitialState: isDigitalOutputChannel(channel) };
+}
+
+function channelDetails(writer, channel, run, { heading = true, deferCharts = false, deviceName } = {}) {
   const location = `${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}`;
   const details = channel.role ? `${location} | ${channel.role}` : location;
-  const chart = series => ({ series, description: figureDescription(series, channel, deviceName), location,
-    showInitialState: isDigitalOutputChannel(channel) });
   const name = channel.symbolicName || channelLabel(channel);
   const result = resultLabel(channel.status);
   const { rawStatus } = channel;
@@ -500,7 +505,7 @@ function channelDetails(writer, channel, run, { heading = true, charts, deviceNa
   const wiring = `Test Result: ${result}${source}`;
   const color = resultColor(result);
   const populated = (channel.series || []).filter(series => series.points?.length);
-  if (charts) {
+  if (deferCharts) {
     const label = heading && name !== deviceName ? name : "";
     const location = !populated.length ? details : heading && !label ? channelLabel(channel) : "";
     writer.paragraph([label, location, wiring].filter(Boolean).join(" | "), { size: 8.5, gap: 4, lineHeight: 11, color });
@@ -510,10 +515,8 @@ function channelDetails(writer, channel, run, { heading = true, charts, deviceNa
     writer.paragraph(wiring, { bold: true, color });
   }
   if (channel.comment) writer.paragraph(`Tester comment: ${channel.comment}`);
-  if (charts) {
-    charts.push(...populated.map(chart));
-  } else for (const series of populated) {
-    writer.chartGrid([chart(series)], run.clock);
+  if (!deferCharts) for (const series of populated) {
+    writer.chartGrid([channelChart(series, channel, run, deviceName)], run.clock);
     seriesAudit(writer, series, run);
   }
 }
@@ -586,9 +589,9 @@ function drawFooters(doc, project, closedAt) {
 }
 
 /** Export only the supplied closed QC revision. Never reads newer live run data. */
-export async function createTestReportPdf({ state, runId = null, backend, timeRanges = {}, onProgress = () => {} } = {}) {
+export async function createTestReportPdf({ state, runId = null, backend, timeRanges = {}, graphOrders = {}, onProgress = () => {} } = {}) {
   // Capture before the first await, so later UI edits cannot alter an in-flight export.
-  const snapshot = structuredClone({ project: state?.project, testRuns: state?.testRuns, timeRanges });
+  const snapshot = structuredClone({ project: state?.project, testRuns: state?.testRuns, timeRanges, graphOrders });
   const closedAt = approvedReportDate(snapshot);
   const project = { ...snapshot.project, revision: revisionNumber(snapshot.project) };
   if (typeof project.skidName !== "string" || !project.skidName.trim())
@@ -597,8 +600,11 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
   const runs = runId === null ? snapshot.testRuns : snapshot.testRuns.filter((run) => run.id === runId);
   if (!runs.length) throw new Error("No saved test run was found in this closed revision.");
   if (runId !== null && runs.length !== 1) throw new Error("The closed revision contains duplicate test run identifiers.");
-  if (!isTimeRangeMap(snapshot.timeRanges)) throw new Error("Manual graph time ranges must be grouped by test run and device.");
+  if (!isRunDeviceMap(snapshot.timeRanges)) throw new Error("Manual graph time ranges must be grouped by test run and device.");
+  if (!isRunDeviceMap(snapshot.graphOrders)) throw new Error("Graph orders must be grouped by test run and device.");
   const deviceRanges = new Map();
+  const sourceDevices = new Map();
+  const deviceGraphs = new Map();
   for (const run of runs) {
     if (run.walkdownId && run.walkdownId !== project.walkdownId)
       throw new Error("The test report contains data from another skid.");
@@ -610,20 +616,32 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
     run.devices = run.devices.flatMap(device => {
       if (isNotApplicable(device.name) || isNotApplicable(device.status)) return [];
       const channels = device.channels.filter(applicableChannel);
-      return channels.length || !device.channels.length ? [{ ...device, channels }] : [];
+      if (!channels.length && device.channels.length) return [];
+      const filtered = { ...device, channels };
+      sourceDevices.set(filtered, device);
+      return [filtered];
     });
     run.unassignedChannels = (run.unassignedChannels || []).filter(applicableChannel);
     validateReportComment(run.comment, "overall test run comment");
     for (const device of run.devices) validateReportComment(device.comment, "device comment");
     validateSetupPhotos(run, project);
     const ranges = Object.hasOwn(snapshot.timeRanges, run.id) ? snapshot.timeRanges[run.id] : {};
-    if (!isTimeRangeMap(ranges)) throw new Error("Manual graph time ranges must be grouped by test run and device.");
+    if (!isRunDeviceMap(ranges)) throw new Error("Manual graph time ranges must be grouped by test run and device.");
+    const orders = Object.hasOwn(snapshot.graphOrders, run.id) ? snapshot.graphOrders[run.id] : {};
+    if (!isRunDeviceMap(orders)) throw new Error("Graph orders must be grouped by test run and device.");
     for (const device of run.devices) {
       const timeRange = Object.hasOwn(ranges, device.id) ? ranges[device.id] : undefined;
       if (Object.hasOwn(ranges, device.id) && !isTestTimeRange(timeRange, run.clock))
         throw new Error(`The manual graph time range for "${device.name}" is invalid. Select a start before the end within this test run.`);
       const deviceTimeRange = deviceChartTimeRange(device, run.clock);
       deviceRanges.set(device, { timeRange, deviceTimeRange });
+      const graphOrder = Object.hasOwn(orders, device.id) ? orders[device.id] : undefined;
+      if (Object.hasOwn(orders, device.id) && !isGraphOrder(graphOrder))
+        throw new Error(`The graph order for "${device.name}" is invalid. Choose a list of graph identifiers.`);
+      // Resolve keys against the original snapshot before removing N/A channels.
+      // Filtering cannot shift legacy or repeated graph identities.
+      deviceGraphs.set(device, orderDeviceGraphs(sourceDevices.get(device), graphOrder)
+        .filter(({ channel }) => applicableChannel(channel)));
       for (const channel of device.channels)
         for (const series of channel.series || [])
           if (series.points?.length) buildTestChart(series, run.clock, { timeRange, deviceTimeRange });
@@ -701,11 +719,11 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
         const result = resultLabel(device.status);
         writer.paragraph(`Device Test Result: ${result}`, { bold: true, color: resultColor(result) });
       }
-      const charts = [];
       for (const channel of device.channels) channelDetails(writer, channel, run, {
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,
-        charts, deviceName: device.name,
+        deferCharts: true, deviceName: device.name,
       });
+      const charts = deviceGraphs.get(device).map(({ series, channel }) => channelChart(series, channel, run, device.name));
       const { timeRange, deviceTimeRange } = deviceRanges.get(device);
       writer.chartGrid(charts, run.clock, timeRange, deviceTimeRange);
       reportComment(writer, "Device comment", device.comment);

@@ -9,6 +9,8 @@ import { testCommentDraftScope, readTestCommentDrafts, writeTestCommentDraft, re
 import { testCommentBlocks } from "./test-comment-format.js";
 import { testTimeRangeScope, readDeviceTimeRange, saveDeviceTimeRange, resetDeviceTimeRange,
   readTestSelection, rememberTestSelection } from "./test-time-ranges.js";
+import { testGraphOrderScope, normalizeGraphOrder, orderDeviceGraphs,
+  readDeviceGraphOrder, saveDeviceGraphOrder, resetDeviceGraphOrder } from "./test-graph-order.js";
 import { createTestEventEdit, setTestEventEdit, applyTestEventEdits } from "./test-event-edits.js";
 import { UNKNOWN_TIME_ZONE, getLocalTimeZone, getTimeZoneOptions } from "./test-timezones.js";
 import "./test-reports.css";
@@ -111,6 +113,90 @@ function DeviceTimeAxis({ clock, timeRange, onChange, warning }) {
   </form>;
 }
 
+function DeviceGraphOrder({ entries, onChange, warning }) {
+  const [draggedKey, setDraggedKey] = useState(null);
+  const [dropKey, setDropKey] = useState(null);
+  const [announcement, setAnnouncement] = useState("");
+  const dragged = useRef(null);
+  const buttons = useRef(new Map());
+  const pendingFocus = useRef(null);
+  const nameCounts = new Map();
+  for (const entry of entries) nameCounts.set(entry.series.name, (nameCounts.get(entry.series.name) || 0) + 1);
+  useEffect(() => {
+    const pending = pendingFocus.current;
+    if (!pending) return;
+    const preferred = buttons.current.get(`${pending.key}:${pending.direction}`);
+    const fallback = buttons.current.get(`${pending.key}:${pending.direction === "up" ? "down" : "up"}`);
+    (preferred && !preferred.disabled ? preferred : fallback)?.focus();
+    pendingFocus.current = null;
+  }, [entries]);
+  function move(key, targetIndex, direction = null) {
+    const index = entries.findIndex(entry => entry.key === key);
+    if (index < 0 || index === targetIndex || targetIndex < 0 || targetIndex >= entries.length) return;
+    const next = entries.map(entry => entry.key);
+    next.splice(targetIndex, 0, next.splice(index, 1)[0]);
+    if (direction) pendingFocus.current = { key, direction };
+    onChange(next);
+    setAnnouncement(`${entries[index].series.name} moved to position ${targetIndex + 1} of ${entries.length}.`);
+  }
+  function finishDrag() { dragged.current = null; setDraggedKey(null); setDropKey(null); }
+  return <details className="test-graph-order">
+    <summary>Arrange graphs</summary>
+    <p>Drag graphs or use the buttons. Your order saves in this browser and applies to this device’s PDF.</p>
+    <ol aria-label="Graph order">{entries.map((entry, index) => {
+      const label = nameCounts.get(entry.series.name) > 1 ? `${entry.series.name} (graph ${index + 1} of ${entries.length})` : entry.series.name;
+      return <li key={entry.key} draggable
+      className={[draggedKey === entry.key && "is-dragging", dropKey === entry.key && "is-drop-target"].filter(Boolean).join(" ")}
+      onDragStart={event => {
+        dragged.current = entry.key; setDraggedKey(entry.key);
+        if (event.dataTransfer) { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", entry.key); }
+      }} onDragOver={event => {
+        if (!dragged.current || dragged.current === entry.key) return;
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+        setDropKey(entry.key);
+      }} onDrop={event => {
+        if (!dragged.current) return;
+        event.preventDefault(); move(dragged.current, index); finishDrag();
+      }} onDragEnd={finishDrag}>
+      <span className="test-graph-drag-handle" aria-hidden="true">⠿</span>
+      <div className="test-graph-order-label"><strong>{entry.series.name}</strong>
+        <span>{entry.series.unit || (entry.series.kind === "digital" ? "State" : "Recorded value")}</span>
+        <small>{entry.channel.symbolicName || `Channel ${entry.channel.channel}`}</small>
+      </div>
+      <div className="test-graph-order-actions">{["up", "down"].map(direction => <button key={direction} type="button" className="small-button"
+        ref={button => { const key = `${entry.key}:${direction}`; if (button) buttons.current.set(key, button); else buttons.current.delete(key); }}
+        disabled={direction === "up" ? index === 0 : index === entries.length - 1}
+        aria-label={`Move ${label} ${direction}`}
+        onClick={() => move(entry.key, index + (direction === "up" ? -1 : 1), direction)}>Move {direction}</button>)}</div>
+    </li>;
+    })}</ol>
+    <button type="button" className="small-button" onClick={() => {
+      onChange(null); setAnnouncement("Graph order reset to the original order.");
+    }}>Reset graph order</button>
+    <p className="test-graph-order-feedback" role="status" aria-live="polite" aria-atomic="true">{announcement}</p>
+    {warning && <p className="field-error" role="alert">{warning}</p>}
+  </details>;
+}
+
+function graphChannelGroups(device, entries) {
+  const groups = [];
+  for (const entry of entries) {
+    let group = groups.at(-1);
+    if (!group || group.channelIndex !== entry.channelIndex) {
+      group = { key: entry.key, channel: entry.channel, channelIndex: entry.channelIndex, entries: [] };
+      groups.push(group);
+    }
+    group.entries.push(entry);
+  }
+  for (const [channelIndex, channel] of (device?.channels || []).entries()) {
+    if (entries.some(entry => entry.channelIndex === channelIndex)) continue;
+    const next = groups.findIndex(group => group.channelIndex > channelIndex);
+    groups.splice(next < 0 ? groups.length : next, 0, { key: `empty:${channelIndex}`, channel, channelIndex, entries: [] });
+  }
+  return groups;
+}
+
 function TestEventTable({ entries, seriesName = "recorded signal", onExclusionChange, disabled, restoring = false }) {
   return <div className="test-table-scroll"><table>
     <thead><tr><th>Source time</th><th>Previous</th><th>Recorded value</th><th>Source row</th>{onExclusionChange && <th>Action</th>}</tr></thead>
@@ -199,10 +285,12 @@ function Parameters({ parameters = [], title = "Set parameters" }) {
 }
 
 export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDisabled = false, editingComments = true,
-  timeRangeScope = null, selectionScope = null, rangeOverrides = {}, onTimeRangeChange, onEventExclusionChange }) {
+  timeRangeScope = null, selectionScope = null, rangeOverrides = {}, onTimeRangeChange, onEventExclusionChange,
+  graphOrderScope = null, orderOverrides = {}, onGraphOrderChange }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(() => readTestSelection(selectionScope, runId));
   const [localRanges, setLocalRanges] = useState({});
+  const [localOrders, setLocalOrders] = useState({});
   const devices = run.devices || [];
   const shown = useMemo(() => devices.filter(device => `${device.name} ${device.status}`.toLowerCase().includes(search.toLowerCase())), [devices, search]);
   const device = shown.find(item => item.id === selected) || shown[0];
@@ -217,11 +305,24 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
     startMs: Math.min(automaticRange.startMs, chosenRange.range?.startMs ?? automaticRange.startMs),
     endMs: Math.max(automaticRange.endMs, chosenRange.range?.endMs ?? automaticRange.endMs) };
   const sliderKey = JSON.stringify([viewKey, sliderClock.startMs, sliderClock.endMs, chosenRange.range]);
+  const orderViewKey = JSON.stringify([graphOrderScope, runId, device?.id]);
+  const storedOrder = useMemo(() => readDeviceGraphOrder(graphOrderScope, runId, device), [graphOrderScope, runId, device]);
+  const chosenOrder = localOrders[orderViewKey] || (Object.hasOwn(orderOverrides, device?.id)
+    ? { order: orderOverrides[device?.id], error: "" } : storedOrder);
+  const orderedGraphs = useMemo(() => orderDeviceGraphs(device, chosenOrder.order), [device, chosenOrder.order]);
+  const graphGroups = graphChannelGroups(device, orderedGraphs);
   function changeTimeRange(range) {
     const error = range ? saveDeviceTimeRange(timeRangeScope, runId, device.id, run.clock, range)
       : resetDeviceTimeRange(timeRangeScope, runId, device.id);
     setLocalRanges(previous => ({ ...previous, [viewKey]: { range, error } }));
     onTimeRangeChange?.(timeRangeScope, runId, device.id, range);
+  }
+  function changeGraphOrder(order) {
+    const normalized = order === null ? null : normalizeGraphOrder(device, order);
+    const error = normalized ? saveDeviceGraphOrder(graphOrderScope, runId, device, normalized)
+      : resetDeviceGraphOrder(graphOrderScope, runId, device.id);
+    setLocalOrders(previous => ({ ...previous, [orderViewKey]: { order: normalized, error } }));
+    onGraphOrderChange?.(graphOrderScope, runId, device.id, normalized);
   }
   const counts = devices.reduce((result, item) => ({ ...result, [item.status]: (result[item.status] || 0) + 1 }), {});
   const noteClarification = importNoteClarification(run.warnings);
@@ -256,22 +357,25 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
           <div className="test-device-heading"><h3>{device.name}</h3><TestStatus status={device.status} /></div>
           <DeviceTimeAxis key={sliderKey} clock={sliderClock} timeRange={chosenRange.range}
             onChange={changeTimeRange} warning={chosenRange.error} />
-          {(device.channels || []).map(channel => {
+          {orderedGraphs.length > 1 && <DeviceGraphOrder key={orderViewKey} entries={orderedGraphs}
+            onChange={changeGraphOrder} warning={chosenOrder.error} />}
+          {graphGroups.map(group => {
+            const { channel } = group;
             const station = run.stations?.find(item => item.id === channel.stationId);
             const module = station?.modules?.find(item => item.slot === channel.slot);
-            return <section className="test-channel" key={channel.id}>
+            return <section className="test-channel" key={group.key}>
               <div className="test-channel-heading"><div><h4>{channel.symbolicName}</h4>
                 <p>{station?.name || channel.stationId} · Slot {channel.slot} · Channel {channel.channel}
                   {channel.sourceChannel !== channel.channel && ` (CSV channel ${channel.sourceChannel})`} · {channel.role}</p>
                 {module?.name && <small>{module.name}</small>}</div><TestStatus status={channel.status} /></div>
               <p className="test-source-result">Recorded wiring status: <strong>{channel.rawStatus || "Not recorded"}</strong>{channel.comment ? ` · ${channel.comment}` : ""}</p>
-              {!channel.series?.some(series => series.points?.length) && <p className="test-muted">No signal changes were recorded for this channel in the supplied logs.</p>}
-              {(channel.series || []).map((series, seriesIndex) => series.points?.length ?
-                <TestSeriesChart key={series.id || seriesIndex} series={series} clock={run.clock}
+              {!group.entries.length && <p className="test-muted">No signal changes were recorded for this channel in the supplied logs.</p>}
+              {group.entries.map(({ key, series, seriesIndex }) =>
+                <TestSeriesChart key={key} series={series} clock={run.clock}
                   timeRange={chosenRange.range} deviceTimeRange={automaticRange}
                   editsDisabled={commentsDisabled} showInitialState={isDigitalOutputChannel(channel)}
                   onExclusionChange={onEventExclusionChange && ((pointIndex, excluded) =>
-                    onEventExclusionChange(device.id, channel.id, seriesIndex, pointIndex, excluded))} /> : null)}
+                    onEventExclusionChange(device.id, channel.id, seriesIndex, pointIndex, excluded))} />)}
               <Parameters parameters={channel.parameters} />
               {module?.parameters?.length > 0 && <Parameters parameters={module.parameters} title="Shared module parameters" />}
             </section>;
@@ -311,7 +415,7 @@ function ScopedTestReportsPanel({
   project, runs = [], inspector, readOnly = false, pending = false, exportProgress = "",
   onSave, onDelete, onExport, onReview, onDirtyChange,
   getPhotoUrl, onAddSetupPhoto, onUpdateSetupPhoto, onRemoveSetupPhoto, onReorderSetupPhotos, cacheScope, storageScope,
-  timeRangeChanges = {}, onTimeRangeChange,
+  timeRangeChanges = {}, onTimeRangeChange, graphOrderChanges = {}, onGraphOrderChange,
 }) {
   const timeZoneId = useId();
   const computerTimeZone = getLocalTimeZone();
@@ -498,6 +602,7 @@ function ScopedTestReportsPanel({
     clock: { ...draft.data.clock, timeZone: draft.timeZone } } : null) : selectedRun;
   const canComment = draft ? !readOnly && !stale : selectedRun && canEdit(selectedRun);
   const rangeScope = testTimeRangeScope(storageScope, inspector?.id, draft?.walkdownId || project.walkdownId, draft?.revision || project.revision);
+  const orderScope = testGraphOrderScope(storageScope, inspector?.id, draft?.walkdownId || project.walkdownId, draft?.revision || project.revision);
   const previewRunId = preview?.id || draft?.id;
   return <section className="test-reports" aria-label="I/O test reports">
     <div className="card test-intro">
@@ -581,7 +686,8 @@ function ScopedTestReportsPanel({
       <TestRunDetail key={preview.id || draft?.id} run={preview} onCommentChange={canComment ? changeComment : undefined}
         onEventExclusionChange={canComment ? changeEventExclusion : undefined}
         commentsDisabled={blocked || setupDirty} editingComments={Boolean(draft)} runId={previewRunId} timeRangeScope={rangeScope} selectionScope={cacheScope}
-        rangeOverrides={timeRangeChanges[rangeScope]?.[previewRunId]} onTimeRangeChange={onTimeRangeChange} /></section>}
+        rangeOverrides={timeRangeChanges[rangeScope]?.[previewRunId]} onTimeRangeChange={onTimeRangeChange}
+        graphOrderScope={orderScope} orderOverrides={graphOrderChanges[orderScope]?.[previewRunId]} onGraphOrderChange={onGraphOrderChange} /></section>}
     {!preview && !draft && <div className="card test-empty"><Icon name="report" size={36} /><h3>No test runs in this revision</h3><p>{readOnly ? "Start a new revision to import a test run." : "Import the files for your test, review the devices and parameters, then save the run."}</p></div>}
   </section>;
 }
