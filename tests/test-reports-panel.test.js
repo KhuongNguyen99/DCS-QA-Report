@@ -656,6 +656,195 @@ const graphButton = (h, name) => Array.from(firstGraph(h).querySelectorAll('butt
   button.textContent.trim() === name || button.getAttribute('aria-label') === name);
 const sourceTimeInput = offset => new Date(startMs + offset).toISOString().replace(/Z$/, '');
 
+function selectedGraphRun() {
+  const run = eventRun();
+  run.devices[0].comment = '';
+  const feedback = run.devices[0].channels[1].series[0];
+  const sample = (index, offset, value, extra = {}) => ({ time: sourceTimeInput(offset).replace('T', ' '),
+    timeMs: startMs + offset, value, rawValue: `${value} V`, valid: true, sourceId: 'source-1', sourceRow: index + 10, ...extra });
+  Object.assign(feedback, { name: 'Peer feedback', kind: 'analog', unit: 'V', points: [
+    sample(0, 1000, 0.1), sample(1, 5000, 0.5, { excluded: true }), sample(2, 10_000, null, { valid: false }),
+    sample(3, 15_000, 0.31), sample(4, 15_000, 0.31), sample(5, 40_000, 0),
+  ] });
+  const other = structuredClone(run.devices[0]); other.id = 'other'; other.name = 'OTHER'; other.channels = [other.channels[1]];
+  other.channels[0].series[0].points = [sample(10, 1000, 0.1), sample(11, 10_000, null, { valid: false }),
+    sample(12, 25_000, 0.31), sample(13, 25_000, 0.31), sample(14, 30_000, 0.4), sample(15, 45_000, 0.6)]
+    .map(point => ({ ...point, sourceId: 'source-2' }));
+  run.devices.push(other);
+  run.sources.push({ ...run.sources[0], id: 'source-2', name: 'other-events.csv' });
+  return run;
+}
+
+function selectedGraphReferences(run) {
+  const owner = deviceGraphEntries(run.devices[0])[0].key;
+  const peer = deviceGraphEntries(run.devices[0]).find(entry => entry.series.name === 'Peer feedback').key;
+  const other = deviceGraphEntries(run.devices[1])[0].key;
+  return { owner, peer, other, peerChoice: JSON.stringify(['valve', peer]), otherChoice: JSON.stringify(['other', other]) };
+}
+
+test("selected-graph point picking keeps foreign source identities through duplicate readings, save, editing and reload", async t => {
+  const run = selectedGraphRun(), refs = selectedGraphReferences(run), before = structuredClone(run);
+  const h = await setup(t, { runs: [run] });
+  await applyRange(h, 5000, 35_000);
+  await h.click(graphButton(h, 'Add duration calculation'));
+  await h.fill(h.field('Calculation name'), 'Foreign points');
+  await h.select(h.field('Start time source'), 'trigger');
+  await h.select(h.field('Start threshold graph'), refs.peerChoice);
+  await h.fill(h.field('Start threshold'), '0.25');
+  await h.click(h.button('Pick start point from selected graph'));
+  let picker = h.query('.test-graph-point-picker');
+  assert.ok(picker);
+  assert.equal(picker.querySelector('form'), null, 'the inline picker never nests a form');
+  assert.equal(picker.querySelector('svg').dataset.pickerTimeStart, String(startMs + 5000));
+  assert.equal(picker.querySelector('svg').dataset.pickerTimeEnd, String(startMs + 35_000));
+  assert.deepEqual(Array.from(h.field('Start recorded point').options, option => option.value), ['', '3', '4'],
+    'removed, invalid and out-of-window readings never become selectable');
+  const dots = picker.querySelectorAll('.test-observation[role="button"]');
+  assert.equal(dots.length, 2);
+  assert.equal(dots[0].getAttribute('cx'), dots[1].getAttribute('cx'));
+  assert.equal(dots[0].getAttribute('cy'), dots[1].getAttribute('cy'));
+  assert.equal(h.document.activeElement, dots[0]);
+  assert.match(h.field('Start recorded point').options[2].textContent, /source row 14.*event 5/);
+  await h.select(h.field('Start recorded point'), '4');
+  await h.click(h.button('Use selected start point'));
+  assert.equal(h.query('.test-graph-point-picker'), null);
+  assert.equal(h.field('Start time source').value, 'point');
+  assert.equal(h.field('Start point graph').value, refs.peerChoice);
+  await h.select(h.field('End time source'), 'trigger');
+  await h.select(h.field('End threshold graph'), refs.otherChoice);
+  await h.click(h.button('Pick end point from selected graph'));
+  picker = h.query('.test-graph-point-picker');
+  const endDot = picker.querySelector('.test-observation[data-point-index="3"]');
+  assert.match(endDot.getAttribute('aria-label'), /OTHER|other-events\.csv/);
+  await h.window.act(async () => endDot.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+  assert.equal(h.field('End time source').value, 'point');
+  assert.equal(h.field('End point graph').value, refs.otherChoice);
+  await h.click(h.button('Add calculation'));
+  assert.match(firstGraph(h).querySelector('.test-duration-list').textContent, /10 seconds/);
+  const stored = h.stored();
+  await h.click(h.button('Save test run'));
+  const payload = structuredClone(h.window.calls[0].payload), graph = payload.graphTools.graphs[0], measurement = graph.measurements[0];
+  assert.equal(payload.graphTools.graphs.length, 1);
+  assert.equal(graph.deviceId, 'valve'); assert.equal(graph.graphKey, refs.owner, 'the owner remains the original POS graph');
+  assert.deepEqual(measurement.start, { kind: 'point', deviceId: 'valve', graphKey: refs.peer, pointIndex: 4,
+    timeMs: startMs + 15_000, value: 0.31, sourceId: 'source-1', sourceRow: 14 });
+  assert.deepEqual(measurement.end, { kind: 'point', deviceId: 'other', graphKey: refs.other, pointIndex: 3,
+    timeMs: startMs + 25_000, value: 0.31, sourceId: 'source-2', sourceRow: 23 });
+  assert.deepEqual(payload.devices, before.devices);
+  await h.settle();
+  await h.click(h.button('Edit calculation Foreign points'));
+  assert.equal(h.field('Start point graph').value, refs.peerChoice);
+  assert.equal(h.field('End point graph').value, refs.otherChoice);
+  await h.click(h.button('Cancel calculation'));
+  const recovered = await setup(t, { runs: [run] }, { stored });
+  assert.match(firstGraph(recovered).querySelector('.test-duration-list').textContent, /10 seconds/);
+  await recovered.click(recovered.button('Save test run'));
+  assert.deepEqual(structuredClone(recovered.window.calls[0].payload.graphTools), payload.graphTools);
+  await recovered.settle();
+  const removed = structuredClone(payload);
+  removed.devices[0].channels[1].series[0].points[4].excluded = true;
+  await h.configure({ runs: [{ ...removed, createdBy: 'inspector-1', runVersion: 8 }], readOnly: true });
+  assert.match(firstGraph(h).querySelector('.test-duration-list').textContent, /selected point is removed/,
+    'removing the selected duplicate cannot silently retarget its equal-time peer');
+  assert.deepEqual(run, before);
+});
+
+test("selected-graph picking cancels cleanly on source changes and refuses points outside the active device interval", async t => {
+  const run = selectedGraphRun(), refs = selectedGraphReferences(run);
+  const h = await setup(t, { runs: [run] });
+  await applyRange(h, 5000, 35_000);
+  await h.click(graphButton(h, 'Add duration calculation'));
+  await h.fill(h.field('Calculation name'), 'Keep selected source');
+  await h.select(h.field('Start time source'), 'trigger');
+  await h.select(h.field('Start threshold graph'), refs.peerChoice);
+  await h.fill(h.field('Start threshold'), '0.25');
+  await h.click(h.button('Pick start point from selected graph'));
+  await h.select(h.field('Start recorded point'), '4');
+  await h.click(h.button('Cancel point picking'));
+  assert.equal(h.field('Start time source').value, 'trigger');
+  assert.equal(h.field('Start threshold graph').value, refs.peerChoice);
+  assert.equal(h.field('Start threshold').value, '0.25');
+  assert.equal(h.document.activeElement, h.button('Pick start point from selected graph'));
+  await h.click(h.button('Pick start point from selected graph'));
+  await h.select(h.field('Start threshold graph'), refs.otherChoice);
+  assert.equal(h.query('.test-graph-point-picker'), null, 'changing the source graph closes its prior picker');
+  await h.click(h.button('Pick start point from selected graph'));
+  assert.match(h.query('.test-graph-point-picker').getAttribute('aria-label'), /OTHER/);
+  await h.select(h.field('Start time source'), 'point');
+  assert.equal(h.query('.test-graph-point-picker'), null);
+  await h.click(h.button('Pick start point'));
+  await h.select(h.field('Start recorded point'), '4');
+  await h.click(h.button('Use selected start point'));
+  await h.select(h.field('Start point graph'), refs.peerChoice);
+  await h.select(h.field('End time source'), 'time');
+  await h.fill(h.field('End source time'), sourceTimeInput(35_000));
+  await h.click(h.button('Add calculation'));
+  assert.match(firstGraph(h).querySelector('.field-error').textContent, /Pick a recorded start point/);
+  await h.click(h.button('Pick start point'));
+  await applyRange(h, 31_000, 35_000);
+  assert.ok(h.query('.test-graph-point-picker .test-trace'), 'the visible connecting trace does not invent a selectable observation');
+  assert.equal(h.query('.test-graph-point-picker .test-observation'), null);
+  assert.match(h.query('.test-graph-point-picker').textContent, /No retained valid readings/);
+  assert.equal(h.field('Start recorded point').disabled, true);
+  assert.equal(h.button('Use selected start point').disabled, true);
+  await h.window.act(async () => h.query('.test-graph-point-picker').dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+  assert.equal(h.query('.test-graph-point-picker'), null);
+  await h.click(h.button('Pick start point'));
+  await h.configure({ readOnly: true, checkerRequired: true });
+  assert.equal(h.query('.test-graph-point-picker'), null);
+  assert.equal(h.field('Calculation name').value, 'Keep selected source');
+  assert.equal(h.field('Calculation name').matches(':disabled'), true);
+  assert.equal(h.window.calls.length, 0);
+});
+
+test("threshold editors capture device windows while saved and legacy calculation results remain stable until editing", async t => {
+  const run = selectedGraphRun(), refs = selectedGraphReferences(run);
+  const legacy = { id: 'legacy', name: 'Legacy result', unit: 's',
+    start: { kind: 'trigger', deviceId: 'valve', graphKey: refs.peer, operator: '>', threshold: 0.25 },
+    end: { kind: 'time', timeMs: startMs + 35_000 } };
+  run.graphTools = { version: 1, deviceNames: [], graphs: [{ deviceId: 'valve', graphKey: refs.owner, measurements: [legacy] }] };
+  const h = await setup(t, { runs: [run] });
+  await applyRange(h, 16_000, 35_000);
+  assert.match(firstGraph(h).querySelector('.test-duration-list').textContent, /20 seconds/);
+  assert.equal(h.window.dirty.at(-1), false, 'viewing a legacy calculation through another axis cannot rewrite it');
+  await h.click(h.button('Edit calculation Legacy result'));
+  assert.equal(h.window.dirty.at(-1), true, 'editing adopts the active device interval explicitly');
+  assert.match(firstGraph(h).querySelector('.test-duration-editor').textContent, /No retained valid observation.*selected device time range/);
+  await h.click(h.button('Cancel calculation'));
+  assert.equal(h.window.dirty.at(-1), false);
+  await applyRange(h, 5000, 35_000);
+  await h.click(graphButton(h, 'Add duration calculation'));
+  await h.fill(h.field('Calculation name'), 'Windowed response');
+  for (const [label, graph] of [['Start', refs.peerChoice], ['End', refs.otherChoice]]) {
+    await h.select(h.field(`${label} time source`), 'trigger');
+    await h.select(h.field(`${label} threshold graph`), graph);
+    await h.fill(h.field(`${label} threshold`), '0.25');
+  }
+  assert.match(firstGraph(h).querySelector('.test-duration-editor').textContent, /10 seconds/);
+  await applyRange(h, 16_000, 35_000);
+  assert.match(firstGraph(h).querySelector('.test-duration-editor').textContent, /No retained valid observation.*selected device time range/);
+  await applyRange(h, 10_000, 30_000);
+  await h.click(h.button('Add calculation'));
+  await h.click(h.button('Save test run'));
+  const payload = structuredClone(h.window.calls[0].payload);
+  assert.deepEqual(payload.graphTools.graphs[0].measurements[0], legacy);
+  const bounded = payload.graphTools.graphs[0].measurements[1];
+  const selectedRange = { startMs: startMs + 10_000, endMs: startMs + 30_000 };
+  assert.deepEqual(bounded.start.timeRange, selectedRange);
+  assert.deepEqual(bounded.end.timeRange, selectedRange);
+  await h.settle();
+  await applyRange(h, 16_000, 35_000);
+  assert.match(firstGraph(h).querySelector('.test-duration-list').textContent, /Windowed response.*10 seconds/);
+  assert.equal(h.window.dirty.at(-1), false);
+  const reloaded = await setup(t, { runs: [{ ...payload, createdBy: 'inspector-1', runVersion: 8 }] }, { stored: h.stored() });
+  assert.match(firstGraph(reloaded).querySelector('.test-duration-list').textContent, /Windowed response.*10 seconds/);
+  await reloaded.click(reloaded.button('Edit calculation Windowed response'));
+  assert.match(firstGraph(reloaded).querySelector('.test-duration-editor').textContent, /No retained valid observation.*selected device time range/);
+  await reloaded.click(reloaded.button('Cancel calculation'));
+  assert.match(firstGraph(reloaded).querySelector('.test-duration-list').textContent, /Windowed response.*10 seconds/);
+  assert.equal(reloaded.window.dirty.at(-1), false);
+});
+
 test("device and graph display names and line, step, and smooth styles save without changing source names or readings", async t => {
   const run = eventRun(); run.devices[0].comment = '';
   const before = structuredClone(run);
@@ -784,6 +973,9 @@ test("calculation arrows align trigger-to-point times, expand every device graph
   const before = structuredClone(run);
   const h = await setup(t, { runs: [run] });
   expectSharedAxis(h, startMs + 99_000, startMs + 161_000);
+  const rangeScope = testTimeRangeScope('https://example.supabase.co', 'inspector-1', project.walkdownId, project.revision);
+  await h.configure({ timeRangeChanges: { [rangeScope]: { [run.id]: { valve: { startMs: startMs + 10_000, endMs: startMs + 161_000 } } } } });
+  expectSharedAxis(h, startMs + 10_000, startMs + 161_000);
   const figure = firstGraph(h);
   await h.click(graphButton(h, 'Add duration calculation'));
   await h.fill(h.field('Calculation name'), 'Valve response');
@@ -796,6 +988,7 @@ test("calculation arrows align trigger-to-point times, expand every device graph
     .dispatchEvent(new h.window.MouseEvent('click', { bubbles: true })));
   assert.equal(figure.querySelector('.test-calculation-annotation'), null, 'unapplied editor values do not change the graph');
   await h.click(h.button('Add calculation'));
+  await h.click(h.button('Reset to auto'));
   const annotation = () => figure.querySelector('.test-calculation-annotation');
   assert.match(annotation().textContent, /Valve response.*100 s/);
   assert.match(figure.querySelector('svg').getAttribute('aria-label'), /Valve response.*100 s.*12:00:10.*12:01:50/);

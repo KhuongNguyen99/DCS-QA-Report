@@ -1219,7 +1219,7 @@ $$;
 
 create or replace function qa_private.validate_graph_endpoint(p_endpoint jsonb)
 returns void language plpgsql immutable set search_path = '' as $$
-declare kind text; number numeric;
+declare kind text; number numeric; bounds jsonb; range_start numeric; range_end numeric;
 begin
   if jsonb_typeof(p_endpoint) is distinct from 'object' then
     raise exception 'A graph calculation endpoint must be a point, time, or trigger.';
@@ -1253,13 +1253,30 @@ begin
       end if;
     end if;
   elsif kind = 'trigger' then
-    if p_endpoint - array['kind','deviceId','graphKey','operator','threshold'] <> '{}'::jsonb
+    if p_endpoint - array['kind','deviceId','graphKey','operator','threshold','timeRange'] <> '{}'::jsonb
       or coalesce(p_endpoint->>'operator','') not in ('>','>=','<','<=')
       or jsonb_typeof(p_endpoint->'threshold') is distinct from 'number' then
       raise exception 'A graph calculation trigger needs a comparison and numeric threshold.';
     end if;
     if abs((p_endpoint->>'threshold')::numeric) > 1.7976931348623157e308 then
       raise exception 'A graph calculation trigger exceeds the supported numeric range.';
+    end if;
+    if p_endpoint ? 'timeRange' then
+      bounds := p_endpoint->'timeRange';
+      if jsonb_typeof(bounds) is distinct from 'object' then
+        raise exception 'A graph calculation trigger time range must contain startMs and endMs.';
+      end if;
+      if bounds - array['startMs','endMs'] <> '{}'::jsonb
+        or jsonb_typeof(bounds->'startMs') is distinct from 'number'
+        or jsonb_typeof(bounds->'endMs') is distinct from 'number' then
+        raise exception 'A graph calculation trigger time range must contain only numeric startMs and endMs.';
+      end if;
+      range_start := (bounds->>'startMs')::numeric;
+      range_end := (bounds->>'endMs')::numeric;
+      if abs(range_start) > 8640000000000000 or abs(range_end) > 8640000000000000
+        or range_start <> trunc(range_start) or range_end <> trunc(range_end) or range_start > range_end then
+        raise exception 'A graph calculation trigger time range needs ordered whole-millisecond timestamps within the supported range.';
+      end if;
     end if;
   else
     raise exception 'A graph calculation endpoint must be a point, time, or trigger.';

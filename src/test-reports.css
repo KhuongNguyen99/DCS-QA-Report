@@ -187,6 +187,8 @@
 .test-duration-point p { margin-top: 8px; }
 .test-duration-threshold { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .test-duration-threshold > div { display: grid; gap: 7px; align-content: start; min-width: 0; }
+.test-pick-selected-graph { justify-self: start; text-align: left; }
+.test-threshold-time-range { overflow-wrap: anywhere; }
 .test-point-picker { margin: 10px 14px; padding: 12px; border: 1px solid #c3a34e; border-radius: 6px; background: #fff9e8; font-size: 12px; }
 .test-point-picker p { margin: 6px 0 10px; line-height: 1.5; }
 .test-graph-editor-notice,

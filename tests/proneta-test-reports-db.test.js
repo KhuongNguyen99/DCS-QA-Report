@@ -127,6 +127,53 @@ test("graph names, drawing styles and named calculations save with the run and f
   await assert.rejects(h.db.query("select qa_private.validate_graph_tools($1::jsonb)", [JSON.stringify(data.graphTools)]), /permission denied/);
 });
 
+test("trigger time ranges save without altering legacy endpoints and remain frozen through repeated migrations", async t => {
+  const h = await database(t), report = await h.rpc("qa_create_walkdown", "Scoped graph thresholds");
+  await h.rpc("qa_set_checked_by", report.id, "Graph checker", 1, null);
+  const data = runData(), id = crypto.randomUUID();
+  data.graphTools = authoredGraphTools(data);
+  const legacy = await h.rpc("qa_save_test_run", report.id, id, data, 1, null);
+  assert.equal(Object.hasOwn(legacy.graphTools.graphs[0].measurements[0].start, "timeRange"), false);
+  const scoped = structuredClone(data);
+  scoped.graphTools.graphs[0].measurements[0].start.timeRange = {
+    startMs: data.clock.startMs + 1000, endMs: data.clock.endMs,
+  };
+  scoped.graphTools.graphs[0].measurements.push({
+    id: "bounded-end", name: "Bounded end trigger", unit: "s",
+    start: { kind: "time", timeMs: data.clock.startMs },
+    end: { ...data.graphTools.graphs[0].measurements[0].start,
+      timeRange: { startMs: data.clock.endMs, endMs: data.clock.endMs } },
+  });
+  const saved = await h.rpc("qa_save_test_run", report.id, id, scoped, 1, legacy.runVersion);
+  assert.deepEqual(saved.graphTools, scoped.graphTools);
+  assert.deepEqual(saved.devices, data.devices, "bounded search settings never rewrite source observations");
+  assert.equal(saved.runVersion, legacy.runVersion + 1);
+  assert.equal(saved.updatedBy, admin);
+  const current = await h.state(report.id);
+  await h.rpc("qa_approve_revision", report.id, 1, current.project.contentVersion);
+  const before = await h.state(report.id), archive = await h.rpc("qa_load_revision", report.id, 1);
+  await h.db.exec("reset role");
+  for (let pass = 0; pass < 2; pass++) {
+    await h.db.exec(qcMigration);
+    await h.db.exec(migration);
+    await h.db.exec(setupMigration);
+  }
+  await h.db.exec(schema);
+  // Structural validation shares the Date limits with JS. Resolution separately
+  // checks whether these bounds belong to the particular test run.
+  for (const timeRange of [
+    { startMs: -8640000000000000, endMs: 8640000000000000 },
+    { startMs: -8640000000000000, endMs: -8640000000000000 },
+    { startMs: 8640000000000000, endMs: 8640000000000000 },
+  ]) await h.db.query("select qa_private.validate_graph_endpoint($1::jsonb)", [JSON.stringify({
+    ...data.graphTools.graphs[0].measurements[0].start, timeRange,
+  })]);
+  await h.user();
+  assert.deepEqual(await h.state(report.id), before, "reapplying either SQL entry point preserves data, versions, and content tokens");
+  assert.deepEqual(await h.rpc("qa_load_revision", report.id, 1), archive, "approved bounded calculations stay immutable");
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, data, 1, saved.runVersion), /approved and closed/);
+});
+
 test("graph tools reject malformed formulas, duplicate references and unsupported fields before changing a run", async t => {
   const h = await database(t), report = await h.rpc("qa_create_walkdown", "Graph validation");
   await h.rpc("qa_set_checked_by", report.id, "Graph checker", 1, null);
@@ -159,6 +206,18 @@ test("graph tools reject malformed formulas, duplicate references and unsupporte
   mutate(value => { value.graphs[0].measurements[0].end.sourceRow = 0; });
   mutate(value => { value.graphs[0].measurements[1].start.timeMs = 0.5; });
   mutate(value => { value.graphs[0].measurements[1].end = { kind: "other", timeMs: base.clock.endMs }; });
+  for (const timeRange of [
+    null, [], "range", true, 0, {}, { startMs: 0 }, { endMs: 1 },
+    { startMs: 0, endMs: 1, extra: true }, { startMs: "0", endMs: 1 },
+    { startMs: 0, endMs: "1" }, { startMs: null, endMs: 1 }, { startMs: 0, endMs: null },
+    { startMs: false, endMs: 1 }, { startMs: 0, endMs: [] },
+    { startMs: 0.5, endMs: 1 }, { startMs: 0, endMs: 1.5 }, { startMs: 1, endMs: 0 },
+    { startMs: -8640000000000001, endMs: 0 }, { startMs: 0, endMs: 8640000000000001 },
+    { startMs: 8640000000000001, endMs: 8640000000000001 },
+    { startMs: -8640000000000001, endMs: -8640000000000001 },
+  ]) mutate(value => { value.graphs[0].measurements[0].start.timeRange = timeRange; });
+  mutate(value => { value.graphs[0].measurements[0].end.timeRange = { startMs: 0, endMs: 1 }; });
+  mutate(value => { value.graphs[0].measurements[1].start.timeRange = { startMs: 0, endMs: 1 }; });
   for (const graphTools of variants)
     await assert.rejects(h.rpc("qa_save_test_run", report.id, id, { ...base, graphTools }, 1, saved.runVersion), /graph|calculation/i);
   assert.deepEqual(await h.state(report.id), before, "invalid settings cannot alter source data, versions, or approval review tokens");

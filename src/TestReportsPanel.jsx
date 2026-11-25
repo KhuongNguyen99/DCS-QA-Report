@@ -328,7 +328,7 @@ export function TestSeriesChart({ series, clock, timeRange = null, deviceTimeRan
       </div>
       <p>{chart.initialLabel && <>{chart.initialLabel}. </>}{chart.manualTimeRange ? `${chart.visibleObservedCount} of ${chart.observedCount}` : chart.observedCount} recorded change values{chart.manualTimeRange && " shown"}{chart.invalidCount ? ` · ${chart.invalidCount} invalid readings` : ""}{chart.excludedCount ? ` · ${chart.excludedCount} removed events` : ""}. {chart.interpolation === "step" ? series.kind === "digital" ? "Steps connect recorded states" : "Steps hold each recorded value until the next reading" : chart.interpolation === "smooth" ? "Smooth curves connect recorded readings" : "Lines connect recorded readings"}; the dashed tail holds the last value to the graph end. {chart.manualTimeRange ? "The manual device time range applies; readings outside it remain in the recorded events." : "All graphs for this device share the same automatic time axis."}{clock.basis === "absolute" && " Times are UTC."}</p>
       {run && graphKey && <GraphToolsPanel run={run} deviceId={deviceId} graphKey={graphKey} sourceName={series.name} settings={settings}
-        graphChoices={graphChoices} scope={graphEditorScope} canEdit={Boolean(onGraphSettingsChange)} disabled={editsDisabled}
+        graphChoices={graphChoices} graphTimeRange={chart.domain} scope={graphEditorScope} canEdit={Boolean(onGraphSettingsChange)} disabled={editsDisabled}
         editorKey={JSON.stringify([run.id, deviceId, graphKey])} onDirtyChange={onGraphEditorDirty} onChange={onGraphSettingsChange}
         picking={canPick ? picker.field : null} onStartPick={(field, choose) => { setPicker({ field, choose }); setPickError(""); }}
         onCancelPick={cancelPicking} />}

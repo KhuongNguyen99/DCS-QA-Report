@@ -1,0 +1,12 @@
+.test-graph-point-picker { margin-top: 8px; padding: 12px; border: 1px solid #b7cbdc; border-radius: 7px; background: #f5f9fc; min-width: 0; }
+.test-graph-point-picker-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.test-graph-point-picker-heading > strong { font-size: 12px; overflow-wrap: anywhere; }
+.test-graph-point-picker p { margin: 8px 0; font-size: 11px; line-height: 1.6; }
+.test-graph-point-picker-range { color: #596a7a; font-variant-numeric: tabular-nums; }
+.test-graph-point-picker-scroll { overflow-x: auto; margin: 10px -4px; }
+.test-graph-point-picker-scroll > svg { display: block; width: 100%; min-width: 410px; background: #fff; }
+.test-graph-point-picker svg text { fill: #65735f; font: 11px "QC Sans", sans-serif; }
+.test-graph-point-picker .test-observation.is-selected { stroke: #c1850c; stroke-width: 3; opacity: 1; }
+.test-graph-point-picker > label { display: block; margin: 10px 0 7px; }
+.test-graph-point-picker > select { display: block; width: 100%; max-width: 100%; }
+.test-graph-point-picker-use { margin-top: 10px; }

@@ -1,5 +1,5 @@
 import { deviceGraphEntries } from "./test-graph-order.js";
-import { formatTestValue } from "./test-chart.js";
+import { formatSourceTime, formatTestValue } from "./test-chart.js";
 
 const STYLES = new Set(["auto", "line", "step", "smooth"]);
 const UNITS = { s: 1000, min: 60_000, h: 3_600_000 };
@@ -12,6 +12,8 @@ const keys = (value, required, optional = []) => object(value)
   && required.every(key => Object.hasOwn(value, key))
   && Object.keys(value).every(key => required.includes(key) || optional.includes(key));
 const own = (value, key) => Object.hasOwn(value, key);
+const validTriggerTimeRange = value => keys(value, ["startMs", "endMs"])
+  && timestamp(value.startMs) && timestamp(value.endMs) && value.startMs <= value.endMs;
 
 function validEndpoint(value) {
   if (!object(value)) return false;
@@ -23,8 +25,9 @@ function validEndpoint(value) {
     && timestamp(value.timeMs) && Number.isFinite(value.value)
     && (!own(value, "sourceId") || text(value.sourceId))
     && (!own(value, "sourceRow") || (Number.isSafeInteger(value.sourceRow) && value.sourceRow >= 1));
-  if (value.kind === "trigger") return keys(value, ["kind", "deviceId", "graphKey", "operator", "threshold"])
-    && text(value.deviceId) && text(value.graphKey) && OPERATORS.has(value.operator) && Number.isFinite(value.threshold);
+  if (value.kind === "trigger") return keys(value, ["kind", "deviceId", "graphKey", "operator", "threshold"], ["timeRange"])
+    && text(value.deviceId) && text(value.graphKey) && OPERATORS.has(value.operator) && Number.isFinite(value.threshold)
+    && (!own(value, "timeRange") || validTriggerTimeRange(value.timeRange));
   return false;
 }
 
@@ -170,15 +173,20 @@ export function resolveGraphMeasurement(run, measurement, tools = run?.graphTool
     if (endpoint.kind === "time") return inClock(endpoint.timeMs, run.clock)
       ? { ...result, status: "resolved", timeMs: endpoint.timeMs, detail: "Manual source time" }
       : { ...result, status: "invalid", reason: "The manual source time is outside this test run.", detail: "Manual source time" };
+    const timeRange = endpoint.kind === "trigger" ? endpoint.timeRange : null;
+    const rangeDetail = timeRange ? ` within the selected device time range ${formatSourceTime(timeRange.startMs, true, true)} to ${formatSourceTime(timeRange.endMs, true, true)}` : "";
+    if (timeRange && (!inClock(timeRange.startMs, run.clock) || !inClock(timeRange.endMs, run.clock)))
+      return { ...result, status: "invalid", reason: "The selected device time range for this graph threshold is outside the test run.",
+        detail: `Graph trigger: value ${endpoint.operator} ${String(endpoint.threshold)}${rangeDetail}` };
     const entry = findGraph(entries, endpoint.deviceId, endpoint.graphKey);
     if (!entry) return { ...result, reason: "The referenced graph is no longer available in this test run.",
-      detail: endpoint.kind === "point" ? "Selected graph point" : `Graph trigger: value ${endpoint.operator} ${String(endpoint.threshold)}; referenced graph unavailable` };
+      detail: endpoint.kind === "point" ? "Selected graph point" : `Graph trigger: value ${endpoint.operator} ${String(endpoint.threshold)}${rangeDetail}; referenced graph unavailable` };
     const label = entry.deviceName === entry.name ? entry.name : `${entry.deviceName} / ${entry.name}`;
     const unit = entry.series.unit ? ` ${entry.series.unit}` : "";
     result.sourceGraphName = entry.series.name || entry.channel.symbolicName || "Recorded signal";
     result.sourceDeviceName = entry.device.name || "Unnamed device";
     result.detail = endpoint.kind === "point" ? `Selected point on ${label}`
-      : `First recorded ${label} value ${endpoint.operator} ${String(endpoint.threshold)}${unit}${needsStart ? " at or after the start" : ""}`;
+      : `First recorded ${label} value ${endpoint.operator} ${String(endpoint.threshold)}${unit}${needsStart ? " at or after the start" : ""}${rangeDetail}`;
     let events;
     try {
       if (!eventCache.has(entry.series)) eventCache.set(entry.series, sourceEvents(entry.series, run.clock));
@@ -196,10 +204,10 @@ export function resolveGraphMeasurement(run, measurement, tools = run?.graphTool
     } else {
       if (needsStart && lowerBound === null) return { ...result, reason: "Resolve the start time before finding an end trigger." };
       event = events.find(({ point }) => (lowerBound === null || point.timeMs >= lowerBound)
+        && (!timeRange || (point.timeMs >= timeRange.startMs && point.timeMs <= timeRange.endMs))
         && compare(point.value, endpoint.operator, endpoint.threshold));
-      if (!event) return { ...result, reason: needsStart
-        ? "No retained valid observation matches the trigger at or after the start."
-        : "No retained valid observation matches the trigger." };
+      if (!event) return { ...result,
+        reason: `No retained valid observation matches the trigger${needsStart ? " at or after the start" : ""}${timeRange ? " within the selected device time range" : ""}.` };
     }
     const { point, pointIndex } = event;
     return { ...result, status: "resolved", timeMs: point.timeMs, pointIndex, value: point.value,

@@ -1582,6 +1582,51 @@ test("PDF calculations show only names and compact results while retaining origi
   });
 });
 
+test("PDF bounded thresholds retain the captured second pulse across display crops and styles with Name and Result only", async () => {
+  await withFonts(async () => {
+    const { state, run, device, trigger, triggerKey } = measurementState();
+    const source = trigger.channels[0].series[0];
+    const template = source.points[0];
+    source.points = [[1000, 0.8], [3000, 0.1], [20_000, 0.9], [27_000, 0.1], [40_000, 0.95], [49_000, 0.1]]
+      .map(([offset, value], index) => ({ ...template, timeMs: startMs + offset,
+        time: formatSourceTime(startMs + offset, true, true), value, rawValue: String(value), sourceRow: 200 + index }));
+    const capturedRange = { startMs: startMs + 19_000, endMs: startMs + 28_000 };
+    const condition = (operator, threshold) => ({ kind: "trigger", deviceId: trigger.id, graphKey: triggerKey,
+      operator, threshold, timeRange: { ...capturedRange } });
+    const measurement = { id: "captured-second-pulse", name: "Captured second pulse", unit: "s",
+      start: condition(">", 0.5), end: condition("<", 0.2) };
+    run.graphTools.graphs[0].measurements = [measurement];
+    const resolved = resolveGraphMeasurement(run, measurement);
+    assert.equal(resolved.status, "resolved");
+    assert.equal(resolved.start.timeMs, startMs + 20_000);
+    assert.equal(resolved.end.timeMs, startMs + 27_000);
+    assert.equal(resolved.value, 7);
+    assert.match(resolved.start.detail, /selected device time range/);
+    const legacy = structuredClone(measurement);
+    delete legacy.start.timeRange; delete legacy.end.timeRange;
+    assert.equal(resolveGraphMeasurement(run, legacy).value, 2, "dropping the captured bounds would incorrectly choose the earlier pulse");
+    const saved = structuredClone(state);
+    for (const [style, start, end] of [["line", 0, 5000], ["smooth", 35_000, 50_000]]) {
+      const displayed = structuredClone(state);
+      displayed.testRuns[0].graphTools.graphs[0].style = style;
+      const timeRanges = { [run.id]: { [device.id]: { startMs: startMs + start, endMs: startMs + end } } };
+      const before = structuredClone({ displayed, timeRanges });
+      const result = await pdfContent(await createTestReportPdf({ state: displayed, timeRanges }));
+      const text = result.text.replace(/\s+/g, " ");
+      assert.ok(text.includes("Captured second pulse: 7 s"), "the cropped graph keeps the captured duration annotation");
+      assert.ok(text.includes("Calculations - Valve timing Name Result Captured second pulse 7 s"));
+      assert.doesNotMatch(text, /Captured second pulse: (?:2|9) s/,
+        "the first or third pulse inside the display crop cannot retarget the saved calculation");
+      assert.doesNotMatch(result.text, /\nStart\n|\nEnd\n|\nDuration\n/);
+      assert.doesNotMatch(text, /selected device time range|First recorded|Graph trigger:|Selected source time:|source row 20[0-5]/);
+      assert.doesNotMatch(text, /2026-11-19 19:17:(?:19|28)\.000/,
+        "captured search bounds remain calculation data rather than exported table details");
+      assert.deepEqual({ displayed, timeRanges }, before);
+    }
+    assert.deepEqual(state, saved);
+  });
+});
+
 test("PDF interval arrows and dashed guides match shared annotation vectors, extend the shared device axis, and mark manual clipping", async () => {
   await withFonts(async () => {
     const { state, run, device, trigger } = measurementState();

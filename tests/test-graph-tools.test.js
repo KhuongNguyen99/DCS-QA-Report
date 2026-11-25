@@ -31,6 +31,8 @@ function configured(run = fixture()) {
 }
 
 const trigger = (entry, operator, threshold) => ({ kind: "trigger", deviceId: entry.deviceId, graphKey: entry.graphKey, operator, threshold });
+const range = (start, end) => ({ startMs: startMs + start, endMs: startMs + end });
+const scopedTrigger = (entry, operator, threshold, start, end) => ({ ...trigger(entry, operator, threshold), timeRange: range(start, end) });
 
 test("graph-tools validation is strict at every level while missing source references can remain saved", () => {
   const tools = configured();
@@ -97,6 +99,34 @@ test("graph-tools limits count Unicode characters and enforce per-graph and tota
   tools.deviceNames.pop();
   tools.graphs.push({ deviceId: "device-0", graphKey: "extra" });
   assert.equal(validGraphTools(tools), false);
+});
+
+test("trigger time ranges have a strict optional shape and never extend point or manual-time endpoints", () => {
+  const run = fixture(), entry = runGraphEntries(run)[1], tools = configured(run);
+  tools.graphs[0].measurements = [measurement(scopedTrigger(entry, ">", 0.25, 1000, 20_000))];
+  assert.equal(validGraphTools(tools), true);
+  for (const timeRange of [range(2000, 2000), { startMs: -8_640_000_000_000_000, endMs: 8_640_000_000_000_000 }]) {
+    const changed = structuredClone(tools);
+    changed.graphs[0].measurements[0].start.timeRange = timeRange;
+    assert.equal(validGraphTools(changed), true, "structural validation accepts ordered Date-safe bounds, including a single instant");
+  }
+  for (const timeRange of [undefined, null, [], {}, { startMs }, { endMs: startMs },
+    { ...range(1000, 2000), extra: true }, { startMs: String(startMs), endMs: startMs + 2000 },
+    range(2000, 1000), range(1000.5, 2000), { startMs: -Infinity, endMs: startMs },
+    { startMs, endMs: NaN }, { startMs, endMs: 8_640_000_000_000_001 }]) {
+    const changed = structuredClone(tools);
+    changed.graphs[0].measurements[0].start.timeRange = timeRange;
+    assert.equal(validGraphTools(changed), false);
+    assert.equal(resolveGraphMeasurement(run, changed.graphs[0].measurements[0]).status, "invalid");
+  }
+  for (const endpoint of [time(1000), createPointEndpoint(run, entry.deviceId, entry.graphKey, 0)]) {
+    const changed = structuredClone(tools);
+    changed.graphs[0].measurements[0].start = { ...endpoint, timeRange: range(0, 20_000) };
+    assert.equal(validGraphTools(changed), false, "a selected axis bounds threshold searches only");
+  }
+  const legacy = structuredClone(tools);
+  delete legacy.graphs[0].measurements[0].start.timeRange;
+  assert.equal(validGraphTools(legacy), true);
 });
 
 test("display aliases and styles resolve independently from immutable device, channel and series identities", () => {
@@ -204,6 +234,94 @@ test("trigger boundaries, equal timestamps and end-after-start searches use dete
   assert.match(exact.end.detail, /> 0\.30000001 V/, "formula text must retain the exact threshold used by the comparison");
 });
 
+test("captured device ranges choose the matching pulse inclusively without changing legacy full-run thresholds", () => {
+  const run = fixture(), entry = runGraphEntries(run)[1];
+  entry.series.points = [point(1000, 0.31), point(3000, 0), point(10_000, 0.3), point(12_000, 0.01), point(20_000, 0.31)];
+  const calculation = measurement(scopedTrigger(entry, ">", 0.25, 10_000, 12_000), scopedTrigger(entry, "<", 0.2, 10_000, 12_000));
+  const original = structuredClone({ run, calculation });
+  const result = resolveGraphMeasurement(run, calculation);
+  assert.equal(result.status, "resolved");
+  assert.equal(result.start.timeMs, startMs + 10_000, "the event exactly on the lower boundary is included");
+  assert.equal(result.end.timeMs, startMs + 12_000, "the event exactly on the upper boundary is included");
+  assert.equal(result.start.pointIndex, 2);
+  assert.equal(result.end.pointIndex, 3);
+  assert.equal(result.value, 2);
+  assert.match(result.start.detail, /selected device time range 2026-11-24 10:00:10\.000 to 2026-11-24 10:00:12\.000/);
+  const legacy = resolveGraphMeasurement(run, measurement(trigger(entry, ">", 0.25), trigger(entry, "<", 0.2)));
+  assert.equal(legacy.start.timeMs, startMs + 1000);
+  assert.equal(legacy.end.timeMs, startMs + 3000);
+  assert.doesNotMatch(legacy.start.detail, /selected device time range/);
+  const separateRanges = resolveGraphMeasurement(run, measurement(scopedTrigger(entry, ">", 0.25, 1000, 3000),
+    scopedTrigger(entry, "<", 0.2, 10_000, 12_000)));
+  assert.equal(separateRanges.start.timeMs, startMs + 1000);
+  assert.equal(separateRanges.end.timeMs, startMs + 12_000, "each endpoint applies its own captured bounds to the original event list");
+  assert.equal(separateRanges.value, 11);
+  assert.deepEqual({ run, calculation }, original);
+  const crossDevice = runGraphEntries(run)[2];
+  const cross = resolveGraphMeasurement(run, measurement(scopedTrigger(crossDevice, ">", 0, 10_000, 20_000), time(30_000)));
+  assert.equal(cross.start.timeMs, startMs + 12_000, "supplied owner-axis bounds apply equally to another device's graph");
+});
+
+test("bounded end thresholds intersect the selected range with the resolved start and allow a single recorded instant", () => {
+  const run = fixture(), entry = runGraphEntries(run)[1];
+  entry.series.points = [point(1000, 0.1), point(2000, 0.3), point(2000, 0.4, { sourceRow: 4 }),
+    point(3500, 0.5, { sourceRow: 5 }), point(4000, 0.6)];
+  const afterStart = resolveGraphMeasurement(run, measurement(time(2500), scopedTrigger(entry, ">", 0.2, 2000, 4000)));
+  assert.equal(afterStart.end.timeMs, startMs + 3500);
+  assert.equal(afterStart.end.pointIndex, 3);
+  assert.match(afterStart.end.detail, /at or after the start.*selected device time range/);
+  const emptyIntersection = resolveGraphMeasurement(run, measurement(time(3500), scopedTrigger(entry, ">", 0.2, 1000, 3000)));
+  assert.equal(emptyIntersection.status, "unresolved");
+  assert.equal(emptyIntersection.end.timeMs, null);
+  assert.equal(emptyIntersection.durationMs, null);
+  assert.match(emptyIntersection.end.reason, /at or after the start within the selected device time range/);
+  const zero = resolveGraphMeasurement(run, measurement(time(2000), scopedTrigger(entry, ">=", 0.3, 2000, 2000)));
+  assert.equal(zero.durationMs, 0);
+  assert.equal(zero.end.pointIndex, 1, "same-time matches retain original source order");
+  const noSample = resolveGraphMeasurement(run, measurement(time(2000), scopedTrigger(entry, ">=", 0.3, 2001, 2001)));
+  assert.equal(noSample.status, "unresolved", "a singleton range does not create or shift an observation");
+  const instant = fixture(), instantEntry = runGraphEntries(instant)[1];
+  instant.clock.endMs = instant.clock.startMs;
+  instantEntry.series.points = [point(0, 0.3)];
+  assert.equal(resolveGraphMeasurement(instant, measurement(scopedTrigger(instantEntry, ">", 0.25, 0, 0), time(0))).value, 0);
+});
+
+test("bounded thresholds never match synthetic baselines, interpolated crossings, held tails or removed readings", () => {
+  const run = fixture(), entry = runGraphEntries(run)[1];
+  entry.series.points = [point(10_000, 0.1), point(20_000, 0.5)];
+  const interpolation = buildTestChart(entry.series, run.clock, { style: "smooth", timeRange: range(12_000, 18_000) });
+  assert.equal(interpolation.points.length, 0);
+  assert.equal(interpolation.curves.length, 1);
+  for (const start of [scopedTrigger(entry, "<=", 0, 0, 5000), scopedTrigger(entry, ">", 0.2, 12_000, 18_000),
+    scopedTrigger(entry, ">", 0.3, 25_000, 30_000)]) {
+    const result = resolveGraphMeasurement(run, measurement(start, time(40_000)));
+    assert.equal(result.status, "unresolved");
+    assert.equal(result.start.timeMs, null);
+    assert.match(result.start.reason, /within the selected device time range/);
+  }
+  entry.series.points = [point(10_000, 0.1), point(12_000, 0.9, { excluded: true }),
+    point(15_000, 0.7, { valid: false }), point(20_000, 0.5)];
+  const result = resolveGraphMeasurement(run, measurement(scopedTrigger(entry, ">", 0.3, 12_000, 15_000), time(40_000)));
+  assert.equal(result.status, "unresolved");
+  assert.equal(result.durationMs, null);
+});
+
+test("captured trigger ranges outside the run are invalid and are never clamped or silently retargeted", () => {
+  const run = fixture(), entry = runGraphEntries(run)[1];
+  for (const timeRange of [range(-1, 20_000), range(0, 3_600_001), range(-2000, -1000)]) {
+    const calculation = measurement({ ...trigger(entry, ">", 0), timeRange }, time(30_000));
+    const original = structuredClone(calculation);
+    const result = resolveGraphMeasurement(run, calculation);
+    assert.equal(result.status, "invalid");
+    assert.equal(result.start.timeMs, null);
+    assert.match(result.reason, /selected device time range.*outside the test run/);
+    assert.deepEqual(calculation, original);
+  }
+  const missing = resolveGraphMeasurement(run, measurement({ ...trigger(entry, ">", 0), graphKey: "unavailable", timeRange: range(1000, 2000) }));
+  assert.equal(missing.status, "unresolved");
+  assert.match(missing.start.detail, /selected device time range.*graph unavailable/);
+});
+
 test("triggers ignore synthetic baselines, curve crossings, held tails, removed rows and invalid samples", () => {
   const run = fixture(), entry = runGraphEntries(run)[1];
   run.graphTools = { ...emptyGraphTools(), graphs: [{ deviceId: entry.deviceId, graphKey: entry.graphKey, name: "Renamed feedback", style: "smooth" }] };
@@ -250,15 +368,18 @@ test("unavailable references, unmatched triggers and invalid durations return ex
 
 test("referenced source validation cannot be bypassed by hidden or excluded observations", () => {
   const run = fixture(), entry = runGraphEntries(run)[1];
-  const calculation = measurement(trigger(entry, ">", 0), time(60_000));
+  const calculations = [measurement(trigger(entry, ">", 0), time(60_000)),
+    measurement(scopedTrigger(entry, ">", 0, 10_000, 20_000), time(60_000))];
   for (const points of [
     [point(-1, 1, { excluded: true })], [point(3_600_001, 1, { valid: false })],
     [point(10_000, 0.5), point(5000, 0.1)], [point(1000, 0.1, { excluded: "false" })], [null],
   ]) {
     entry.series.points = points;
-    const result = resolveGraphMeasurement(run, calculation);
-    assert.equal(result.status, "invalid");
-    assert.equal(result.durationMs, null);
-    assert.ok(result.reason);
+    for (const calculation of calculations) {
+      const result = resolveGraphMeasurement(run, calculation);
+      assert.equal(result.status, "invalid");
+      assert.equal(result.durationMs, null);
+      assert.ok(result.reason);
+    }
   }
 });

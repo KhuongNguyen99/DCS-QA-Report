@@ -1,6 +1,7 @@
-import React, { useEffect, useId, useState } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { formatSourceTime, formatTestValue } from "./test-chart.js";
 import { formatSourceTimeInput, parseSourceTimeInput, resolveGraphMeasurement } from "./test-graph-tools.js";
+import GraphPointPicker from "./GraphPointPicker.jsx";
 
 const UNIT_NAMES = { s: "seconds", min: "minutes", h: "hours" };
 const STYLE_NAMES = { auto: "Automatic", line: "Line", step: "Step", smooth: "Smooth" };
@@ -52,13 +53,14 @@ export function DisplayNameEditor({ kind, sourceName, value, scope, canEdit, dis
   </form>;
 }
 
-function endpointEditor(endpoint) {
+function endpointEditor(endpoint, ownerGraph) {
   return {
     kind: endpoint?.kind || "point", point: endpoint?.kind === "point" ? endpoint : null,
     time: endpoint?.kind === "time" ? formatSourceTimeInput(endpoint.timeMs) : "",
-    graph: endpoint?.kind === "trigger" ? graphReference(endpoint.deviceId, endpoint.graphKey) : "",
+    graph: ["point", "trigger"].includes(endpoint?.kind) ? graphReference(endpoint.deviceId, endpoint.graphKey) : ownerGraph,
     operator: endpoint?.kind === "trigger" ? endpoint.operator : ">",
     threshold: endpoint?.kind === "trigger" ? String(endpoint.threshold) : "",
+    timeRange: endpoint?.kind === "trigger" && endpoint.timeRange ? { ...endpoint.timeRange } : null,
   };
 }
 
@@ -66,30 +68,72 @@ function endpointValue(editor, clock, label) {
   if (editor.kind === "time") return { kind: "time", timeMs: parseSourceTimeInput(editor.time, clock) };
   if (editor.kind === "point") {
     if (!editor.point) throw new Error(`Pick a recorded ${label.toLowerCase()} point, or choose another time source.`);
+    if (editor.graph !== graphReference(editor.point.deviceId, editor.point.graphKey))
+      throw new Error(`Pick a recorded ${label.toLowerCase()} point on the selected graph.`);
     return editor.point;
   }
   if (!editor.graph) throw new Error(`Choose a graph for the ${label.toLowerCase()} trigger.`);
   if (!editor.threshold.trim() || !Number.isFinite(Number(editor.threshold))) throw new Error(`Enter a finite ${label.toLowerCase()} threshold.`);
+  if (!editor.timeRange) throw new Error("Choose a valid Device time axis before applying a graph threshold.");
   const [deviceId, graphKey] = JSON.parse(editor.graph);
-  return { kind: "trigger", deviceId, graphKey, operator: editor.operator, threshold: Number(editor.threshold) };
+  return { kind: "trigger", deviceId, graphKey, operator: editor.operator, threshold: Number(editor.threshold),
+    timeRange: { ...editor.timeRange } };
 }
 
-function EndpointEditor({ label, value, clock, graphChoices, disabled, picking, onChange, onPick, onCancelPick }) {
+function EndpointGraphSelect({ id, label, value, graphChoices, onChange }) {
+  const knownGraph = graphChoices.some(entry => graphReference(entry.deviceId, entry.graphKey) === value);
+  return <>
+    <label htmlFor={id}>{label}</label>
+    <select id={id} value={value} onChange={event => onChange(event.target.value)}>
+      <option value="">Choose a graph</option>
+      {value && !knownGraph && <option value={value}>Previously selected graph (unavailable)</option>}
+      {graphChoices.map(entry => <option key={graphReference(entry.deviceId, entry.graphKey)} value={graphReference(entry.deviceId, entry.graphKey)}>
+        {entry.deviceName} / {entry.name}{entry.series.unit ? ` (${entry.series.unit})` : ""}
+      </option>)}
+    </select>
+  </>;
+}
+
+function EndpointEditor({ label, value, clock, graphChoices, timeRange, disabled, picking, selectedPicker,
+  run, onChange, onPick, onChoose, onCancelPick }) {
   const id = useId();
-  const knownGraph = graphChoices.some(entry => graphReference(entry.deviceId, entry.graphKey) === value.graph);
+  const pickButton = useRef(null);
+  const wasPickingSelected = useRef(false);
+  const selectedGraph = graphChoices.find(entry => graphReference(entry.deviceId, entry.graphKey) === value.graph);
+  useEffect(() => {
+    if (disabled || value.kind !== "trigger" || !timeRange) return;
+    if (value.timeRange?.startMs !== timeRange.startMs || value.timeRange?.endMs !== timeRange.endMs)
+      onChange({ ...value, timeRange: { startMs: timeRange.startMs, endMs: timeRange.endMs } });
+  }, [disabled, value, timeRange?.startMs, timeRange?.endMs, onChange]);
+  useEffect(() => {
+    if (wasPickingSelected.current && !selectedPicker && !disabled) pickButton.current?.focus();
+    wasPickingSelected.current = Boolean(selectedPicker);
+  }, [selectedPicker, disabled]);
+  function changeGraph(graph) {
+    onCancelPick();
+    onChange({ ...value, graph, point: null });
+  }
   return <fieldset className="test-duration-endpoint" disabled={disabled}>
     <legend>{label}</legend>
     <label htmlFor={`${id}-source`}>{label} time source</label>
     <select id={`${id}-source`} value={value.kind} onChange={event => {
-      if (picking) onCancelPick();
+      onCancelPick();
       onChange({ ...value, kind: event.target.value });
     }}>
       <option value="point">Picked graph point</option><option value="time">Manual time</option><option value="trigger">Graph threshold</option>
     </select>
-    {value.kind === "point" && <div className="test-duration-point">
-      <button type="button" className="small-button" onClick={onPick}>{picking ? `Picking ${label.toLowerCase()} point…` : `Pick ${label.toLowerCase()} point`}</button>
-      <p>{value.point ? `${formatSourceTime(value.point.timeMs, true, true)} · recorded value ${formatTestValue(value.point.value)}` : "Choose a recorded dot on this graph, or use Manual time."}</p>
-    </div>}
+    {value.kind === "point" && <>
+      <EndpointGraphSelect id={`${id}-point-graph`} label={`${label} point graph`} value={value.graph}
+        graphChoices={graphChoices} onChange={changeGraph} />
+      <div className="test-duration-point">
+        <button type="button" className="small-button" ref={pickButton} disabled={!selectedGraph}
+          onClick={() => onPick(false)}>{picking || selectedPicker ? `Picking ${label.toLowerCase()} point…` : `Pick ${label.toLowerCase()} point`}</button>
+        <p>{value.point ? <>
+          {formatSourceTime(value.point.timeMs, true, true)} · recorded value {formatTestValue(value.point.value)}{selectedGraph?.series.unit && ` ${selectedGraph.series.unit}`}
+          {value.point.sourceRow != null && ` · source row ${value.point.sourceRow}`}
+        </> : "Pick an original recorded point from the selected graph."}</p>
+      </div>
+    </>}
     {value.kind === "time" && <>
       <label htmlFor={`${id}-time`}>{label} source time</label>
       <input id={`${id}-time`} type="datetime-local" step="0.001" value={value.time}
@@ -98,14 +142,10 @@ function EndpointEditor({ label, value, clock, graphChoices, disabled, picking, 
       <small>{clock.basis === "absolute" ? "UTC" : "Recorded source clock"}; include the date and time.</small>
     </>}
     {value.kind === "trigger" && <>
-      <label htmlFor={`${id}-graph`}>{label} threshold graph</label>
-      <select id={`${id}-graph`} value={value.graph} onChange={event => onChange({ ...value, graph: event.target.value })}>
-        <option value="">Choose a graph</option>
-        {value.graph && !knownGraph && <option value={value.graph}>Previously selected graph (unavailable)</option>}
-        {graphChoices.map(entry => <option key={graphReference(entry.deviceId, entry.graphKey)} value={graphReference(entry.deviceId, entry.graphKey)}>
-          {entry.deviceName} / {entry.name}{entry.series.unit ? ` (${entry.series.unit})` : ""}
-        </option>)}
-      </select>
+      <EndpointGraphSelect id={`${id}-graph`} label={`${label} threshold graph`} value={value.graph}
+        graphChoices={graphChoices} onChange={changeGraph} />
+      <button type="button" className="small-button test-pick-selected-graph" ref={pickButton} disabled={!selectedGraph}
+        onClick={() => onPick(true)}>Pick {label.toLowerCase()} point from selected graph</button>
       <div className="test-duration-threshold">
         <div><label htmlFor={`${id}-comparison`}>{label} comparison</label><select id={`${id}-comparison`} value={value.operator} onChange={event => onChange({ ...value, operator: event.target.value })}>
           <option value=">">Greater than (&gt;)</option><option value=">=">At least (≥)</option>
@@ -114,8 +154,13 @@ function EndpointEditor({ label, value, clock, graphChoices, disabled, picking, 
         <div><label htmlFor={`${id}-threshold`}>{label} threshold</label><input id={`${id}-threshold`} type="number" step="any" value={value.threshold}
           onChange={event => onChange({ ...value, threshold: event.target.value })} /></div>
       </div>
-      <small>{label === "Start" ? "First matching recorded reading in the test run." : "First matching recorded reading at or after the resolved start."} Removed and invalid readings do not match.</small>
+      <small>{label === "Start" ? "First matching recorded reading within the Device time axis." : "First matching recorded reading at or after the resolved start, within the Device time axis."} Removed and invalid readings do not match.</small>
+      {value.timeRange && <small className="test-threshold-time-range">
+        Device time axis: {formatSourceTime(value.timeRange.startMs, true, true)} – {formatSourceTime(value.timeRange.endMs, true, true)}{clock.basis === "absolute" ? " UTC" : " (source clock)"}. This window is saved with the calculation.
+      </small>}
     </>}
+    {selectedPicker && selectedGraph && <GraphPointPicker run={run} entry={selectedGraph} label={label}
+      timeRange={timeRange} disabled={disabled} onChoose={onChoose} onCancel={onCancelPick} />}
   </fieldset>;
 }
 
@@ -131,17 +176,25 @@ function MeasurementResult({ run, measurement }) {
 }
 
 export default function GraphToolsPanel({ run, deviceId, graphKey, sourceName, settings, graphChoices,
-  scope, canEdit, disabled, editorKey, onDirtyChange, onChange, onStartPick, onCancelPick, picking }) {
+  graphTimeRange, scope, canEdit, disabled, editorKey, onDirtyChange, onChange, onStartPick, onCancelPick, picking }) {
   const [editor, setEditor] = useState(null);
   const [error, setError] = useState("");
+  const [selectedPicker, setSelectedPicker] = useState(null);
   const id = useId();
+  const ownerGraph = graphReference(deviceId, graphKey);
   const measurements = settings.measurements || [];
   const editorValue = editor && { name: editor.name, unit: editor.unit, start: editor.start, end: editor.end };
   const dirty = Boolean(editor && (editor.isNew || JSON.stringify(editorValue) !== editor.initial));
   const stale = Boolean(editor && editor.scope !== scope);
   const blocked = !canEdit || disabled || stale;
+  const cancelPicking = useCallback(() => { setSelectedPicker(null); onCancelPick(); }, [onCancelPick]);
   useEditorNotice(`${editorKey}:calculation`, dirty, onDirtyChange);
-  useEffect(() => { if (stale || !canEdit || disabled) onCancelPick(); }, [stale, canEdit, disabled, onCancelPick]);
+  useEffect(() => { if (blocked) cancelPicking(); }, [blocked, cancelPicking]);
+  useEffect(() => {
+    if (selectedPicker && (!editor || selectedPicker.editorId !== editor.id || selectedPicker.scope !== scope
+      || selectedPicker.graph !== editor[selectedPicker.field]?.graph
+      || !graphChoices.some(entry => graphReference(entry.deviceId, entry.graphKey) === selectedPicker.graph))) cancelPicking();
+  }, [selectedPicker, editor, scope, graphChoices, cancelPicking]);
   function change(settingsUpdate) {
     if (!canEdit || disabled) return;
     onChange(settingsUpdate); setError("");
@@ -149,11 +202,33 @@ export default function GraphToolsPanel({ run, deviceId, graphKey, sourceName, s
   function openEditor(measurement = null) {
     if (!canEdit || disabled || editor) return;
     const fields = { name: measurement?.name || "", unit: measurement?.unit || "s",
-      start: endpointEditor(measurement?.start), end: endpointEditor(measurement?.end) };
+      start: endpointEditor(measurement?.start, ownerGraph), end: endpointEditor(measurement?.end, ownerGraph) };
     setEditor({ ...fields, id: measurement?.id || crypto.randomUUID(), isNew: !measurement, scope, initial: JSON.stringify(fields) });
     setError("");
   }
-  function cancelEditor() { setEditor(null); setError(""); onCancelPick(); }
+  function cancelEditor() { setEditor(null); setError(""); cancelPicking(); }
+  function startPicking(field, useSelectedGraph) {
+    if (blocked || !editor) return;
+    const graph = editor[field].graph;
+    if (!graphChoices.some(entry => graphReference(entry.deviceId, entry.graphKey) === graph)) return;
+    cancelPicking();
+    if (useSelectedGraph || graph !== ownerGraph) {
+      setSelectedPicker({ field, graph, scope, editorId: editor.id });
+    } else {
+      onStartPick(field, endpoint => setEditor(previous => previous?.id === editor.id && previous.scope === scope
+        && previous[field].kind === "point" && previous[field].graph === graph
+        ? { ...previous, [field]: { ...previous[field], point: endpoint } } : previous));
+    }
+  }
+  function chooseSelectedPoint(field, endpoint) {
+    if (blocked || !editor || selectedPicker?.field !== field || selectedPicker.editorId !== editor.id
+      || selectedPicker.scope !== scope || selectedPicker.graph !== editor[field].graph
+      || selectedPicker.graph !== graphReference(endpoint.deviceId, endpoint.graphKey)
+      || !graphTimeRange || endpoint.timeMs < graphTimeRange.startMs || endpoint.timeMs > graphTimeRange.endMs) return;
+    setEditor(previous => previous?.id === editor.id ? { ...previous,
+      [field]: { ...previous[field], kind: "point", point: endpoint, graph: selectedPicker.graph } } : previous);
+    cancelPicking();
+  }
   function candidate() {
     const name = editor.name.trim();
     if (!validName(name)) throw new Error("Enter a calculation name of 1–160 characters without control characters.");
@@ -211,10 +286,10 @@ export default function GraphToolsPanel({ run, deviceId, graphKey, sourceName, s
         </fieldset>
         <div className="test-duration-endpoints">{["start", "end"].map(field => <EndpointEditor key={field}
           label={field === "start" ? "Start" : "End"} value={editor[field]} clock={run.clock} graphChoices={graphChoices}
-          disabled={blocked} picking={picking === field} onCancelPick={onCancelPick}
+          run={run} timeRange={graphTimeRange} selectedPicker={selectedPicker?.field === field}
+          disabled={blocked} picking={picking === field} onCancelPick={cancelPicking}
           onChange={value => setEditor(previous => ({ ...previous, [field]: value }))}
-          onPick={() => onStartPick(field, endpoint => setEditor(previous => previous?.id === editor.id
-            ? { ...previous, [field]: { ...previous[field], point: endpoint } } : previous))} />)}</div>
+          onPick={useSelectedGraph => startPicking(field, useSelectedGraph)} onChoose={endpoint => chooseSelectedPoint(field, endpoint)} />)}</div>
         {preview && <MeasurementResult run={run} measurement={preview} />}
         {stale && <p className="field-error" role="alert">This report changed. Your calculation editor is retained; cancel it and reopen it for the current report.</p>}
         {!canEdit && <p className="field-error" role="status">Editing is paused. Your calculation editor is retained.</p>}
