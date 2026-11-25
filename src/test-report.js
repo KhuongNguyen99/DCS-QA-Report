@@ -8,6 +8,7 @@ import { assertGraphTools, getDeviceDisplayName, runGraphEntries, resolveGraphMe
 import { buildAnnotatedTestChart, deviceCalculationTimeRange, formatGraphMeasurementResult } from "./test-graph-annotations.js";
 import { testCommentBlocks } from "./test-comment-format.js";
 import { summarizeTestSettings } from "./test-settings-summary.js";
+import { assertManualTestStatuses, getDeviceTestStatus, hasManualTestStatus } from "./test-device-results.js";
 
 const PAGE = { width: 792, height: 612, margin: 43.2, bottom: 548 };
 const WIDTH = PAGE.width - PAGE.margin * 2;
@@ -564,14 +565,14 @@ function channelChart(series, channel, run, deviceName, { name = series.name || 
     showInitialState: isDigitalOutputChannel(channel) };
 }
 
-function channelDetails(writer, channel, run, { heading = true, deferCharts = false, deviceName } = {}) {
+function channelDetails(writer, channel, run, { heading = true, deferCharts = false, deviceName, manualAssessment = false } = {}) {
   const location = `${stationName(run, channel.stationId)} | Slot ${channel.slot ?? "unspecified"} | ${channelLabel(channel)}`;
   const details = channel.role ? `${location} | ${channel.role}` : location;
   const name = channel.symbolicName || channelLabel(channel);
   const result = resultLabel(channel.status);
   const { rawStatus } = channel;
   const source = rawStatus && !/^\s*ok\s*$/i.test(rawStatus) ? ` (source: ${rawStatus})` : "";
-  const wiring = `Test Result: ${result}${source}`;
+  const wiring = `${manualAssessment ? "Recorded PRONETA wiring result" : "Test Result"}: ${result}${source}`;
   const color = resultColor(result);
   const populated = (channel.series || []).filter(series => series.points?.length);
   if (deferCharts) {
@@ -624,17 +625,27 @@ function graphMeasurements(writer, charts) {
 function runSummary(writer, run) {
   writer.page(run.name || "Test run");
   reportComment(writer, "Overall test run comment", run.comment);
-  writer.table([
+  const manualResults = run.devices.some(hasManualTestStatus);
+  const columns = manualResults ? [
+    { label: "Device name", width: WIDTH - 405 },
+    { label: "Slot", width: 100 },
+    { label: "Channels", width: 65 },
+    { label: "Test Result", width: 95 },
+    { label: "Result source", width: 145 },
+  ] : [
     { label: "Device name", width: WIDTH - 378 },
     { label: "Slot", width: 118 },
     { label: "Channels", width: 80 },
     { label: "Test Result", width: 180 },
-  ], run.devices.map((device) => [
+  ];
+  writer.table(columns, run.devices.map((device) => [
     getDeviceDisplayName(device, run.graphTools) === device.name ? device.name
       : `${getDeviceDisplayName(device, run.graphTools)}\nSource device: ${device.name}`,
     [...new Set(device.channels.map((channel) => channel.slot).filter(Number.isInteger))]
       .sort((a, b) => a - b).join(", ") || "Unspecified",
-    device.channels.length, resultLabel(device.status),
+    device.channels.length, resultLabel(getDeviceTestStatus(device)),
+    ...(manualResults ? [hasManualTestStatus(device)
+      ? `Manual assessment\nPRONETA: ${resultLabel(device.status)}` : "PRONETA"] : []),
   ]));
 }
 
@@ -697,6 +708,7 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       throw new Error("The saved test run is missing its software name or version.");
     if (!Array.isArray(run.devices) || run.devices.some((device) => !device.name || !Array.isArray(device.channels)))
       throw new Error("The saved test run has incomplete device data.");
+    assertManualTestStatuses(run.devices);
     if (run.graphTools !== undefined) assertGraphTools(run.graphTools);
     // References and duration triggers use the complete approved run, regardless
     // of display filtering, graph order, drawing style, or the visible X range.
@@ -795,7 +807,7 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
   doc.setCreationDate(`D:${closedAt.toISOString().replace(/[-:T]/g, "").slice(0, 14)}+00'00'`);
   doc.setProperties({
     title: `I/O test report - ${printableText(project.skidName)} - Revision ${project.revision}`,
-    subject: `Approved QC revision ${project.revision}; recorded I/O wiring results and logged observations`,
+    subject: `Approved QC revision ${project.revision}; ${runs.some(run => run.devices.some(hasManualTestStatus)) ? "manual device assessments, " : ""}recorded I/O wiring results and logged observations`,
     author: "Jeevy Fabrication", creator: "Jeevy DCS QC Report",
   });
   const cover = { ...project, skidName: project.skidName.trim().replace(/\s+/g, " ") };
@@ -841,13 +853,17 @@ export async function createTestReportPdf({ state, runId = null, backend, timeRa
       writer.page(deviceName);
       if (deviceName !== device.name)
         writer.paragraph(`Source device: ${device.name}`, { size: 9, color: COLOR.muted });
-      if (device.channels.length > 1) {
-        const result = resultLabel(device.status);
-        writer.paragraph(`Device Test Result: ${result}`, { bold: true, color: resultColor(result) });
+      const manualAssessment = hasManualTestStatus(device);
+      if (device.channels.length > 1 || manualAssessment) {
+        const result = resultLabel(getDeviceTestStatus(device));
+        writer.paragraph(`Device Test Result: ${result}${manualAssessment ? " (manual assessment)" : ""}`,
+          { bold: true, color: resultColor(result) });
       }
+      if (manualAssessment) writer.paragraph(`PRONETA device result: ${resultLabel(device.status)}`,
+        { size: 8.5, color: COLOR.muted, gap: 4 });
       for (const channel of device.channels) channelDetails(writer, channel, run, {
         heading: device.channels.length > 1 || channel.symbolicName !== device.name,
-        deferCharts: true, deviceName: device.name,
+        deferCharts: true, deviceName: device.name, manualAssessment,
       });
       const charts = deviceGraphs.get(device);
       const { timeRange, deviceTimeRange } = deviceRanges.get(device);

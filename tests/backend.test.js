@@ -213,6 +213,29 @@ test("authored graph tools are validated and saved beside unchanged source evide
   assert.deepEqual(h.calls, [], "invalid graph tools never reach the write RPC");
 });
 
+test("manual device results are validated before RPC and remain separate from imported statuses", async () => {
+  const h = fixture();
+  const run = { id: "66666666-6666-4666-8666-666666666666", runVersion: 2, schemaVersion: 1,
+    name: "Manual assessment", software: { name: "PRONETA Basic", version: "3.9" },
+    devices: [{ id: "sensor", status: "Failed", channels: [{ status: "Failed", rawStatus: "Error",
+      series: [{ points: [{ timeMs: 1000, value: 4.02, valid: true, sourceId: "source-a", sourceRow: 2 }] }] }] }] };
+  const before = structuredClone(run);
+  for (const manualStatus of [null, undefined, "", "Not tested", "passed", true, 1, {}, [], { status: "Passed" }])
+    await assert.rejects(h.backend.saveTestRun({ ...run, devices: [{ ...run.devices[0], manualStatus }] }), /manual device result.*Passed or Failed/);
+  assert.deepEqual(h.calls, [], "malformed manual assessments cannot reach the write RPC");
+  for (const manualStatus of ["Passed", "Failed", undefined]) {
+    const device = { ...run.devices[0], ...(manualStatus === undefined ? {} : { manualStatus }) };
+    await h.backend.saveTestRun({ ...run, devices: [device] });
+    const request = h.calls.at(-1)[1];
+    assert.deepEqual(request.p_data.devices, [device]);
+    assert.equal(request.p_expected_revision, 17);
+    assert.equal(request.p_expected_run_version, 2);
+    assert.equal(request.p_data.devices[0].status, "Failed");
+    assert.deepEqual(request.p_data.devices[0].channels, before.devices[0].channels);
+  }
+  assert.deepEqual(run, before);
+});
+
 test("test run and device comments validate optional text without changing imported evidence", async () => {
   const h = fixture();
   const run = { id: "66666666-6666-4666-8666-666666666666", schemaVersion: 1, runVersion: 2,

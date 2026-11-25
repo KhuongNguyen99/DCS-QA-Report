@@ -346,6 +346,60 @@ test("approved test PDF preserves evidence and run context while fitting each de
   });
 });
 
+test("PDF manual device assessments show their source while retaining original PRONETA wiring results", async () => {
+  await withFonts(async () => {
+    const state = closedState();
+    const run = state.testRuns[0];
+    const recorded = structuredClone(run.devices[1]);
+    recorded.id = "recorded-only"; recorded.name = "RECORDED-ONLY";
+    recorded.channels[0].id = "recorded-channel";
+    recorded.channels[0].symbolicName = recorded.name;
+    run.devices[0].manualStatus = "Passed";
+    Object.assign(run.devices[1], { manualStatus: "Failed", status: "Not tested" });
+    Object.assign(run.devices[1].channels[0], { status: "Not tested", rawStatus: "" });
+    run.devices.push(recorded);
+    const before = structuredClone(state);
+    const result = await pdfContent(await createTestReportPdf({ state }));
+    const summary = result.pages.find(page => page.includes("Result source")).replace(/\s+/g, " ");
+    assert.match(summary, /RTD-EXAMPLE 3 1 Passed Manual assessment PRONETA: Failed/);
+    assert.match(summary, /VALVE-EXAMPLE 1 1 Failed Manual assessment PRONETA: Not tested/);
+    assert.match(summary, /RECORDED-ONLY 1 1 Passed PRONETA/);
+    const passed = result.pages.find(page => page.includes("Device Test Result: Passed (manual assessment)"));
+    const failed = result.pages.find(page => page.includes("Device Test Result: Failed (manual assessment)"));
+    assert.ok(passed, "a manual result is explicit even for a single-channel device");
+    assert.ok(failed);
+    assert.match(passed, /PRONETA device result: Failed/);
+    assert.match(passed, /Recorded PRONETA wiring result: Failed \(source: Error\)/);
+    assert.match(passed, /Investigate the wiring before retest\./);
+    assert.match(failed, /PRONETA device result: Not tested/);
+    assert.match(failed, /Recorded PRONETA wiring result: Not tested/);
+    assert.ok(result.pages.some(page => page.includes("RECORDED-ONLY") && page.includes("Test Result: Passed")
+      && !page.includes("manual assessment")), "the unassessed device keeps its recorded result");
+    for (const [status, rgb] of [["Passed", [31, 105, 57]], ["Failed", [170, 49, 43]]]) {
+      const header = result.blocks.flat().find(block => block.text === `Device Test Result: ${status} (manual assessment)`);
+      assert.ok(header.color.every((value, index) => Math.abs(value - rgb[index] / 255) < 0.005));
+    }
+    assert.deepEqual(state, before, "manual result rendering leaves all imported statuses, channels and observations intact");
+    delete run.devices[0].manualStatus; delete run.devices[1].manualStatus;
+    const legacy = await pdfContent(await createTestReportPdf({ state }));
+    assert.doesNotMatch(legacy.text, /manual assessment|Result source|PRONETA device result/);
+    assert.match(legacy.text, /Test Result: Failed \(source: Error\)/);
+    assert.match(legacy.text, /Test Result: Not tested/);
+  });
+});
+
+test("PDF rejects malformed manual device results before loading export assets", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = () => assert.fail("Malformed manual results must fail before loading assets");
+  try {
+    for (const manualStatus of [null, undefined, "passed", "Not tested", {}, ["Passed"], true]) {
+      const state = closedState();
+      state.testRuns[0].devices[0].manualStatus = manualStatus;
+      await assert.rejects(createTestReportPdf({ state }), /manual device result must be Passed or Failed/);
+    }
+  } finally { globalThis.fetch = original; }
+});
+
 test("figure captions expand instrument tags and preserve channel locations", async () => {
   await withFonts(async () => {
     const state = closedState();
@@ -452,6 +506,7 @@ test("export captures the approved payload before asynchronous font loading", as
     state.project.closedByTitle = "Saved Title";
     state.testRuns[0].comment = "Approved overall review comment";
     state.testRuns[0].devices[0].comment = "Approved device review comment";
+    state.testRuns[0].devices[0].manualStatus = "Passed";
     const excluded = state.testRuns[0].devices[0].channels[0].series[0].points[1];
     excluded.rawValue = "EXCLUDED-AT-EXPORT";
     excluded.excluded = true;
@@ -465,6 +520,7 @@ test("export captures the approved payload before asynchronous font loading", as
     state.testRuns[0].software.version = "Mutated software";
     state.testRuns[0].comment = "Mutated overall comment";
     state.testRuns[0].devices[0].comment = "Mutated device comment";
+    state.testRuns[0].devices[0].manualStatus = "Failed";
     excluded.excluded = false;
     release();
     const result = await pdfContent(await pending);
@@ -472,6 +528,9 @@ test("export captures the approved payload before asynchronous font loading", as
     assert.match(result.text, /RTD-EXAMPLE/);
     assert.match(result.text, /Approved overall review comment/);
     assert.match(result.text, /Approved device review comment/);
+    assert.match(result.text, /Device Test Result: Passed \(manual assessment\)/);
+    assert.doesNotMatch(result.text, /Device Test Result: Failed \(manual assessment\)/);
+    assert.match(result.text, /Recorded PRONETA wiring result: Failed \(source: Error\)/);
     assert.match(result.pages[0], /Checked by: Saved Checker\nSigned off by: Saved Signatory, Saved Title/);
     assert.doesNotMatch(result.text, /Removed events|EXCLUDED-AT-EXPORT|Mutated|Revision 99/);
   } finally { globalThis.fetch = original; }

@@ -14,6 +14,7 @@ import { testGraphOrderScope, normalizeGraphOrder, orderDeviceGraphs,
   readDeviceGraphOrder, saveDeviceGraphOrder, resetDeviceGraphOrder } from "./test-graph-order.js";
 import { createTestEventEdit, setTestEventEdit, applyTestEventEdits } from "./test-event-edits.js";
 import { UNKNOWN_TIME_ZONE, getLocalTimeZone, getTimeZoneOptions } from "./test-timezones.js";
+import { isManualTestStatus, getDeviceTestStatus, hasManualTestStatus } from "./test-device-results.js";
 import GraphToolsPanel, { DisplayNameEditor } from "./GraphToolsPanel.jsx";
 import { emptyGraphTools, assertGraphTools, getDeviceDisplayName, getGraphSettings, runGraphEntries, createPointEndpoint, resolveGraphMeasurement } from "./test-graph-tools.js";
 import "./test-reports.css";
@@ -23,6 +24,9 @@ const describeTime = (clock) => Number.isFinite(clock?.startMs) && Number.isFini
   ? `${formatSourceTime(clock.startMs, true)} – ${formatSourceTime(clock.endMs, true)}${clock.basis === "absolute" ? " UTC" : ""}`
   : "No timestamped events in this run";
 const EMPTY_SOFTWARE = { name: "Siemens PRONETA Basic", version: "" };
+const sourceHashes = sources => (sources || []).map(source => source.sha256.toLowerCase()).sort().join(",");
+const manualStatusesFrom = run => Object.fromEntries((run?.devices || []).filter(hasManualTestStatus)
+  .map(device => [device.id, device.manualStatus]));
 
 function TestStatus({ status }) {
   return <span className={`test-status ${statusClass(status)}`}>{status || "Not tested"}</span>;
@@ -362,13 +366,14 @@ function Parameters({ parameters = [], title = "Set parameters" }) {
 export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDisabled = false, editingComments = true,
   timeRangeScope = null, selectionScope = null, rangeOverrides = {}, onTimeRangeChange, onEventExclusionChange,
   graphOrderScope = null, orderOverrides = {}, onGraphOrderChange,
-  onGraphToolsChange, graphEditorDirty = false, onGraphEditorDirty, graphEditorScope }) {
+  onGraphToolsChange, onManualStatusChange, graphEditorDirty = false, onGraphEditorDirty, graphEditorScope }) {
+  const resultId = useId();
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(() => readTestSelection(selectionScope, runId));
   const [localRanges, setLocalRanges] = useState({});
   const [localOrders, setLocalOrders] = useState({});
   const devices = run.devices || [];
-  const shown = useMemo(() => devices.filter(device => `${getDeviceDisplayName(device, run.graphTools)} ${device.name} ${device.status}`.toLowerCase().includes(search.toLowerCase())), [devices, run.graphTools, search]);
+  const shown = useMemo(() => devices.filter(device => `${getDeviceDisplayName(device, run.graphTools)} ${device.name} ${getDeviceTestStatus(device)}`.toLowerCase().includes(search.toLowerCase())), [devices, run.graphTools, search]);
   const device = shown.find(item => item.id === selected) || shown[0];
   const displayDeviceName = getDeviceDisplayName(device, run.graphTools);
   const graphChoices = useMemo(() => runGraphEntries(run), [run]);
@@ -406,7 +411,10 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
     setLocalOrders(previous => ({ ...previous, [orderViewKey]: { order: normalized, error } }));
     onGraphOrderChange?.(graphOrderScope, runId, device.id, normalized);
   }
-  const counts = devices.reduce((result, item) => ({ ...result, [item.status]: (result[item.status] || 0) + 1 }), {});
+  const counts = devices.reduce((result, item) => {
+    const status = getDeviceTestStatus(item);
+    return { ...result, [status]: (result[status] || 0) + 1 };
+  }, {});
   const noteClarification = importNoteClarification(run.warnings);
   return <div className="test-run-detail">
     <div className="test-run-facts">
@@ -414,7 +422,7 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
       <div><span>Run time span</span><strong>{describeTime(run.clock)}</strong><small>{run.clock?.basis === "absolute" ? "Graphs use UTC. Original event timestamps retain their source offsets." : run.clock?.timeZone || "Source clock, timezone not recorded"}</small></div>
       <div><span>Device results</span><strong>{counts.Passed || 0} passed · {counts.Failed || 0} failed · {counts["Not tested"] || 0} not tested</strong></div>
     </div>
-    <p className="test-meaning">Passed/Failed comes from the recorded PRONETA wiring result. Graphs show logged signal changes in their original units.</p>
+    <p className="test-meaning">Device results use your manual assessment when entered, otherwise the recorded PRONETA result. Channel results show the original wiring result. Graphs show logged signal changes in their original units.</p>
     {unmatchedTools.length > 0 && <details className="test-unmatched-graph-tools" open>
       <summary>{unmatchedTools.length} saved graph configuration{unmatchedTools.length === 1 ? " has" : "s have"} no matching graph</summary>
       <p>These names, styles, and calculations are retained. Restore the matching source files to view them with their graph.</p>
@@ -436,13 +444,25 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
             setSelected(item.id);
             rememberTestSelection(selectionScope, item.id, runId);
           }}>
-          <strong>{getDeviceDisplayName(item, run.graphTools)}</strong><TestStatus status={item.status} />
+          <strong>{getDeviceDisplayName(item, run.graphTools)}</strong><TestStatus status={getDeviceTestStatus(item)} />
         </button>)}</div>
         {!shown.length && <p className="test-muted">No matching device.</p>}
       </aside>
       <section className="test-device-content" aria-label="Device test results">
         {device ? <>
-          <div className="test-device-heading"><div><h3>{displayDeviceName}</h3>{displayDeviceName !== device.name && <small>Source: {device.name}</small>}</div><TestStatus status={device.status} /></div>
+          <div className="test-device-heading"><div><h3>{displayDeviceName}</h3>{displayDeviceName !== device.name && <small>Source: {device.name}</small>}</div><TestStatus status={getDeviceTestStatus(device)} /></div>
+          <section className="test-device-result" aria-label="Device test result">
+            <div className="test-device-result-control"><label htmlFor={resultId}>Test result</label>
+            <select id={resultId} value={hasManualTestStatus(device) ? device.manualStatus : ""}
+              disabled={!onManualStatusChange || commentsDisabled || graphEditorDirty}
+              onChange={event => onManualStatusChange?.(device.id, event.target.value || null)}>
+              <option value="">Use recorded result ({device.status || "Not tested"})</option>
+              <option value="Passed">Passed</option><option value="Failed">Failed</option>
+            </select></div>
+            <p>{hasManualTestStatus(device) ? "Manual assessment" : "Recorded PRONETA result"}: <strong>{getDeviceTestStatus(device)}</strong>.
+              {hasManualTestStatus(device) && <> Recorded PRONETA result: <strong>{device.status || "Not tested"}</strong>.</>}
+              {onManualStatusChange && <> Save your selection with <strong>Save test run</strong>.</>}</p>
+          </section>
           <details className="test-device-name-tools"><summary>{onGraphToolsChange ? "Rename device" : "Device display name"}</summary>
             <DisplayNameEditor kind="device" sourceName={device.name} value={run.graphTools?.deviceNames?.find(item => item.deviceId === device.id)?.name}
               scope={graphEditorScope} canEdit={Boolean(onGraphToolsChange)} disabled={commentsDisabled}
@@ -463,7 +483,7 @@ export function TestRunDetail({ run, runId = run.id, onCommentChange, commentsDi
               <div className="test-channel-heading"><div><h4>{channel.symbolicName}</h4>
                 <p>{station?.name || channel.stationId} · Slot {channel.slot} · Channel {channel.channel}
                   {channel.sourceChannel !== channel.channel && ` (CSV channel ${channel.sourceChannel})`} · {channel.role}</p>
-                {module?.name && <small>{module.name}</small>}</div><TestStatus status={channel.status} /></div>
+                {module?.name && <small>{module.name}</small>}</div><span className="test-channel-result"><small>Recorded channel result</small><TestStatus status={channel.status} /></span></div>
               <p className="test-source-result">Recorded wiring status: <strong>{channel.rawStatus || "Not recorded"}</strong>{channel.comment ? ` · ${channel.comment}` : ""}</p>
               {!group.entries.length && <p className="test-muted">No signal changes were recorded for this channel in the supplied logs.</p>}
               {group.entries.map(({ key, series, seriesIndex }) =>
@@ -533,6 +553,7 @@ function ScopedTestReportsPanel({
     return { ...cached, walkdownId: project.walkdownId, recovered: true,
       timeZone: cached.timeZone?.trim() ? cached.timeZone : UNKNOWN_TIME_ZONE,
       graphTools: cached.graphTools ?? run?.graphTools,
+      manualStatuses: cached.manualStatuses ?? manualStatusesFrom(run),
       eventEdits: cached.eventEdits || [], eventReplayError,
       reselectSources: cached.requiresFiles ? cached.sources : null,
       data };
@@ -598,6 +619,7 @@ function ScopedTestReportsPanel({
         : getLocalTimeZone() || UNKNOWN_TIME_ZONE,
       comment: run?.comment || "",
       graphTools: run?.graphTools === undefined ? undefined : structuredClone(run.graphTools),
+      manualStatuses: manualStatusesFrom(run),
       deviceComments: Object.fromEntries((run?.devices || []).map(device => [device.id, device.comment || ""])),
       deviceNames: Object.fromEntries((run?.devices || []).map(device => [device.id, device.name])),
       sources: (run?.sources || []).map(({ name, sha256 }) => ({ name, sha256 })),
@@ -635,6 +657,18 @@ function ScopedTestReportsPanel({
         : { ...next, deviceComments: { ...next.deviceComments, [deviceId]: value } };
     });
   }
+  function changeManualStatus(deviceId, status) {
+    if (readOnly || checkerRequired || project.status !== "draft" || stale || blocked || setupDirty || graphEditorDirty || busyRef.current
+      || (!draft && (!selectedRun || !canEdit(selectedRun))) || (status !== null && !isManualTestStatus(status))) return;
+    const previous = draftRef.current;
+    const device = (previous?.data || selectedRun)?.devices?.find(item => item.id === deviceId);
+    if (!device) return;
+    const current = Object.hasOwn(previous?.manualStatuses || {}, deviceId) ? previous.manualStatuses[deviceId] : device.manualStatus ?? null;
+    if (current === status) return;
+    const next = previous || draftFrom(selectedRun);
+    updateDraft({ ...next, manualStatuses: { ...next.manualStatuses, [deviceId]: status } });
+    setConfirmDelete(null); setError("");
+  }
   function changeEventExclusion(deviceId, channelId, seriesIndex, pointIndex, excluded) {
     if (readOnly || stale || blocked || setupDirty || busyRef.current || (!draft && (!selectedRun || !canEdit(selectedRun)))) return;
     try {
@@ -671,12 +705,14 @@ function ScopedTestReportsPanel({
         timeZone: draft.timeZone, stationAssignments,
       });
       if (draft.reselectSources?.length) {
-        const hashes = sources => sources.map(source => source.sha256).sort().join(",");
-        if (hashes(parsed.sources) !== hashes(draft.reselectSources))
+        if (sourceHashes(parsed.sources) !== sourceHashes(draft.reselectSources))
           throw new Error("These files do not match the recovered import. Reselect the original files to keep these comments with their test evidence.");
       }
       const data = applyTestEventEdits(parsed, draft.eventEdits || []);
       if (run === parseRef.current) updateDraft(previous => previous && ({ ...previous, data, reselectSources: null, eventReplayError: "",
+        manualStatuses: sourceHashes(previous.sources) === sourceHashes(parsed.sources) ? previous.manualStatuses : {},
+        manualStatusesReset: previous.manualStatusesReset || (sourceHashes(previous.sources) !== sourceHashes(parsed.sources)
+          && Object.values(previous.manualStatuses || {}).some(isManualTestStatus)),
         sources: parsed.sources.map(({ name, sha256 }) => ({ name, sha256 })),
         deviceNames: { ...previous.deviceNames, ...Object.fromEntries(parsed.devices.map(device => [device.id, device.name])) } }));
     } catch (e) {
@@ -724,8 +760,15 @@ function ScopedTestReportsPanel({
   const preview = draft ? (draft.data ? { ...draft.data, name: draft.name, software: draft.software,
     comment: draft.comment,
     ...(draft.graphTools === undefined ? {} : { graphTools: draft.graphTools }),
-    devices: draft.data.devices.map(device => ({ ...device,
-      comment: Object.hasOwn(draft.deviceComments, device.id) ? draft.deviceComments[device.id] : device.comment ?? "" })),
+    devices: draft.data.devices.map(device => {
+      const next = { ...device,
+        comment: Object.hasOwn(draft.deviceComments, device.id) ? draft.deviceComments[device.id] : device.comment ?? "" };
+      if (Object.hasOwn(draft.manualStatuses || {}, device.id)) {
+        if (draft.manualStatuses[device.id] === null) delete next.manualStatus;
+        else next.manualStatus = draft.manualStatuses[device.id];
+      }
+      return next;
+    }),
     clock: { ...draft.data.clock, timeZone: draft.timeZone } } : null) : selectedRun;
   const canComment = draft ? !readOnly && !stale : selectedRun && canEdit(selectedRun);
   const rangeScope = testTimeRangeScope(storageScope, inspector?.id, draft?.walkdownId || project.walkdownId, draft?.revision || project.revision);
@@ -745,7 +788,8 @@ function ScopedTestReportsPanel({
     {graphEditorDirty && <p className="test-graph-editor-notice" role="status">Apply or cancel the open graph name or calculation editor before saving or switching devices. Keep this tab open until the editor is applied; applied changes are saved with Save test run.</p>}
     {draft && <section className="card test-import-form" aria-label="Import test run">
       <h3>{draft.runVersion ? "Edit test run" : "Import a test run"}</h3>
-      {draft.recovered && <p role="status">Recovered pending {draft.eventEdits?.length ? "comments and event edits" : "comments"} for {draft.name || "this test run"}, revision {revisionNumber(project, draft.revision)}. They remain unsaved until Save test run.</p>}
+      {draft.recovered && <p role="status">Recovered pending {draft.eventEdits?.length ? "comments and event edits" : "comments"}{Object.keys(draft.manualStatuses || {}).length > 0 && " and device results"} for {draft.name || "this test run"}, revision {revisionNumber(project, draft.revision)}. They remain unsaved until Save test run.</p>}
+      {draft.manualStatusesReset && <p role="status">Manual device results were cleared because the source files changed. Review the new readings and select the results again.</p>}
       {draft.eventReplayError && <p className="field-error" role="alert">{draft.eventReplayError}</p>}
       {(readOnly || stale) && <p className="field-error" role="alert">{checkerRequired && !stale
         ? "Save Checked by to resume this test run. Your pending changes are retained and will be available after the name is saved."
@@ -793,6 +837,12 @@ function ScopedTestReportsPanel({
       {Object.entries(draft.deviceComments).map(([id, comment]) => <TestComment key={id}
         title={`Device comment for ${draft.deviceNames[id] || id}`} value={comment} disabled={blocked}
         onChange={canComment ? value => changeComment(id, value) : undefined} />)}
+      {Object.keys(draft.manualStatuses || {}).length > 0 && <section className="test-recovered-results" aria-label="Recovered device test results">
+        <h4>Pending device results</h4>
+        <ul>{Object.entries(draft.manualStatuses).map(([id, status]) => <li key={id}>
+          {draft.deviceNames[id] || id}: {status === null ? "Use recorded result" : `${status} (manual)`}
+        </li>)}</ul>
+      </section>}
     </section>}
     {!draft && runs.length > 0 && <div className="test-run-toolbar">
       <label>Saved test run<select disabled={blocked || setupDirty || graphEditorDirty} value={selectedRun?.id || ""} onChange={event => {
@@ -815,6 +865,7 @@ function ScopedTestReportsPanel({
       onRemovePhoto={onRemoveSetupPhoto} onReorderPhotos={onReorderSetupPhotos} onDirtyChange={setSetupDirty} />}
     {preview && <section className="card test-preview"><header><h2>{preview.name}</h2><span>{draft ? "Unsaved preview" : `Revision ${revisionNumber(project)}`}</span></header>
       <TestRunDetail key={preview.id || draft?.id} run={preview} onCommentChange={canComment ? changeComment : undefined}
+        onManualStatusChange={canComment && !checkerRequired && project.status === "draft" ? changeManualStatus : undefined}
         onEventExclusionChange={canComment ? changeEventExclusion : undefined}
         onGraphToolsChange={canComment ? changeGraphTools : undefined} graphEditorDirty={graphEditorDirty}
         graphEditorScope={graphEditorScope} onGraphEditorDirty={changeGraphEditorDirty}

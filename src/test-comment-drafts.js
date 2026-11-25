@@ -1,5 +1,6 @@
 import { validTestEventEdits } from "./test-event-edits.js";
 import { validGraphTools } from "./test-graph-tools.js";
+import { validManualStatuses } from "./test-device-results.js";
 
 const PREFIX = "jeevy-qa-test-comments:v1:";
 const MAX_RECORD_LENGTH = 2_200_000;
@@ -24,6 +25,8 @@ function valid(record) {
     && text(record.timeZone, 120) && text(record.comment, 4000) && typeof record.requiresFiles === "boolean"
     && (record.eventEdits === undefined || validTestEventEdits(record.eventEdits))
     && (record.graphTools === undefined || validGraphTools(record.graphTools))
+    && (record.manualStatuses === undefined || validManualStatuses(record.manualStatuses))
+    && (record.manualStatusesReset === undefined || typeof record.manualStatusesReset === "boolean")
     && object(record.deviceComments) && Object.keys(record.deviceComments).length <= 250
     && Object.entries(record.deviceComments).every(([id, value]) => id && text(id, 160) && text(value, 4000))
     && object(record.deviceNames) && Object.keys(record.deviceNames).length <= 250
@@ -64,6 +67,8 @@ export function writeTestCommentDraft(scope, draft) {
       sources: draft.sources, requiresFiles: draft.requiresFiles,
       eventEdits: draft.eventEdits === undefined ? [] : draft.eventEdits,
       ...(draft.graphTools === undefined ? {} : { graphTools: draft.graphTools }),
+      ...(draft.manualStatuses === undefined ? {} : { manualStatuses: draft.manualStatuses }),
+      ...(draft.manualStatusesReset === undefined ? {} : { manualStatusesReset: draft.manualStatusesReset }),
     };
     const serialized = JSON.stringify(record);
     if (!valid(record) || serialized.length > MAX_RECORD_LENGTH) throw new Error();

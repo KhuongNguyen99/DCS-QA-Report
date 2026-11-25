@@ -85,6 +85,14 @@
 .test-device-content { min-width: 0; }
 .test-device-heading { justify-content: space-between; margin-bottom: 16px; }
 .test-device-heading h3 { font-size: 19px; }
+.test-device-result { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 20px; margin: 0 0 16px; padding: 12px; border: 1px solid #e0e6d9; border-radius: 7px; background: #f8faf5; }
+.test-device-result-control { display: grid; gap: 6px; min-width: min(100%, 240px); }
+.test-device-result-control > label { font-size: 12px; font-weight: 700; }
+.test-device-result select { max-width: 100%; }
+.test-device-result p { flex: 1; min-width: 180px; margin: 0; color: #65735f; font-size: 12px; line-height: 1.6; }
+.test-channel-result { display: grid; justify-items: end; gap: 5px; text-align: right; }
+.test-channel-result small { max-width: 115px; }
+.test-recovered-results { margin: 16px 0; font-size: 12px; }
 .test-channel { padding: 18px 0; border-top: 1px solid var(--line); }
 .test-channel-heading { justify-content: space-between; align-items: flex-start; flex-wrap: nowrap; }
 .test-channel-heading h4 { margin: 0 0 5px; font-size: 14px; overflow-wrap: anywhere; }

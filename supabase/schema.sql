@@ -1455,6 +1455,10 @@ begin
       or length(device->>'id') not between 1 and 160 or jsonb_typeof(device->'name') is distinct from 'string'
       or length(device->>'name') not between 1 and 160 or coalesce(device->>'status','') not in ('Passed','Failed','Not tested')
       or jsonb_typeof(device->'channels') is distinct from 'array' then raise exception 'The device test result is invalid.'; end if;
+    if device ? 'manualStatus' and (jsonb_typeof(device->'manualStatus') is distinct from 'string'
+      or coalesce(device->>'manualStatus','') not in ('Passed','Failed')) then
+      raise exception 'A manual device result must be Passed or Failed. Remove the manual result to use the recorded result.';
+    end if;
     if device ? 'comment' and (jsonb_typeof(device->'comment') is distinct from 'string' or length(device->>'comment') > 4000) then
       raise exception 'Keep test run and device comments to text of at most 4,000 characters.';
     end if;

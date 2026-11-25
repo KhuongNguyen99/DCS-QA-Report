@@ -65,3 +65,41 @@ test("a malformed graph edit cannot replace a recoverable draft or be discarded 
   assert.match(result.error, /could not be read/);
   assert.equal(rows.get(key), malformed, "unreadable local work remains stored for recovery");
 });
+
+test("manual device results and pending resets survive draft storage alongside original comments and graph tools", t => {
+  cache(t);
+  const draft = { ...base(), graphTools: tools(), manualStatuses: { valve: "Passed", other: "Failed", reset: null },
+    manualStatusesReset: true };
+  assert.equal(writeTestCommentDraft(scope, draft), "");
+  const result = readTestCommentDrafts(scope);
+  assert.equal(result.error, "");
+  assert.deepEqual(result.drafts[0].manualStatuses, draft.manualStatuses);
+  assert.equal(result.drafts[0].manualStatusesReset, true);
+  assert.equal(result.drafts[0].comment, draft.comment);
+  assert.deepEqual(result.drafts[0].graphTools, draft.graphTools);
+  assert.deepEqual(result.drafts[0].sources, draft.sources);
+  assert.equal(result.drafts[0].data, undefined, "the cache does not duplicate imported measurement data");
+  assert.equal(readTestCommentDrafts(testCommentDraftScope("https://example.supabase.co", "another-inspector", "skid-a")).drafts.length, 0);
+});
+
+test("legacy drafts omit manual result fields and malformed manual edits cannot replace recoverable work", t => {
+  const rows = cache(t), draft = base();
+  assert.equal(writeTestCommentDraft(scope, draft), "");
+  const legacy = readTestCommentDrafts(scope).drafts[0];
+  assert.equal(Object.hasOwn(legacy, "manualStatuses"), false);
+  assert.equal(Object.hasOwn(legacy, "manualStatusesReset"), false);
+  const key = testCommentDraftKey(scope, draft), original = rows.get(key);
+  for (const invalid of [{ manualStatuses: null }, { manualStatuses: ["Passed"] },
+    { manualStatuses: { valve: "Not tested" } }, { manualStatuses: { valve: false } },
+    { manualStatuses: { "": "Passed" } }, { manualStatusesReset: "yes" }]) {
+    assert.match(writeTestCommentDraft(scope, { ...draft, ...invalid }), /could not be cached/);
+    assert.equal(rows.get(key), original);
+    const malformed = JSON.stringify({ ...legacy, ...invalid });
+    rows.set(key, malformed);
+    const result = readTestCommentDrafts(scope);
+    assert.deepEqual(result.drafts, []);
+    assert.match(result.error, /could not be read/);
+    assert.equal(rows.get(key), malformed);
+    rows.set(key, original);
+  }
+});

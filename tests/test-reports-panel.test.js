@@ -229,6 +229,149 @@ test("multi-file preview leaves the software version blank and shows separate si
   assert.match(h.text(), /Reviewed run/);
 });
 
+test("manual device results update counts and search while preserving imported channel evidence", async t => {
+  const run = savedRun();
+  run.devices[0].status = 'Not tested'; run.devices[0].comment = '';
+  const other = structuredClone(run.devices[0]); other.id = 'other-device'; other.name = 'OTHER'; other.status = 'Failed';
+  other.channels[0].status = 'Failed'; other.channels[0].rawStatus = 'ERROR';
+  run.devices.push(other);
+  const before = structuredClone(run), h = await setup(t, { runs: [run] });
+  assert.equal(h.field('Test result').value, '');
+  assert.match(h.query('.test-device-result').textContent, /Use recorded result \(Not tested\)/);
+  await h.select(h.field('Test result'), 'Passed');
+  assert.match(h.query('.test-device-result p').textContent, /Manual assessment: Passed.*Recorded PRONETA result: Not tested/);
+  assert.match(h.query('.test-run-facts').textContent, /1 passed · 1 failed · 0 not tested/);
+  assert.equal(h.query('.test-device-list button .test-status').textContent, 'Passed');
+  await h.fill(h.query('.test-search input'), 'Failed');
+  assert.equal(h.document.querySelectorAll('.test-device-list button').length, 1);
+  assert.equal(h.query('.test-device-heading h3').textContent, 'OTHER');
+  await h.select(h.field('Test result'), 'Passed');
+  assert.match(h.text(), /No matching device/);
+  await h.fill(h.query('.test-search input'), 'Passed');
+  assert.equal(h.document.querySelectorAll('.test-device-list button').length, 2);
+  await h.fill(h.query('.test-search input'), '');
+  assert.match(h.query('.test-run-facts').textContent, /2 passed · 0 failed · 0 not tested/);
+  await h.click(h.document.querySelectorAll('.test-device-list button')[1]);
+  assert.equal(h.query('.test-channel-result .test-status').textContent, 'Failed', 'the original channel failure remains visible');
+  assert.match(h.query('.test-source-result').textContent, /ERROR/);
+  await h.select(h.field('Test result'), 'Failed');
+  assert.equal(h.window.calls.length, 0);
+  await h.click(h.button('Save test run'));
+  const payload = structuredClone(h.window.calls[0].payload);
+  assert.equal(payload.devices[0].manualStatus, 'Passed');
+  assert.equal(payload.devices[1].manualStatus, 'Failed');
+  assert.deepEqual(payload.devices.map(({ manualStatus, ...device }) => device), before.devices);
+  assert.deepEqual(payload.sources, before.sources);
+  assert.deepEqual(run, before);
+  await h.settle();
+  assert.equal(h.window.dirty.at(-1), false);
+  await h.select(h.field('Test result'), '');
+  assert.equal(h.field('Test result').value, '');
+  assert.match(h.query('.test-device-result p').textContent, /Recorded PRONETA result: Failed/);
+  await h.click(h.button('Save test run'));
+  assert.equal(Object.hasOwn(h.window.calls[1].payload.devices[1], 'manualStatus'), false);
+  assert.equal(h.window.calls[1].payload.devices[1].status, 'Failed');
+  assert.equal(h.window.calls[1].payload.devices[0].manualStatus, 'Passed');
+  await h.settle();
+});
+
+test("pending manual results and explicit resets recover without replacing comments or legacy assessments", async t => {
+  const run = savedRun(); run.devices[0].manualStatus = 'Failed';
+  const h = await setup(t, { runs: [run] });
+  await h.select(h.field('Test result'), '');
+  await h.fill(h.query('[aria-label="Overall test run comment"] textarea'), 'Keep the reviewed note');
+  const stored = h.stored(), key = Object.keys(stored)[0], record = JSON.parse(stored[key]);
+  assert.deepEqual(record.manualStatuses, { valve: null });
+  await h.unmount();
+  const recovered = await setup(t, { runs: [run] }, { stored });
+  assert.equal(recovered.field('Test result').value, '');
+  assert.match(recovered.query('.test-run-facts').textContent, /1 passed · 0 failed/);
+  assert.equal(recovered.query('[aria-label="Overall test run comment"] textarea').value, 'Keep the reviewed note');
+  await recovered.click(recovered.button('Save test run'));
+  assert.equal(Object.hasOwn(recovered.window.calls[0].payload.devices[0], 'manualStatus'), false);
+  assert.equal(recovered.window.calls[0].payload.devices[0].status, 'Passed');
+  await recovered.settle();
+  await recovered.select(recovered.field('Test result'), 'Failed');
+  const pending = recovered.stored();
+  const savedReset = structuredClone(run); savedReset.runVersion = 8; delete savedReset.devices[0].manualStatus;
+  const again = await setup(t, { runs: [savedReset] }, { stored: pending });
+  assert.equal(again.field('Test result').value, 'Failed');
+  await again.click(again.button('Save test run'));
+  assert.equal(again.window.calls[0].payload.devices[0].manualStatus, 'Failed');
+  await again.settle();
+  delete record.manualStatuses;
+  const legacy = await setup(t, { runs: [run] }, { stored: { [key]: JSON.stringify(record) } });
+  assert.equal(legacy.field('Test result').value, 'Failed', 'an older comment cache cannot clear an existing manual assessment');
+  await legacy.click(legacy.button('Save test run'));
+  assert.equal(legacy.window.calls[0].payload.devices[0].manualStatus, 'Failed');
+  await legacy.settle();
+});
+
+test("manual results survive identical source recovery and clear when the source evidence changes", async t => {
+  const original = parsedRun(), run = savedRun(); run.devices[0].manualStatus = 'Failed';
+  run.devices[0].comment = 'Sensor value reviewed';
+  const h = await setup(t, { runs: [run] });
+  await h.click(h.button('Edit run'));
+  await h.choose(); await h.finishParse(original);
+  assert.equal(h.field('Test result').value, 'Failed');
+  const sameFilesCache = h.stored();
+  const recovered = await setup(t, { runs: [run] }, { stored: sameFilesCache });
+  assert.equal(recovered.query('[aria-label="Recovered device test results"] li').textContent.trim(), 'VALVE-EXAMPLE: Failed (manual)');
+  await recovered.choose(); await recovered.finishParse(original);
+  assert.equal(recovered.field('Test result').value, 'Failed');
+  const replacement = structuredClone(original);
+  replacement.sources[0].sha256 = 'cd'.repeat(32);
+  replacement.devices[0].channels[0].series[0].points[0].value = 0;
+  await recovered.choose(); await recovered.finishParse(replacement);
+  assert.equal(recovered.field('Test result').value, '');
+  assert.match(recovered.text(), /Manual device results were cleared because the source files changed/);
+  assert.equal(recovered.query('[aria-label="Device comment for VALVE-EXAMPLE"] textarea').value, 'Sensor value reviewed');
+  await recovered.click(recovered.button('Save test run'));
+  assert.equal(Object.hasOwn(recovered.window.calls[0].payload.devices[0], 'manualStatus'), false);
+  assert.equal(recovered.window.calls[0].payload.devices[0].status, 'Passed');
+  assert.equal(recovered.window.calls[0].payload.sources[0].sha256, replacement.sources[0].sha256);
+  assert.equal(recovered.window.calls[0].payload.devices[0].channels[0].series[0].points[0].value, 0);
+  await recovered.settle();
+});
+
+test("manual result controls enforce ownership, checker, pending, graph editor and revision restrictions", async t => {
+  const run = savedRun();
+  for (const props of [
+    { inspector: { id: 'another-inspector', isAdmin: false } }, { readOnly: true }, { checkerRequired: true },
+    { pending: true }, { project: { ...project, status: 'closed' } },
+  ]) {
+    const h = await setup(t, { runs: [run], ...props });
+    assert.equal(h.field('Test result').disabled, true);
+    await h.select(h.field('Test result'), 'Failed');
+    assert.equal(h.query('.test-import-form'), null);
+    assert.deepEqual(h.stored(), {});
+    assert.equal(h.window.calls.length, 0);
+  }
+  const admin = await setup(t, { runs: [run], inspector: { id: 'another-inspector', isAdmin: true } });
+  assert.equal(admin.field('Test result').disabled, false);
+  await admin.click(graphButton(admin, 'Add duration calculation'));
+  assert.equal(admin.field('Test result').disabled, true);
+  await admin.select(admin.field('Test result'), 'Failed');
+  assert.equal(admin.query('.test-import-form'), null);
+  await admin.click(admin.button('Cancel calculation'));
+  await admin.select(admin.field('Test result'), 'Failed');
+  const stored = admin.stored();
+  await admin.configure({ pending: true });
+  assert.equal(admin.field('Test result').disabled, true);
+  await admin.select(admin.field('Test result'), 'Passed');
+  assert.deepEqual(admin.stored(), stored);
+  await admin.configure({ pending: false, project: { ...project, revision: 5 } });
+  assert.equal(admin.field('Test result').disabled, true);
+  assert.equal(admin.button('Save test run').disabled, true);
+  await admin.select(admin.field('Test result'), 'Passed');
+  assert.deepEqual(admin.stored(), stored);
+  assert.equal(admin.window.calls.length, 0);
+  const stale = await setup(t, { runs: [{ ...run, runVersion: 8 }], inspector: { id: 'another-inspector', isAdmin: true } }, { stored });
+  assert.match(stale.query('[aria-label="Recovered device test results"]').textContent, /VALVE-EXAMPLE: Failed \(manual\)/);
+  assert.equal(stale.button('Save test run').disabled, true);
+  assert.deepEqual(stale.stored(), stored);
+});
+
 test("failed save retains the exact local preview and metadata for retry", async t => {
   const h = await setup(t);
   await h.importPreview();

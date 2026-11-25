@@ -409,6 +409,70 @@ test("functional test writes require source/software validity, ordered shared ti
   assert.equal((await h.db.query("select id from public.qa_test_runs")).rows.length, 0);
 });
 
+test("manual device results preserve recorded evidence and obey checker, ownership, version and archive locks", async t => {
+  const h = await database(t), report = await h.rpc("qa_create_walkdown", "Manual assessment skid");
+  const id = crypto.randomUUID(), data = runData();
+  data.devices[0].status = "Failed";
+  data.devices[0].channels[0].status = "Failed";
+  data.devices[0].channels[0].rawStatus = "Error";
+  const passed = structuredClone(data); passed.devices[0].manualStatus = "Passed";
+  const failed = structuredClone(data); failed.devices[0].manualStatus = "Failed";
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, passed, 1, null), /Enter Checked by/);
+  await h.rpc("qa_set_checked_by", report.id, "Manual checker", 1, null);
+  const legacy = await h.rpc("qa_save_test_run", report.id, id, data, 1, null);
+  assert.equal(Object.hasOwn(legacy.devices[0], "manualStatus"), false);
+  await h.user(second);
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, passed, 1, legacy.runVersion), /Only the importing inspector/);
+  await h.user(outsider);
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, passed, 1, legacy.runVersion), /approved project inspector/);
+  await h.user();
+  const manualPassed = await h.rpc("qa_save_test_run", report.id, id, passed, 1, legacy.runVersion);
+  assert.equal(manualPassed.devices[0].manualStatus, "Passed");
+  assert.equal(manualPassed.devices[0].status, "Failed");
+  assert.equal(manualPassed.runVersion, legacy.runVersion + 1);
+  assert.equal(manualPassed.updatedBy, admin);
+  assert.deepEqual(manualPassed.devices[0].channels, data.devices[0].channels);
+  assert.deepEqual(manualPassed.sources, data.sources);
+  const manualFailed = await h.rpc("qa_save_test_run", report.id, id, failed, 1, manualPassed.runVersion);
+  assert.equal(manualFailed.devices[0].manualStatus, "Failed");
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, passed, 1, manualPassed.runVersion), /changed since you opened/);
+  const current = await h.state(report.id);
+  assert.deepEqual(await h.rpc("qa_save_test_run", report.id, id, failed, 1, legacy.runVersion), manualFailed,
+    "an identical retry remains idempotent");
+  assert.equal((await h.state(report.id)).project.contentVersion, current.project.contentVersion);
+  await h.rpc("qa_approve_revision", report.id, 1, current.project.contentVersion);
+  const archive = await h.rpc("qa_load_revision", report.id, 1);
+  assert.equal(archive.testRuns[0].devices[0].manualStatus, "Failed");
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, passed, 1, manualFailed.runVersion), /approved and closed/);
+  await h.db.exec("reset role");
+  await h.db.exec(migration);
+  await h.db.exec(schema);
+  await h.user();
+  assert.deepEqual(await h.rpc("qa_load_revision", report.id, 1), archive);
+  await h.rpc("qa_new_revision", report.id, 1);
+  await assert.rejects(h.rpc("qa_save_test_run", report.id, id, data, 2, manualFailed.runVersion), /Enter Checked by/);
+  await h.rpc("qa_set_checked_by", report.id, "Next checker", 2, null);
+  const cleared = await h.rpc("qa_save_test_run", report.id, id, data, 2, manualFailed.runVersion);
+  assert.equal(Object.hasOwn(cleared.devices[0], "manualStatus"), false);
+  assert.deepEqual(cleared.devices, data.devices, "reset removes the authored result without replacing any source evidence");
+  assert.equal(cleared.runVersion, manualFailed.runVersion + 1);
+  assert.deepEqual(await h.rpc("qa_load_revision", report.id, 1), archive);
+});
+
+test("malformed manual results cannot change persisted evidence or report review tokens", async t => {
+  const h = await database(t), report = await h.rpc("qa_create_walkdown", "Manual result validation");
+  await h.rpc("qa_set_checked_by", report.id, "Manual checker", 1, null);
+  const id = crypto.randomUUID(), data = runData();
+  const saved = await h.rpc("qa_save_test_run", report.id, id, data, 1, null);
+  const before = await h.state(report.id);
+  for (const manualStatus of [null, "", "Not tested", "passed", "Failed ", "Passed\n", true, 1, [], {}, { status: "Passed" }]) {
+    const invalid = structuredClone(data); invalid.devices[0].manualStatus = manualStatus;
+    await assert.rejects(h.rpc("qa_save_test_run", report.id, id, invalid, 1, saved.runVersion), /manual device result.*Passed or Failed/);
+  }
+  assert.deepEqual(await h.state(report.id), before);
+  await assert.rejects(h.db.query("select qa_private.validate_test_run($1::jsonb)", [JSON.stringify(data)]), /permission denied/);
+});
+
 test("authored comments belong to one test run and remain frozen after approval and later clearing", async (t) => {
   const h = await database(t);
   const report = await h.rpc("qa_create_walkdown", "Authored test comments skid");
